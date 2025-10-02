@@ -1,0 +1,734 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  PlayIcon, 
+  StopIcon, 
+  CheckCircleIcon,
+  XCircleIcon,
+  ExclamationTriangleIcon,
+  LockClosedIcon,
+  LockOpenIcon,
+  ClockIcon,
+  CalendarDaysIcon,
+  UserGroupIcon,
+  MapPinIcon,
+  AcademicCapIcon,
+  SunIcon,
+  MoonIcon
+} from '@heroicons/react/24/outline';
+import axios from 'axios';
+import toast from 'react-hot-toast';
+
+function Sessions() {
+  const [sessions, setSessions] = useState([]);
+  const [allSchedules, setAllSchedules] = useState([]);
+  const [todaysSchedule, setTodaysSchedule] = useState([]);
+  const [instructors, setInstructors] = useState([]);
+  const [rooms, setRooms] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [upcomingClasses, setUpcomingClasses] = useState([]);
+  const [currentOngoingClass, setCurrentOngoingClass] = useState(null);
+  const [selectedDay, setSelectedDay] = useState('');
+  const [selectedRoomFilter, setSelectedRoomFilter] = useState('');
+
+  useEffect(() => {
+    fetchData();
+    // Set up real-time updates
+    const interval = setInterval(fetchData, 30000); // Update every 30 seconds
+    // Update current time every second
+    const timeInterval = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(timeInterval);
+    };
+  }, []);
+
+  const fetchData = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const headers = { Authorization: `Bearer ${token}` };
+
+      // Use the same unified data endpoint as the management page
+      const unifiedResponse = await axios.get('http://localhost:5000/api/unified/data', { headers });
+      const unifiedData = unifiedResponse.data;
+      
+      console.log('Unified data response:', unifiedData);
+
+      // Extract data from unified response
+      const allSchedulesData = unifiedData.schedules?.data || [];
+      console.log('All schedules data:', allSchedulesData);
+      console.log('Sample schedule data:', allSchedulesData[0]);
+      console.log('Sample schedule keys:', allSchedulesData[0] ? Object.keys(allSchedulesData[0]) : 'No data');
+      setAllSchedules(allSchedulesData);
+
+      // Filter today's schedules
+      const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+      const todaysSchedules = allSchedulesData.filter(schedule => schedule.DAYOFWEEK === currentDay);
+      setTodaysSchedule(todaysSchedules);
+
+      // Get instructors and rooms from unified data
+      const instructorsData = unifiedData.subjects?.data || [];
+      const roomsData = unifiedData.rooms?.data || [];
+      
+      // Extract unique instructors
+      const uniqueInstructors = [...new Map(instructorsData.map(item => [item.INSTRUCTORID, {
+        USERID: item.INSTRUCTORID,
+        FIRSTNAME: item.instructor_name?.split(' ')[0] || '',
+        LASTNAME: item.instructor_name?.split(' ').slice(1).join(' ') || '',
+        EMPLOYEEID: item.INSTRUCTORID
+      }])).values()];
+      setInstructors(uniqueInstructors);
+
+      // Extract unique rooms
+      const uniqueRooms = roomsData.map(room => ({
+        ROOMID: room.ROOMID,
+        ROOMNUMBER: room.ROOMNUMBER,
+        ROOMNAME: room.ROOMNAME,
+        BUILDING: room.BUILDING,
+        DOORSTATUS: 'locked'
+      }));
+      setRooms(uniqueRooms);
+
+      // Create virtual active sessions based on today's schedule
+      const now = new Date();
+      const currentTimeStr = now.toTimeString().slice(0, 8); // HH:MM:SS format
+      const currentDate = now.toISOString().split('T')[0]; // YYYY-MM-DD format
+      
+      const virtualSessions = todaysSchedules
+        .filter(schedule => {
+          const startTime = schedule.STARTTIME;
+          const endTime = schedule.ENDTIME;
+          return currentTimeStr >= startTime && currentTimeStr <= endTime;
+        })
+        .map(schedule => ({
+          id: schedule.SCHEDULEID,
+          session_date: currentDate,
+          start_time: `${currentDate}T${schedule.STARTTIME}`,
+          end_time: null,
+          status: 'active',
+          door_unlocked_at: `${currentDate}T${schedule.STARTTIME}`,
+          door_locked_at: null,
+          instructor_name: schedule.instructor_name,
+          course_code: schedule.SUBJECTCODE,
+          course_name: schedule.SUBJECTNAME,
+          room_number: schedule.ROOMNUMBER,
+          room_name: schedule.ROOMNAME,
+          attendance_count: 0
+        }));
+      
+      console.log('Virtual active sessions:', virtualSessions);
+      setSessions(virtualSessions);
+
+    } catch (error) {
+      console.error('Error fetching data:', error);
+      console.error('Error response:', error.response?.data);
+      console.error('Error status:', error.response?.status);
+      toast.error(`Failed to load session data: ${error.response?.data?.message || error.message}`);
+      
+      // Fallback to mock data if API fails
+      const mockInstructors = [
+        { USERID: '1', FIRSTNAME: 'John', LASTNAME: 'Smith', EMPLOYEEID: 'EMP001' },
+        { USERID: '2', FIRSTNAME: 'Jane', LASTNAME: 'Doe', EMPLOYEEID: 'EMP002' },
+        { USERID: '3', FIRSTNAME: 'Bob', LASTNAME: 'Johnson', EMPLOYEEID: 'EMP003' }
+      ];
+
+      const mockRooms = [
+        { ROOMID: '1', ROOMNUMBER: 'A101', ROOMNAME: 'Computer Lab 1', BUILDING: 'Main Building', DOORSTATUS: 'locked' },
+        { ROOMID: '2', ROOMNUMBER: 'B201', ROOMNAME: 'Mathematics Room', BUILDING: 'Academic Building', DOORSTATUS: 'locked' },
+        { ROOMID: '3', ROOMNUMBER: 'C301', ROOMNAME: 'English Classroom', BUILDING: 'Liberal Arts Building', DOORSTATUS: 'locked' }
+      ];
+
+      const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+      const mockTodaysSchedule = [
+        {
+          SCHEDULEID: '1',
+          SUBJECTID: '1',
+          SUBJECTCODE: 'CS101',
+          SUBJECTNAME: 'Introduction to Computer Science',
+          INSTRUCTORID: '1',
+          instructor_name: 'John Smith',
+          ROOMID: '1',
+          ROOMNUMBER: 'A101',
+          ROOMNAME: 'Computer Lab 1',
+          DAYOFWEEK: currentDay,
+          STARTTIME: '08:00:00',
+          ENDTIME: '10:00:00',
+          ACADEMICYEAR: '2024-2025',
+          SEMESTER: 'First Semester'
+        }
+      ];
+
+      setInstructors(mockInstructors);
+      setRooms(mockRooms);
+      setTodaysSchedule(mockTodaysSchedule);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Analyze current and upcoming classes
+  useEffect(() => {
+    if (todaysSchedule.length > 0) {
+      const now = new Date();
+      const currentTimeStr = now.toTimeString().slice(0, 8); // HH:MM:SS format
+      
+      console.log('Current time string:', currentTimeStr);
+      console.log('Today\'s schedules:', todaysSchedule);
+      
+      // Find current ongoing class
+      const ongoing = todaysSchedule.find(schedule => {
+        const startTime = schedule.STARTTIME;
+        const endTime = schedule.ENDTIME;
+        const isOngoing = currentTimeStr >= startTime && currentTimeStr <= endTime;
+        console.log(`Checking schedule ${schedule?.subject_code || 'Unknown'}: ${startTime}-${endTime}, isOngoing: ${isOngoing}`);
+        console.log('Schedule object:', schedule);
+        return isOngoing;
+      });
+      
+      console.log('Current ongoing class:', ongoing);
+      setCurrentOngoingClass(ongoing || null);
+      
+      // Find upcoming classes (next 3 classes after current time)
+      const upcoming = todaysSchedule
+        .filter(schedule => schedule.STARTTIME > currentTimeStr)
+        .sort((a, b) => a.STARTTIME.localeCompare(b.STARTTIME))
+        .slice(0, 3);
+      
+      console.log('Upcoming classes:', upcoming);
+      setUpcomingClasses(upcoming);
+    }
+  }, [todaysSchedule, currentTime]);
+
+
+  const formatTime = (timeString) => {
+    if (!timeString) return '';
+    const date = new Date(timeString);
+    return date.toLocaleTimeString('en-US', { 
+      hour: '2-digit', 
+      minute: '2-digit',
+      hour12: true 
+    });
+  };
+
+  const formatScheduleTime = (time) => {
+    if (!time) return '';
+    const [hours, minutes] = time.split(':');
+    const hour = parseInt(hours);
+    const ampm = hour >= 12 ? 'PM' : 'AM';
+    const displayHour = hour % 12 || 12;
+    return `${displayHour}:${minutes} ${ampm}`;
+  };
+
+  const formatCurrentTime = () => {
+    return currentTime.toLocaleTimeString('en-US', { 
+      hour: '2-digit', 
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true 
+    });
+  };
+
+  const formatCurrentDate = () => {
+    return currentTime.toLocaleDateString('en-US', { 
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+  };
+
+  const getClassStatus = (schedule) => {
+    const now = new Date();
+    const currentTimeStr = now.toTimeString().slice(0, 8);
+    const startTime = schedule.STARTTIME;
+    const endTime = schedule.ENDTIME;
+    
+    if (currentTimeStr >= startTime && currentTimeStr <= endTime) {
+      return { status: 'ongoing', color: 'text-green-600', bgColor: 'bg-green-100' };
+    } else if (currentTimeStr < startTime) {
+      return { status: 'upcoming', color: 'text-blue-600', bgColor: 'bg-blue-100' };
+    } else {
+      return { status: 'ended', color: 'text-gray-600', bgColor: 'bg-gray-100' };
+    }
+  };
+
+  const getTimeUntilClass = (schedule) => {
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    const classStart = new Date(`${today}T${schedule.STARTTIME}`);
+    const diffMs = classStart.getTime() - now.getTime();
+    
+    if (diffMs <= 0) return null;
+    
+    const hours = Math.floor(diffMs / (1000 * 60 * 60));
+    const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    } else {
+      return `${minutes}m`;
+    }
+  };
+
+  const getSessionDuration = (startTime, endTime) => {
+    if (!startTime) return '';
+    const start = new Date(startTime);
+    const end = endTime ? new Date(endTime) : new Date();
+    
+    // Check if start time is valid and not too far in the past
+    const now = new Date();
+    const maxReasonableDuration = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+    
+    if (start.getTime() < now.getTime() - maxReasonableDuration) {
+      return 'Invalid start time';
+    }
+    
+    const duration = Math.floor((end - start) / (1000 * 60)); // minutes
+    const hours = Math.floor(duration / 60);
+    const mins = duration % 60;
+    
+    // Cap duration display at 24 hours
+    if (hours > 24) {
+      return '24h+';
+    }
+    
+    return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+  };
+
+  const groupSchedulesByDay = (schedules) => {
+    const dayOrder = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    const grouped = {};
+    
+    schedules.forEach(schedule => {
+      const day = schedule.DAYOFWEEK;
+      if (!grouped[day]) {
+        grouped[day] = [];
+      }
+      grouped[day].push(schedule);
+    });
+
+    // Sort schedules within each day by start time
+    Object.keys(grouped).forEach(day => {
+      grouped[day].sort((a, b) => a.STARTTIME.localeCompare(b.STARTTIME));
+    });
+
+    // Return as array sorted by day order
+    return dayOrder.map(day => ({
+      day,
+      schedules: grouped[day] || []
+    })).filter(dayGroup => dayGroup.schedules.length > 0);
+  };
+
+  const getUniqueDays = () => {
+    const days = [...new Set(allSchedules.map(schedule => schedule.DAYOFWEEK).filter(day => day))];
+    return ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].filter(day => days.includes(day));
+  };
+
+  const getUniqueRooms = () => {
+    if (!allSchedules || allSchedules.length === 0) {
+      return [];
+    }
+    
+    const rooms = [...new Map(allSchedules.map(schedule => {
+      console.log('Processing schedule for room:', schedule);
+      return [
+        schedule.ROOMID, 
+        { 
+          id: schedule.ROOMID, 
+          number: schedule.room_number || schedule.ROOMNUMBER || 'Unknown', 
+          name: schedule.room_name || schedule.ROOMNAME || 'Unknown Room', 
+          building: schedule.BUILDING || 'Unknown Building' 
+        }
+      ];
+    })).values()];
+    
+    console.log('Unique rooms before sort:', rooms);
+    
+    return rooms.sort((a, b) => {
+      const aNum = a.number || 'Unknown';
+      const bNum = b.number || 'Unknown';
+      return aNum.localeCompare(bNum);
+    });
+  };
+
+  const getFilteredSchedules = () => {
+    let filtered = allSchedules;
+    
+    // Filter by day
+    if (selectedDay) {
+      filtered = filtered.filter(schedule => schedule.DAYOFWEEK === selectedDay);
+    }
+    
+    // Filter by room
+    if (selectedRoomFilter) {
+      filtered = filtered.filter(schedule => schedule.ROOMID === selectedRoomFilter);
+    }
+    
+    return filtered;
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Session Management</h1>
+          <p className="text-gray-600">Monitor and manage class sessions</p>
+        </div>
+      </div>
+
+      {/* Current Time and Date Display */}
+      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-6">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2">
+              <ClockIcon className="h-8 w-8 text-blue-600" />
+              <div>
+                <div className="text-3xl font-bold text-blue-900">{formatCurrentTime()}</div>
+                <div className="text-lg text-blue-700">{formatCurrentDate()}</div>
+              </div>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="flex items-center space-x-2 text-blue-700">
+              <CalendarDaysIcon className="h-6 w-6" />
+              <span className="text-lg font-semibold">
+                {todaysSchedule.length} classes scheduled today
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Current Ongoing Class */}
+      {currentOngoingClass && (
+        <div className="bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-200 rounded-xl p-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-2">
+                <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                  <PlayIcon className="h-6 w-6 text-green-600" />
+                </div>
+                <div>
+                  <div className="text-lg font-bold text-green-900">Class in Progress</div>
+                  <div className="text-sm text-green-700">Session is currently active</div>
+                </div>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-2xl font-bold text-green-900">
+                {currentOngoingClass.SUBJECTCODE} - {currentOngoingClass.SUBJECTNAME}
+              </div>
+              <div className="text-sm text-green-700">
+                {currentOngoingClass.instructor_name} • {currentOngoingClass.ROOMNUMBER}
+              </div>
+              <div className="text-sm text-green-600">
+                {formatScheduleTime(currentOngoingClass.STARTTIME)} - {formatScheduleTime(currentOngoingClass.ENDTIME)}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Upcoming Classes */}
+      {upcomingClasses.length > 0 && (
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center space-x-2 mb-4">
+            <ClockIcon className="h-6 w-6 text-blue-600" />
+            <h2 className="text-lg font-semibold text-gray-900">Upcoming Classes Today</h2>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {upcomingClasses.map((schedule, index) => {
+              const timeUntil = getTimeUntilClass(schedule);
+              return (
+                <div key={schedule.SCHEDULEID} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center space-x-2">
+                      <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+                        <span className="text-sm font-bold text-blue-600">{index + 1}</span>
+                      </div>
+                      <div>
+                        <div className="font-semibold text-gray-900">{schedule.SUBJECTCODE}</div>
+                        <div className="text-sm text-gray-600">{schedule.SUBJECTNAME}</div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-lg font-bold text-blue-600">
+                        {formatScheduleTime(schedule.STARTTIME)}
+                      </div>
+                      {timeUntil && (
+                        <div className="text-xs text-gray-500">in {timeUntil}</div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-2">
+                    <div className="flex items-center space-x-2 text-sm text-gray-600">
+                      <AcademicCapIcon className="h-4 w-4" />
+                      <span>{schedule.instructor_name}</span>
+                    </div>
+                    <div className="flex items-center space-x-2 text-sm text-gray-600">
+                      <MapPinIcon className="h-4 w-4" />
+                      <span>{schedule.ROOMNUMBER} - {schedule.ROOMNAME}</span>
+                    </div>
+                    <div className="flex items-center space-x-2 text-sm text-gray-600">
+                      <ClockIcon className="h-4 w-4" />
+                      <span>{formatScheduleTime(schedule.STARTTIME)} - {formatScheduleTime(schedule.ENDTIME)}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+
+      {/* Active Sessions - Moved to Top */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Current Active Sessions</h2>
+        
+        {sessions.length === 0 ? (
+          <p className="text-gray-500">No active sessions for today</p>
+        ) : (
+          <div className="space-y-4">
+            {sessions.map((session) => {
+              console.log('Session data:', session);
+              return (
+              <div key={session.id} className="border border-gray-200 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center space-x-3">
+                    <div className={`flex items-center space-x-2 px-3 py-1 rounded-full text-sm ${
+                      session.status === 'active' 
+                        ? 'bg-green-100 text-green-800' 
+                        : session.status === 'waiting'
+                        ? 'bg-yellow-100 text-yellow-800'
+                        : session.status === 'ended'
+                        ? 'bg-red-100 text-red-800'
+                        : 'bg-gray-100 text-gray-800'
+                    }`}>
+                      {session.status === 'active' ? (
+                        <PlayIcon className="h-4 w-4" />
+                      ) : session.status === 'waiting' ? (
+                        <ExclamationTriangleIcon className="h-4 w-4" />
+                      ) : (
+                        <StopIcon className="h-4 w-4" />
+                      )}
+                      <span className="capitalize">{session.status}</span>
+                    </div>
+                    
+                    {session.door_unlocked_at && !session.door_locked_at && (
+                      <div className="flex items-center space-x-1 px-2 py-1 bg-yellow-100 text-yellow-800 rounded-full text-xs">
+                        <LockOpenIcon className="h-3 w-3" />
+                        <span>Door Unlocked</span>
+                      </div>
+                    )}
+                    
+                    {session.door_locked_at && (
+                      <div className="flex items-center space-x-1 px-2 py-1 bg-red-100 text-red-800 rounded-full text-xs">
+                        <LockClosedIcon className="h-3 w-3" />
+                        <span>Door Locked</span>
+                      </div>
+                    )}
+                  </div>
+                  
+                  <div className="text-sm text-gray-500">
+                    Duration: {getSessionDuration(session.start_time, session.end_time)}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">{session.course_code || session.SUBJECTCODE}</p>
+                    <p className="text-xs text-gray-600">{session.course_name || session.SUBJECTNAME}</p>
+                  </div>
+                  
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">{session.instructor_name}</p>
+                    <p className="text-xs text-gray-600">Instructor</p>
+                  </div>
+                  
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">{session.room_number}</p>
+                    <p className="text-xs text-gray-600">{session.room_name}</p>
+                  </div>
+                  
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">
+                      {formatTime(session.start_time)}
+                      {session.end_time && ` - ${formatTime(session.end_time)}`}
+                    </p>
+                    <p className="text-xs text-gray-600">
+                      {session.attendance_count || 0} students present
+                    </p>
+                  </div>
+                </div>
+              </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Weekly Schedule */}
+      <div className="bg-white rounded-lg shadow p-6">
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-lg font-semibold text-gray-900">Weekly Schedule</h2>
+          
+          {/* Filters */}
+          <div className="flex space-x-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Day Filter</label>
+              <select
+                value={selectedDay}
+                onChange={(e) => setSelectedDay(e.target.value)}
+                className="border border-gray-300 rounded-md px-3 py-2 text-sm"
+              >
+                <option value="">All Days</option>
+                {allSchedules.length > 0 && getUniqueDays().map(day => (
+                  <option key={day} value={day}>{day}</option>
+                ))}
+              </select>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Room Filter</label>
+              <select
+                value={selectedRoomFilter}
+                onChange={(e) => setSelectedRoomFilter(e.target.value)}
+                className="border border-gray-300 rounded-md px-3 py-2 text-sm"
+              >
+                <option value="">All Rooms</option>
+                {allSchedules.length > 0 && getUniqueRooms().map(room => (
+                  <option key={room.id} value={room.id}>
+                    {room.number} - {room.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            
+            <div className="flex items-end">
+              <button
+                onClick={() => {
+                  setSelectedDay('');
+                  setSelectedRoomFilter('');
+                }}
+                className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 underline"
+              >
+                Clear Filters
+              </button>
+            </div>
+          </div>
+        </div>
+        
+        {allSchedules.length === 0 ? (
+          <p className="text-gray-500">No schedules found</p>
+        ) : (
+          <div className="space-y-6">
+            {(() => {
+              const filteredSchedules = getFilteredSchedules();
+              const dayGroups = groupSchedulesByDay(filteredSchedules);
+              
+              if (dayGroups.length === 0) {
+                return (
+                  <div className="text-center py-8">
+                    <CalendarDaysIcon className="mx-auto h-12 w-12 text-gray-400" />
+                    <h3 className="mt-2 text-sm font-medium text-gray-900">No schedules found</h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Try adjusting your filters to see more results.
+                    </p>
+                  </div>
+                );
+              }
+              
+              return dayGroups.map((dayGroup) => {
+                const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+                const isToday = dayGroup.day === currentDay;
+                
+                return (
+                  <div key={dayGroup.day} className="border border-gray-200 rounded-lg overflow-hidden">
+                    <div className={`px-4 py-3 ${isToday ? 'bg-blue-50 border-b border-blue-200' : 'bg-gray-50 border-b border-gray-200'}`}>
+                      <h3 className={`text-lg font-semibold ${isToday ? 'text-blue-900' : 'text-gray-900'}`}>
+                        {dayGroup.day}
+                        {isToday && <span className="ml-2 text-sm font-normal text-blue-600">(Today)</span>}
+                        <span className="ml-2 text-sm font-normal text-gray-500">({dayGroup.schedules.length} classes)</span>
+                      </h3>
+                    </div>
+                    <div className="p-4">
+                      {dayGroup.schedules.length === 0 ? (
+                        <p className="text-gray-500 text-sm">No classes scheduled</p>
+                      ) : (
+                        <div className="space-y-3">
+                          {dayGroup.schedules.map((schedule) => {
+                            const classStatus = getClassStatus(schedule);
+                            const timeUntil = getTimeUntilClass(schedule);
+                            const isToday = dayGroup.day === new Date().toLocaleDateString('en-US', { weekday: 'long' });
+                            
+                            return (
+                              <div key={schedule.SCHEDULEID} className={`flex items-center justify-between p-3 rounded-lg border-2 ${
+                                isToday ? classStatus.bgColor : 'bg-gray-50'
+                              } ${isToday ? 'border-gray-300' : 'border-gray-200'}`}>
+                                <div className="flex-1">
+                                  <div className="flex items-center space-x-2 mb-1">
+                                    <h4 className="font-medium text-gray-900">{schedule.SUBJECTCODE} - {schedule.SUBJECTNAME}</h4>
+                                    {isToday && (
+                                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${classStatus.bgColor} ${classStatus.color}`}>
+                                        {classStatus.status === 'ongoing' && <PlayIcon className="h-3 w-3 mr-1" />}
+                                        {classStatus.status === 'upcoming' && <ClockIcon className="h-3 w-3 mr-1" />}
+                                        {classStatus.status === 'ended' && <CheckCircleIcon className="h-3 w-3 mr-1" />}
+                                        {classStatus.status}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-sm text-gray-600">
+                                    <AcademicCapIcon className="h-4 w-4 inline mr-1" />
+                                    {schedule.instructor_name}
+                                  </p>
+                                  <p className="text-sm text-gray-600">
+                                    <MapPinIcon className="h-4 w-4 inline mr-1" />
+                                    {schedule.ROOMNUMBER} - {schedule.ROOMNAME} ({schedule.BUILDING})
+                                  </p>
+                                  <p className="text-xs text-gray-500">{schedule.ACADEMICYEAR} • {schedule.SEMESTER}</p>
+                                  {isToday && timeUntil && classStatus.status === 'upcoming' && (
+                                    <p className="text-xs text-blue-600 font-medium">
+                                      Starts in {timeUntil}
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="text-right ml-4">
+                                  <p className="text-sm font-medium text-gray-900">
+                                    {formatScheduleTime(schedule.STARTTIME)} - {formatScheduleTime(schedule.ENDTIME)}
+                                  </p>
+                                  <p className="text-xs text-gray-500">Class Duration</p>
+                                  {isToday && classStatus.status === 'ongoing' && (
+                                    <p className="text-xs text-green-600 font-medium">Currently Active</p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              });
+            })()}
+          </div>
+        )}
+      </div>
+
+    </div>
+  );
+}
+
+export default Sessions; 

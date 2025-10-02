@@ -1,0 +1,30 @@
+{
+  "name": "iot-attendance-system",
+  "version": "1.0.0",
+  "description": "Full-stack IoT Attendance System for Liceo de Cagayan University",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd backend && npm run dev",
+    "client": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "setup-db": "cd backend && npm run setup-db",
+    "install-all": "npm install && cd backend && npm install && cd ../frontend && npm install"
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "concurrently": "^8.2.2",
+    "mysql2": "^3.14.3"
+  },
+  "keywords": [
+    "iot",
+    "attendance",
+    "react",
+    "express",
+    "mysql",
+    "rfid",
+    "fingerprint"
+  ],
+  "author": "Liceo de Cagayan University",
+  "license": "ISC"
+}
