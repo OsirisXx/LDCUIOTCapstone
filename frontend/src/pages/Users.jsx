@@ -1007,7 +1007,10 @@ function Users() {
                     Type
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    ID | RFID
+                    ID
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    RFID
                   </th>
                   <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Fingerprint
@@ -1060,10 +1063,16 @@ function Users() {
                         {userData.YEARLEVEL && (
                           <div className="text-xs text-gray-500">Year {userData.YEARLEVEL}</div>
                         )}
-                        {userData.RFIDTAG && (
-                          <div className="text-xs text-blue-600 font-medium">
-                            RFID: {userData.RFIDTAG}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      <div>
+                        {userData.RFIDTAG ? (
+                          <div className="text-blue-600 font-medium">
+                            {userData.RFIDTAG}
                           </div>
+                        ) : (
+                          <span className="text-gray-400">-</span>
                         )}
                       </div>
                     </td>

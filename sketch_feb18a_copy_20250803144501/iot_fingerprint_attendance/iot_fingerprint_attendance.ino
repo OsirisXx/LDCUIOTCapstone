@@ -529,31 +529,29 @@ bool sendAttendanceData(int fingerprintId) {
        
        // Only outside scanners should control the lock
        if (String(deviceLocation) == "outside") {
-                 // Parse response to check user type for lock control (backend returns "type":"instructor" in user object)
-        if (response.indexOf("\"type\":\"instructor\"") != -1) {
-          Serial.println("🔓 Instructor detected on OUTSIDE scanner - Opening solenoid lock!");
-          openLock();
-        } else if (response.indexOf("\"type\":\"admin\"") != -1) {
-          Serial.println("🔓 Admin detected on OUTSIDE scanner - Opening solenoid lock!");
-          openLock();
-        } else if (response.indexOf("\"type\":\"student\"") != -1) {
-          Serial.println("🚫 Student detected on OUTSIDE scanner - NO LOCK ACCESS");
-        } else {
-          Serial.println("⚠️ Unknown user type on OUTSIDE scanner - NO LOCK ACCESS");
-          Serial.println("📄 Server response: " + response); // Debug: Show actual response
-        }
+         // Parse response to check user type for lock control
+         if (response.indexOf("\"usertype\":\"instructor\"") != -1 || response.indexOf("\"type\":\"instructor\"") != -1) {
+           Serial.println("🔓 Instructor detected on OUTSIDE scanner - Opening solenoid lock!");
+           openLock();
+         } else if (response.indexOf("\"usertype\":\"admin\"") != -1 || response.indexOf("\"type\":\"admin\"") != -1) {
+           Serial.println("🔓 Admin detected on OUTSIDE scanner - Opening solenoid lock!");
+           openLock();
+         } else if (response.indexOf("\"usertype\":\"student\"") != -1 || response.indexOf("\"type\":\"student\"") != -1) {
+           Serial.println("🚫 Student detected on OUTSIDE scanner - NO LOCK ACCESS");
+         } else {
+           Serial.println("⚠️ Unknown user type on OUTSIDE scanner - NO LOCK ACCESS");
+         }
        } else {
-                 // Inside scanner - never controls lock directly (backend returns "type":"instructor" in user object)
-        if (response.indexOf("\"type\":\"instructor\"") != -1) {
-          Serial.println("📍 Instructor detected on INSIDE scanner - No lock control (attendance only)");
-        } else if (response.indexOf("\"type\":\"student\"") != -1) {
-          Serial.println("📚 Student detected on INSIDE scanner - Attendance recorded");
-        } else if (response.indexOf("\"type\":\"admin\"") != -1) {
-          Serial.println("👤 Admin detected on INSIDE scanner - No lock control (attendance only)");
-        } else {
-          Serial.println("⚠️ Unknown user type - No access");
-          Serial.println("📄 Server response: " + response); // Debug: Show actual response
-        }
+         // Inside scanner - never controls lock directly
+         if (response.indexOf("\"usertype\":\"instructor\"") != -1 || response.indexOf("\"type\":\"instructor\"") != -1) {
+           Serial.println("📍 Instructor detected on INSIDE scanner - No lock control (attendance only)");
+         } else if (response.indexOf("\"usertype\":\"student\"") != -1 || response.indexOf("\"type\":\"student\"") != -1) {
+           Serial.println("📚 Student detected on INSIDE scanner - Attendance recorded");
+         } else if (response.indexOf("\"usertype\":\"admin\"") != -1 || response.indexOf("\"type\":\"admin\"") != -1) {
+           Serial.println("👤 Admin detected on INSIDE scanner - No lock control (attendance only)");
+         } else {
+           Serial.println("⚠️ Unknown user type - No access");
+         }
        }
      } else {
        Serial.println("❌ Server returned error - No lock access");
