@@ -13,6 +13,7 @@ namespace FutronicAttendanceSystem.Database.Models
         public string UserType { get; set; }
         public string EmployeeId { get; set; }
         public string Department { get; set; }
+        public string RfidTag { get; set; }
         public string Email { get; set; }
         public string Phone { get; set; }
         public bool IsActive { get; set; } = true;

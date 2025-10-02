@@ -13,6 +13,8 @@ using System.Net.Http;
 using System.Threading.Tasks;
 using System.Text.Json;
 using System.Net.Http.Headers;
+using System.Runtime.InteropServices;
+using System.Windows.Input;
 
 namespace FutronicAttendanceSystem
 {
@@ -34,6 +36,7 @@ namespace FutronicAttendanceSystem
         // Operation state tracking
         private bool m_bEnrollmentInProgress = false;
         private bool m_bAttendanceActive = false;
+        private bool m_bRfidAttendanceActive = false; // NEW: RFID attendance state
         
         // NEW: Attendance session state tracking
         private enum AttendanceSessionState
@@ -49,6 +52,11 @@ namespace FutronicAttendanceSystem
         private AttendanceSessionState currentSessionState = AttendanceSessionState.Inactive;
         private string currentInstructorId = null;
         private string currentScheduleId = null;
+        
+        // RFID Session state tracking
+        private AttendanceSessionState currentRfidSessionState = AttendanceSessionState.Inactive;
+        private string currentRfidInstructorId = null;
+        private string currentRfidScheduleId = null;
         
         // False positive detection prevention
         private DateTime m_lastPutOnTime = DateTime.MinValue;
@@ -117,6 +125,43 @@ namespace FutronicAttendanceSystem
         // Track students who already signed out within the current session
         private HashSet<string> signedOutStudentGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         
+        // RFID Native C# Implementation
+        private System.Windows.Forms.Timer rfidInputTimer;
+        private string rfidBuffer = "";
+        private bool rfidCapturing = false;
+        private DateTime lastRfidInput = DateTime.MinValue;
+        private const int RFID_TIMEOUT_MS = 200; // 200ms timeout for RFID input completion
+        
+        // Global keyboard hook for RFID input capture
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_KEYUP = 0x0101;
+        private const int WM_SYSKEYDOWN = 0x0104;
+        private const int WM_SYSKEYUP = 0x0105;
+        
+        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+        private LowLevelKeyboardProc _proc = HookCallback;
+        private static IntPtr _hookID = IntPtr.Zero;
+        
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+        
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+        
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+        
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+        
+        [DllImport("user32.dll")]
+        private static extern int GetKeyNameText(int lParam, StringBuilder lpString, int nSize);
+        
+        [DllImport("user32.dll")]
+        private static extern int MapVirtualKey(int uCode, int uMapType);
+        
         private void StartWatchdogTimer()
         {
             watchdogTimer = new System.Windows.Forms.Timer();
@@ -156,6 +201,7 @@ namespace FutronicAttendanceSystem
         private TabControl tabControl;
         private TabPage enrollmentTab;
         private TabPage attendanceTab;
+        private TabPage rfidAttendanceTab; // NEW: RFID Attendance tab
         private TabPage deviceManagementTab;
         private TabPage fingerprintUsersTab;
         private PictureBox pictureFingerprint;
@@ -198,6 +244,20 @@ namespace FutronicAttendanceSystem
         // NEW: Session state UI controls
         private Label lblSessionState;
         private Label lblSessionInfo;
+        
+        // RFID Attendance Controls
+        private Label lblRfidSessionState;
+        private Label lblRfidSessionInfo;
+        private Button btnStartRfidAttendance;
+        private Button btnStopRfidAttendance;
+        private Button btnForceEndRfidSession;
+        private DataGridView dgvRfidAttendance;
+        private Button btnExportRfidAttendance;
+        private TextBox txtRfidStatus;
+        private Label lblRfidCurrentRoom;
+        private ComboBox cmbRfidLocation;
+        private ComboBox cmbRfidRoom;
+        private Button btnRfidChangeRoom;
         private Button btnForceEndSession;
         // Removed unused fields: lblStatus, userListBox, btnDeleteUser, btnRefreshUsers
         
@@ -619,8 +679,12 @@ namespace FutronicAttendanceSystem
             tabControl.TabPages.Add(enrollmentTab);
 
             // Create attendance tab
-            attendanceTab = new TabPage("Attendance Tracking");
+            attendanceTab = new TabPage("Fingerprint Attendance");
             tabControl.TabPages.Add(attendanceTab);
+
+            // Create RFID attendance tab
+            rfidAttendanceTab = new TabPage("RFID Attendance");
+            tabControl.TabPages.Add(rfidAttendanceTab);
 
             // Create device management tab
             deviceManagementTab = new TabPage("Device Management");
@@ -632,6 +696,7 @@ namespace FutronicAttendanceSystem
 
             InitializeEnrollmentTab();
             InitializeAttendanceTab();
+            InitializeRfidAttendanceTab();
             InitializeDeviceManagementTab();
             InitializeFingerprintUsersTab();
         }
@@ -1355,6 +1420,207 @@ namespace FutronicAttendanceSystem
 
             attendancePanel.Controls.Add(dgvAttendance);
             attendanceTab.Controls.Add(attendancePanel);
+        }
+
+        private void InitializeRfidAttendanceTab()
+        {
+            rfidAttendanceTab.Controls.Clear();
+            
+            // Title
+            var lblTitle = new Label();
+            lblTitle.Location = new Point(20, 20);
+            lblTitle.Size = new Size(400, 25);
+            lblTitle.Text = "RFID Attendance Tracking";
+            lblTitle.Font = new Font(lblTitle.Font, FontStyle.Bold);
+            lblTitle.ForeColor = Color.DarkBlue;
+            rfidAttendanceTab.Controls.Add(lblTitle);
+
+            // RFID Session State Display
+            lblRfidSessionState = new Label();
+            lblRfidSessionState.Location = new Point(20, 50);
+            lblRfidSessionState.Size = new Size(300, 20);
+            lblRfidSessionState.Text = "Session State: Inactive";
+            lblRfidSessionState.ForeColor = Color.DarkRed;
+            lblRfidSessionState.Font = new Font(lblRfidSessionState.Font, FontStyle.Bold);
+            rfidAttendanceTab.Controls.Add(lblRfidSessionState);
+
+            // RFID Session Info
+            lblRfidSessionInfo = new Label();
+            lblRfidSessionInfo.Location = new Point(20, 75);
+            lblRfidSessionInfo.Size = new Size(600, 20);
+            lblRfidSessionInfo.Text = "No active session";
+            lblRfidSessionInfo.ForeColor = Color.Gray;
+            rfidAttendanceTab.Controls.Add(lblRfidSessionInfo);
+
+            // RFID Control Buttons
+            btnStartRfidAttendance = new Button();
+            btnStartRfidAttendance.Location = new Point(20, 110);
+            btnStartRfidAttendance.Size = new Size(120, 30);
+            btnStartRfidAttendance.Text = "Start RFID Attendance";
+            btnStartRfidAttendance.BackColor = Color.LightGreen;
+            btnStartRfidAttendance.Click += BtnStartRfidAttendance_Click;
+            rfidAttendanceTab.Controls.Add(btnStartRfidAttendance);
+
+            btnStopRfidAttendance = new Button();
+            btnStopRfidAttendance.Location = new Point(150, 110);
+            btnStopRfidAttendance.Size = new Size(120, 30);
+            btnStopRfidAttendance.Text = "Stop RFID Attendance";
+            btnStopRfidAttendance.BackColor = Color.LightCoral;
+            btnStopRfidAttendance.Enabled = false;
+            btnStopRfidAttendance.Click += BtnStopRfidAttendance_Click;
+            rfidAttendanceTab.Controls.Add(btnStopRfidAttendance);
+
+            // RFID Status Display
+            txtRfidStatus = new TextBox();
+            txtRfidStatus.Location = new Point(20, 150);
+            txtRfidStatus.Size = new Size(400, 60);
+            txtRfidStatus.Multiline = true;
+            txtRfidStatus.ScrollBars = ScrollBars.Vertical;
+            txtRfidStatus.ReadOnly = true;
+            txtRfidStatus.Text = "RFID scanner ready. Connect RFID reader and start attendance session.";
+            txtRfidStatus.BackColor = Color.LightGray;
+            rfidAttendanceTab.Controls.Add(txtRfidStatus);
+
+            // RFID Location and Room Controls
+            InitializeRfidLocationRoomControls();
+
+            // RFID Attendance Grid
+            var rfidAttendancePanel = new Panel();
+            rfidAttendancePanel.Location = new Point(20, 250);
+            rfidAttendancePanel.Size = new Size(950, 300);
+            rfidAttendancePanel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+            rfidAttendancePanel.Padding = new Padding(0);
+
+            dgvRfidAttendance = new DataGridView();
+            dgvRfidAttendance.Dock = DockStyle.Fill;
+            dgvRfidAttendance.AllowUserToAddRows = false;
+            dgvRfidAttendance.AllowUserToDeleteRows = false;
+            dgvRfidAttendance.ReadOnly = true;
+            dgvRfidAttendance.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvRfidAttendance.MultiSelect = false;
+            dgvRfidAttendance.AutoGenerateColumns = false;
+            dgvRfidAttendance.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+            dgvRfidAttendance.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
+            dgvRfidAttendance.RowTemplate.Height = 22;
+            dgvRfidAttendance.RowHeadersVisible = false;
+            dgvRfidAttendance.BackgroundColor = Color.White;
+            dgvRfidAttendance.BorderStyle = BorderStyle.FixedSingle;
+            dgvRfidAttendance.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            dgvRfidAttendance.GridColor = Color.FromArgb(230, 230, 230);
+            dgvRfidAttendance.EnableHeadersVisualStyles = false;
+            dgvRfidAttendance.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(52, 58, 64);
+            dgvRfidAttendance.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
+            dgvRfidAttendance.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+            dgvRfidAttendance.ColumnHeadersHeight = 28;
+            dgvRfidAttendance.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            dgvRfidAttendance.DefaultCellStyle.Font = new Font("Segoe UI", 8F);
+            dgvRfidAttendance.DefaultCellStyle.WrapMode = DataGridViewTriState.False;
+            dgvRfidAttendance.DefaultCellStyle.Padding = new Padding(3, 2, 3, 2);
+            dgvRfidAttendance.ScrollBars = ScrollBars.Both;
+
+            // RFID Attendance Columns
+            var rfidColTime = new DataGridViewTextBoxColumn { Name = "Time", HeaderText = "Time", Width = 160, AutoSizeMode = DataGridViewAutoSizeColumnMode.DisplayedCells, DefaultCellStyle = new DataGridViewCellStyle { Format = "yyyy-MM-dd HH:mm:ss" } };
+            var rfidColUser = new DataGridViewTextBoxColumn { Name = "User", HeaderText = "User", Width = 220, AutoSizeMode = DataGridViewAutoSizeColumnMode.DisplayedCells };
+            var rfidColRfid = new DataGridViewTextBoxColumn { Name = "RFID", HeaderText = "RFID", Width = 120, AutoSizeMode = DataGridViewAutoSizeColumnMode.DisplayedCells };
+            var rfidColAction = new DataGridViewTextBoxColumn { Name = "Action", HeaderText = "Action", Width = 200, AutoSizeMode = DataGridViewAutoSizeColumnMode.DisplayedCells };
+            var rfidColStatus = new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "Status", MinimumWidth = 200, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill };
+
+            dgvRfidAttendance.Columns.Add(rfidColTime);
+            dgvRfidAttendance.Columns.Add(rfidColUser);
+            dgvRfidAttendance.Columns.Add(rfidColRfid);
+            dgvRfidAttendance.Columns.Add(rfidColAction);
+            dgvRfidAttendance.Columns.Add(rfidColStatus);
+
+            rfidAttendancePanel.Controls.Add(dgvRfidAttendance);
+            rfidAttendanceTab.Controls.Add(rfidAttendancePanel);
+
+            // Export button
+            btnExportRfidAttendance = new Button();
+            btnExportRfidAttendance.Location = new Point(20, 560);
+            btnExportRfidAttendance.Size = new Size(120, 30);
+            btnExportRfidAttendance.Text = "Export RFID Data";
+            btnExportRfidAttendance.BackColor = Color.LightBlue;
+            btnExportRfidAttendance.Click += BtnExportRfidAttendance_Click;
+            rfidAttendanceTab.Controls.Add(btnExportRfidAttendance);
+
+            // Force end session button
+            btnForceEndRfidSession = new Button();
+            btnForceEndRfidSession.Location = new Point(450, 190);
+            btnForceEndRfidSession.Size = new Size(120, 30);
+            btnForceEndRfidSession.Text = "Force End Session";
+            btnForceEndRfidSession.BackColor = Color.LightCoral;
+            btnForceEndRfidSession.Visible = false;
+            btnForceEndRfidSession.Click += BtnForceEndRfidSession_Click;
+            rfidAttendanceTab.Controls.Add(btnForceEndRfidSession);
+            
+            // Auto-start RFID service (always on)
+            try
+            {
+                StartRfidService();
+                m_bRfidAttendanceActive = true;
+                currentRfidSessionState = AttendanceSessionState.WaitingForInstructor;
+                UpdateRfidSessionStateDisplay();
+                
+                // Update UI to reflect always-on state
+                btnStartRfidAttendance.Enabled = false;
+                btnStopRfidAttendance.Enabled = true;
+                
+                SetRfidStatusText("RFID scanner is always active. Ready for instructor scan...");
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error starting RFID scanner: {ex.Message}");
+            }
+        }
+
+        private void InitializeRfidLocationRoomControls()
+        {
+            // Current room label for RFID
+            lblRfidCurrentRoom = new Label();
+            lblRfidCurrentRoom.Location = new Point(320, 25);
+            lblRfidCurrentRoom.Size = new Size(300, 20);
+            lblRfidCurrentRoom.Text = "Current Room: Loading...";
+            lblRfidCurrentRoom.ForeColor = Color.DarkBlue;
+            lblRfidCurrentRoom.Font = new Font(lblRfidCurrentRoom.Font, FontStyle.Bold);
+            rfidAttendanceTab.Controls.Add(lblRfidCurrentRoom);
+
+            // Location selection for RFID
+            var lblRfidLocation = new Label();
+            lblRfidLocation.Location = new Point(320, 50);
+            lblRfidLocation.Size = new Size(60, 20);
+            lblRfidLocation.Text = "Location:";
+            rfidAttendanceTab.Controls.Add(lblRfidLocation);
+
+            cmbRfidLocation = new ComboBox();
+            cmbRfidLocation.Location = new Point(385, 48);
+            cmbRfidLocation.Size = new Size(100, 25);
+            cmbRfidLocation.DropDownStyle = ComboBoxStyle.DropDownList;
+            cmbRfidLocation.Items.AddRange(new object[] { "inside", "outside" });
+            cmbRfidLocation.SelectedIndex = 0;
+            cmbRfidLocation.SelectedIndexChanged += CmbRfidLocation_SelectedIndexChanged;
+            rfidAttendanceTab.Controls.Add(cmbRfidLocation);
+
+            // Room selection for RFID
+            var lblRfidRoom = new Label();
+            lblRfidRoom.Location = new Point(500, 50);
+            lblRfidRoom.Size = new Size(40, 20);
+            lblRfidRoom.Text = "Room:";
+            rfidAttendanceTab.Controls.Add(lblRfidRoom);
+
+            cmbRfidRoom = new ComboBox();
+            cmbRfidRoom.Location = new Point(545, 48);
+            cmbRfidRoom.Size = new Size(200, 25);
+            cmbRfidRoom.DropDownStyle = ComboBoxStyle.DropDownList;
+            rfidAttendanceTab.Controls.Add(cmbRfidRoom);
+
+            // Change room button for RFID
+            btnRfidChangeRoom = new Button();
+            btnRfidChangeRoom.Location = new Point(755, 47);
+            btnRfidChangeRoom.Size = new Size(80, 27);
+            btnRfidChangeRoom.Text = "Change Room";
+            btnRfidChangeRoom.BackColor = Color.LightCyan;
+            btnRfidChangeRoom.Click += BtnRfidChangeRoom_Click;
+            rfidAttendanceTab.Controls.Add(btnRfidChangeRoom);
         }
 
         private void InitializeLocationRoomControls()
@@ -2222,6 +2488,70 @@ namespace FutronicAttendanceSystem
             catch (Exception ex)
             {
                 Console.WriteLine($"Error updating session state display: {ex.Message}");
+            }
+        }
+        
+        private void UpdateRfidSessionStateDisplay()
+        {
+            // Ensure this runs on the UI thread
+            if (this.InvokeRequired)
+            {
+                this.Invoke(new Action(() => UpdateRfidSessionStateDisplay()));
+                return;
+            }
+            
+            if (lblRfidSessionState == null || lblRfidSessionInfo == null) return;
+            
+            try
+            {
+                switch (currentRfidSessionState)
+                {
+                    case AttendanceSessionState.Inactive:
+                        lblRfidSessionState.Text = "RFID Session State: Inactive";
+                        lblRfidSessionState.ForeColor = Color.DarkRed;
+                        lblRfidSessionInfo.Text = "Waiting for instructor to start RFID attendance session...";
+                        if (btnForceEndRfidSession != null) btnForceEndRfidSession.Visible = false;
+                        break;
+                        
+                    case AttendanceSessionState.WaitingForInstructor:
+                        lblRfidSessionState.Text = "RFID Session State: Waiting for Instructor";
+                        lblRfidSessionState.ForeColor = Color.Orange;
+                        lblRfidSessionInfo.Text = "Instructor must scan RFID to start the attendance session...";
+                        if (btnForceEndRfidSession != null) btnForceEndRfidSession.Visible = false;
+                        break;
+                        
+                    case AttendanceSessionState.ActiveForStudents:
+                        lblRfidSessionState.Text = "RFID Session State: Active - Students Can Sign In";
+                        lblRfidSessionState.ForeColor = Color.Green;
+                        lblRfidSessionInfo.Text = "Students can now scan RFID to sign in for attendance...";
+                        if (btnForceEndRfidSession != null) btnForceEndRfidSession.Visible = true;
+                        break;
+                        
+                    case AttendanceSessionState.WaitingForInstructorSignOut:
+                        lblRfidSessionState.Text = "RFID Session State: Waiting for Instructor Sign-Out";
+                        lblRfidSessionState.ForeColor = Color.Orange;
+                        lblRfidSessionInfo.Text = "Instructor must scan RFID to open sign-out for students...";
+                        if (btnForceEndRfidSession != null) btnForceEndRfidSession.Visible = true;
+                        break;
+                        
+                    case AttendanceSessionState.ActiveForSignOut:
+                        lblRfidSessionState.Text = "RFID Session State: Active - Students Can Sign Out";
+                        lblRfidSessionState.ForeColor = Color.Blue;
+                        lblRfidSessionInfo.Text = "Students can now scan RFID to sign out...";
+                        if (btnForceEndRfidSession != null) btnForceEndRfidSession.Visible = true;
+                        break;
+                        
+                    case AttendanceSessionState.WaitingForInstructorClose:
+                        lblRfidSessionState.Text = "RFID Session State: Waiting for Instructor to Close";
+                        lblRfidSessionState.ForeColor = Color.Orange;
+                        lblRfidSessionInfo.Text = "Instructor must scan RFID to close the attendance session...";
+                        if (btnForceEndRfidSession != null) btnForceEndRfidSession.Visible = true;
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error updating RFID session state display: {ex.Message}");
             }
         }
         
@@ -4443,6 +4773,30 @@ namespace FutronicAttendanceSystem
                     m_AttendanceOperation = null;
                 }
             }
+            
+            // Stop RFID keyboard hook and cleanup
+            if (_hookID != IntPtr.Zero)
+            {
+                try
+                {
+                    UnhookWindowsHookEx(_hookID);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error stopping RFID keyboard hook: {ex.Message}");
+                }
+                finally
+                {
+                    _hookID = IntPtr.Zero;
+                }
+            }
+            
+            if (rfidInputTimer != null)
+            {
+                rfidInputTimer.Stop();
+                rfidInputTimer.Dispose();
+                rfidInputTimer = null;
+            }
         }
 
         private void MainForm_Load(object sender, EventArgs e)
@@ -4459,6 +4813,932 @@ namespace FutronicAttendanceSystem
             
             // Update room display after everything is loaded
             UpdateCurrentRoomDisplay();
+        }
+
+        // RFID Event Handlers
+        private void BtnStartRfidAttendance_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                if (m_bRfidAttendanceActive)
+                {
+                    SetRfidStatusText("RFID attendance is already active.");
+                    return;
+                }
+
+                // Start RFID background service
+                StartRfidService();
+                
+                // Initialize RFID session state
+                currentRfidSessionState = AttendanceSessionState.WaitingForInstructor;
+                m_bRfidAttendanceActive = true;
+                
+                // Update RFID session state display
+                UpdateRfidSessionStateDisplay();
+                
+                // Update UI
+                btnStartRfidAttendance.Enabled = false;
+                btnStopRfidAttendance.Enabled = true;
+                
+                SetRfidStatusText("RFID attendance started. Waiting for instructor to scan...");
+                AddRfidAttendanceRecord("System", "RFID Attendance Started", "System initialized");
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error starting RFID attendance: {ex.Message}");
+            }
+        }
+
+        private void BtnStopRfidAttendance_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                // Stop RFID background service
+                StopRfidService();
+                
+                // Reset RFID session state
+                currentRfidSessionState = AttendanceSessionState.Inactive;
+                m_bRfidAttendanceActive = false;
+                currentRfidInstructorId = null;
+                currentRfidScheduleId = null;
+                
+                // Update RFID session state display
+                UpdateRfidSessionStateDisplay();
+                
+                // Update UI
+                btnStartRfidAttendance.Enabled = true;
+                btnStopRfidAttendance.Enabled = false;
+                lblRfidSessionState.Text = "Session State: Inactive";
+                lblRfidSessionState.ForeColor = Color.DarkRed;
+                lblRfidSessionInfo.Text = "No active session";
+                
+                SetRfidStatusText("RFID attendance stopped.");
+                AddRfidAttendanceRecord("System", "RFID Attendance Stopped", "System stopped");
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error stopping RFID attendance: {ex.Message}");
+            }
+        }
+
+        private void BtnForceEndRfidSession_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                // Force end RFID session
+                currentRfidSessionState = AttendanceSessionState.Inactive;
+                currentRfidInstructorId = null;
+                currentRfidScheduleId = null;
+                
+                // Update RFID session state display
+                UpdateRfidSessionStateDisplay();
+                
+                // Update UI
+                lblRfidSessionState.Text = "Session State: Inactive";
+                lblRfidSessionState.ForeColor = Color.DarkRed;
+                lblRfidSessionInfo.Text = "Session force ended";
+                btnForceEndRfidSession.Visible = false;
+                
+                SetRfidStatusText("RFID session force ended.");
+                AddRfidAttendanceRecord("System", "Session Force Ended", "Session terminated by user");
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error force ending session: {ex.Message}");
+            }
+        }
+
+        private void BtnExportRfidAttendance_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                var dlg = new SaveFileDialog();
+                dlg.Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*";
+                dlg.FileName = $"rfid_attendance_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+                
+                if (dlg.ShowDialog() == DialogResult.OK)
+                {
+                    ExportRfidAttendanceToCsv(dlg.FileName);
+                    MessageBox.Show($"RFID attendance data exported to {dlg.FileName}", "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to export RFID data: {ex.Message}", "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void CmbRfidLocation_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            // Handle RFID location change
+            SetRfidStatusText($"RFID location changed to: {cmbRfidLocation.SelectedItem}");
+        }
+
+        private void BtnRfidChangeRoom_Click(object sender, EventArgs e)
+        {
+            // Handle RFID room change
+            SetRfidStatusText($"RFID room changed to: {cmbRfidRoom.SelectedItem}");
+        }
+
+        // RFID Native C# Implementation
+        private void StartRfidService()
+        {
+            try
+            {
+                if (_hookID != IntPtr.Zero)
+                {
+                    SetRfidStatusText("RFID keyboard hook already active.");
+                    return;
+                }
+
+                // Install global keyboard hook
+                _hookID = SetHook(_proc);
+                if (_hookID == IntPtr.Zero)
+                {
+                    SetRfidStatusText("Failed to install RFID keyboard hook.");
+                    return;
+                }
+
+                // Initialize RFID input timer
+                if (rfidInputTimer == null)
+                {
+                    rfidInputTimer = new System.Windows.Forms.Timer();
+                    rfidInputTimer.Interval = RFID_TIMEOUT_MS;
+                    rfidInputTimer.Tick += RfidInputTimer_Tick;
+                }
+                
+                // Reset RFID buffer and state
+                rfidBuffer = "";
+                rfidCapturing = false;
+                lastRfidInput = DateTime.MinValue;
+                
+                SetRfidStatusText("RFID keyboard capture started. Ready to scan RFID cards.");
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Failed to start RFID capture: {ex.Message}");
+                Console.WriteLine($"RFID Service Error: {ex.Message}");
+            }
+        }
+
+        private void StopRfidService()
+        {
+            try
+            {
+                // Uninstall global keyboard hook
+                if (_hookID != IntPtr.Zero)
+                {
+                    UnhookWindowsHookEx(_hookID);
+                    _hookID = IntPtr.Zero;
+                }
+
+                // Stop RFID input timer
+                if (rfidInputTimer != null)
+                {
+                    rfidInputTimer.Stop();
+                }
+
+                // Reset RFID state
+                rfidBuffer = "";
+                rfidCapturing = false;
+                
+                SetRfidStatusText("RFID keyboard capture stopped.");
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error stopping RFID capture: {ex.Message}");
+            }
+        }
+
+        private static IntPtr SetHook(LowLevelKeyboardProc proc)
+        {
+            using (var curProcess = System.Diagnostics.Process.GetCurrentProcess())
+            using (var curModule = curProcess.MainModule)
+            {
+                return SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule.ModuleName), 0);
+            }
+        }
+
+        private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0)
+            {
+                int vkCode = Marshal.ReadInt32(lParam);
+                
+                // Check if this is a key down event
+                if (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN)
+                {
+                    // Get the main form instance to process the key
+                    var mainForm = Application.OpenForms.OfType<MainForm>().FirstOrDefault();
+                    if (mainForm != null)
+                    {
+                        mainForm.ProcessRfidKeyInput(vkCode);
+                    }
+                }
+            }
+            
+            return CallNextHookEx(_hookID, nCode, wParam, lParam);
+        }
+
+        private void ProcessRfidKeyInput(int vkCode)
+        {
+            try
+            {
+                if (!m_bRfidAttendanceActive) 
+                {
+                    return;
+                }
+
+                // Convert virtual key code to character
+                char keyChar = ConvertVkCodeToChar(vkCode);
+                
+                if (keyChar != '\0')
+                {
+                    var currentTime = DateTime.Now;
+                    
+                    // Check if this is rapid input (RFID scanner characteristic)
+                    bool isRapidInput = false;
+                    if (lastRfidInput != DateTime.MinValue)
+                    {
+                        var timeSinceLastInput = currentTime - lastRfidInput;
+                        isRapidInput = timeSinceLastInput.TotalMilliseconds < 100; // Increased to 100ms for better detection
+                    }
+                    
+                    // Only process if this is rapid input (RFID) or if we're already capturing
+                    // Also process the first input (when lastRfidInput is DateTime.MinValue)
+                    if (isRapidInput || rfidCapturing || lastRfidInput == DateTime.MinValue)
+                    {
+                        // Reset timer
+                        if (rfidInputTimer != null)
+                        {
+                            rfidInputTimer.Stop();
+                            rfidInputTimer.Start();
+                        }
+
+                        // Add character to buffer
+                        rfidBuffer += keyChar;
+                        lastRfidInput = currentTime;
+                        rfidCapturing = true;
+
+                        // Check if this looks like RFID input (rapid succession)
+                        if (rfidBuffer.Length == 1)
+                        {
+                            SetRfidStatusText("RFID card detected, capturing...");
+                        }
+                    }
+                    else
+                    {
+                        // This is regular typing, ignore it
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error processing RFID input: {ex.Message}");
+            }
+        }
+
+        private char ConvertVkCodeToChar(int vkCode)
+        {
+            // Convert virtual key code to character
+            if (vkCode >= 48 && vkCode <= 57) // 0-9
+                return (char)(vkCode);
+            if (vkCode >= 65 && vkCode <= 90) // A-Z
+                return (char)(vkCode);
+            if (vkCode >= 96 && vkCode <= 105) // Numpad 0-9
+                return (char)(vkCode - 48);
+            if (vkCode == 13) // Enter key
+                return '\r';
+            if (vkCode == 32) // Space
+                return ' ';
+                
+            return '\0'; // Unknown key
+        }
+
+        private void RfidInputTimer_Tick(object sender, EventArgs e)
+        {
+            try
+            {
+                if (rfidCapturing && rfidBuffer.Length > 0)
+                {
+                    // Process the complete RFID input
+                    ProcessRfidScan(rfidBuffer.Trim());
+                    
+                    // Reset RFID state for next scan
+                    rfidBuffer = "";
+                    rfidCapturing = false;
+                    lastRfidInput = DateTime.MinValue; // Reset to allow new scans
+                    
+                    if (rfidInputTimer != null)
+                    {
+                        rfidInputTimer.Stop();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error processing RFID scan: {ex.Message}");
+            }
+        }
+
+        private async void ProcessRfidScan(string rfidData)
+        {
+            try
+            {
+                // Clean and validate RFID data
+                rfidData = rfidData?.Trim();
+                
+                // Check for valid RFID data (should be numeric and reasonable length)
+                if (string.IsNullOrEmpty(rfidData) || 
+                    rfidData.Length < 4 || 
+                    rfidData.Length > 20 || 
+                    !rfidData.All(char.IsDigit))
+                {
+                    SetRfidStatusText($"Invalid RFID data received: '{rfidData}'. Expected numeric data 4-20 digits.");
+                    return;
+                }
+
+                SetRfidStatusText($"RFID Card Scanned: {rfidData}");
+                AddRfidAttendanceRecord("RFID Scanner", $"Card Scanned: {rfidData}", "Processing...");
+
+                // Get user information first to determine role-based routing
+                var userInfo = GetUserInfoFromRfid(rfidData);
+                if (userInfo == null)
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
+                    AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    return;
+                }
+                
+                string userType = userInfo.UserType?.ToLower();
+                
+                // Route based on user type and session state (same logic as fingerprint system)
+                if (userType == "instructor")
+                {
+                    // Instructor actions based on session state
+                    switch (currentRfidSessionState)
+                    {
+                        case AttendanceSessionState.Inactive:
+                        case AttendanceSessionState.WaitingForInstructor:
+                            // Instructor starting session
+                            await HandleRfidInstructorStart(rfidData);
+                            break;
+                            
+                        case AttendanceSessionState.ActiveForStudents:
+                            // Instructor opening sign-out phase
+                            await HandleRfidInstructorSignOut(rfidData);
+                            break;
+                            
+                        case AttendanceSessionState.ActiveForSignOut:
+                        case AttendanceSessionState.WaitingForInstructorClose:
+                            // Instructor closing session
+                            await HandleRfidInstructorClose(rfidData);
+                            break;
+                            
+                        default:
+                            SetRfidStatusText("RFID session not active. Please start RFID attendance first.");
+                            break;
+                    }
+                }
+                else if (userType == "student")
+                {
+                    // Student actions based on session state
+                    switch (currentRfidSessionState)
+                    {
+                        case AttendanceSessionState.ActiveForStudents:
+                            // Student sign-in
+                            await HandleRfidStudentSignIn(rfidData);
+                            break;
+                            
+                        case AttendanceSessionState.ActiveForSignOut:
+                            // Student sign-out
+                            await HandleRfidStudentSignOut(rfidData);
+                            break;
+                            
+                        default:
+                            SetRfidStatusText("RFID session not active for students. Please wait for instructor to start session.");
+                            break;
+                    }
+                }
+                else
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} belongs to {userInfo.Username} ({userType}). Only instructors and students can use attendance system.");
+                    AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Invalid Role ({userType})");
+                }
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error processing RFID scan: {ex.Message}");
+            }
+        }
+
+        private async Task HandleRfidInstructorStart(string rfidData)
+        {
+            try
+            {
+                // Get user information from database using RFID data
+                var userInfo = GetUserInfoFromRfid(rfidData);
+                if (userInfo == null)
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
+                    AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    return;
+                }
+                
+                string userName = userInfo.Username;
+                string userGuid = userInfo.EmployeeId;
+                
+                SetRfidStatusText($"Verifying instructor schedule for {userName}...");
+                
+                // Check if instructor has a scheduled class BEFORE starting session
+                if (dbManager != null)
+                {
+                    var validationResult = dbManager.TryRecordAttendanceByGuid(userGuid, "Instructor Schedule Check");
+                    
+                    if (!validationResult.Success)
+                    {
+                        // Instructor doesn't have a schedule at this time - DENY session start
+                        SetRfidStatusText($"❌ {userName}: {validationResult.Reason}. Cannot start RFID attendance session.");
+                        AddRfidAttendanceRecord(userName, "Session Start Denied", validationResult.Reason);
+                        return;
+                    }
+                    
+                    // Instructor has valid schedule - proceed with session start
+                    currentRfidInstructorId = userGuid;
+                    currentRfidScheduleId = validationResult.ScheduleId ?? "manual_session";
+                    currentRfidSessionState = AttendanceSessionState.ActiveForStudents;
+                    
+                    // Clear any previous signed-in/out students for new session (same as fingerprint system)
+                    signedInStudentGuids.Clear();
+                    signedOutStudentGuids.Clear();
+                    
+                    UpdateRfidSessionStateDisplay();
+                    SetRfidStatusText($"✅ Instructor {userName} signed in. RFID session started for {validationResult.SubjectName}. Students can now scan.");
+                    
+                    AddRfidAttendanceRecord(userName, "Session Started", $"Active - {validationResult.SubjectName}");
+                    
+                    // Record instructor's sign-in attendance
+                    System.Threading.Tasks.Task.Run(() => {
+                        try
+                        {
+                            RecordAttendance(userName, "Instructor Sign-In (RFID Session Start)");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not record instructor sign-in: {ex.Message}");
+                        }
+                    });
+                }
+                else
+                {
+                    // No database manager - fallback to manual session
+                    SetRfidStatusText($"⚠️ Warning: Cannot verify schedule. Database not available.");
+                    currentRfidInstructorId = userGuid;
+                    currentRfidScheduleId = "manual_session";
+                    currentRfidSessionState = AttendanceSessionState.ActiveForStudents;
+                    
+                    // Clear any previous signed-in/out students for new session (same as fingerprint system)
+                    signedInStudentGuids.Clear();
+                    signedOutStudentGuids.Clear();
+                    
+                    UpdateRfidSessionStateDisplay();
+                    SetRfidStatusText($"✅ Instructor {userName} signed in (unverified). Students can now scan.");
+                    AddRfidAttendanceRecord(userName, "Session Started", "Active (Unverified)");
+                }
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error handling instructor start: {ex.Message}");
+                AddRfidAttendanceRecord("System", "Instructor Start Error", ex.Message);
+            }
+        }
+
+        private async Task HandleRfidStudentSignIn(string rfidData)
+        {
+            try
+            {
+                SetRfidStatusText($"Processing RFID student scan: {rfidData}...");
+                
+                // Get user information from database using RFID data
+                var userInfo = GetUserInfoFromRfid(rfidData);
+                if (userInfo == null)
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
+                    AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    return;
+                }
+                
+                string userName = userInfo.Username;
+                string userType = userInfo.UserType?.ToLower();
+                string userGuid = userInfo.EmployeeId;
+                
+                // Verify this is a student
+                if (userType != "student")
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} belongs to {userName} ({userType}). Only students can sign in during active session.");
+                    AddRfidAttendanceRecord(userName, "Access Denied", $"Not Student ({userType})");
+                    return;
+                }
+                
+                // Check if student is already signed in
+                if (signedInStudentGuids.Contains(userGuid))
+                {
+                    SetRfidStatusText($"⚠️ Student {userName} already signed in.");
+                    AddRfidAttendanceRecord(userName, "Already Signed In", "Duplicate");
+                    return;
+                }
+                
+                // Record student sign-in
+                signedInStudentGuids.Add(userGuid);
+                SetRfidStatusText($"✅ Student {userName} signed in successfully.");
+                AddRfidAttendanceRecord(userName, "Student Sign-In", "Success");
+                
+                // Record attendance in database
+                System.Threading.Tasks.Task.Run(() => {
+                    try
+                    {
+                        RecordAttendance(userName, "Student Sign-In (RFID)");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Warning: Could not record student sign-in: {ex.Message}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error handling student sign-in: {ex.Message}");
+                AddRfidAttendanceRecord("System", "Student Sign-In Error", ex.Message);
+            }
+        }
+
+        private async Task HandleRfidInstructorSignOut(string rfidData)
+        {
+            try
+            {
+                SetRfidStatusText($"Processing RFID instructor scan for sign-out: {rfidData}...");
+                
+                // Get user information from database using RFID data
+                var userInfo = GetUserInfoFromRfid(rfidData);
+                if (userInfo == null)
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
+                    AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    return;
+                }
+                
+                string userName = userInfo.Username;
+                string userGuid = userInfo.EmployeeId;
+                
+                // Verify this is the same instructor who started the session
+                if (userGuid != currentRfidInstructorId)
+                {
+                    SetRfidStatusText($"❌ Only the instructor who started the session can open sign-out.");
+                    AddRfidAttendanceRecord(userName, "Sign-Out Denied", "Wrong Instructor");
+                    return;
+                }
+                
+                currentRfidSessionState = AttendanceSessionState.ActiveForSignOut;
+                UpdateRfidSessionStateDisplay();
+                
+                SetRfidStatusText($"✅ Instructor {userName} opened sign-out. Students can now sign out.");
+                AddRfidAttendanceRecord(userName, "Sign-Out Opened", "Active");
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error handling instructor sign-out: {ex.Message}");
+                AddRfidAttendanceRecord("System", "Instructor Sign-Out Error", ex.Message);
+            }
+        }
+
+        private async Task HandleRfidStudentSignOut(string rfidData)
+        {
+            try
+            {
+                SetRfidStatusText($"Processing RFID student sign-out: {rfidData}...");
+                
+                // Get user information from database using RFID data
+                var userInfo = GetUserInfoFromRfid(rfidData);
+                if (userInfo == null)
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
+                    AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    return;
+                }
+                
+                string userName = userInfo.Username;
+                string userType = userInfo.UserType?.ToLower();
+                string userGuid = userInfo.EmployeeId;
+                
+                // Verify this is a student
+                if (userType != "student")
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} belongs to {userName} ({userType}). Only students can sign out.");
+                    AddRfidAttendanceRecord(userName, "Access Denied", $"Not Student ({userType})");
+                    return;
+                }
+                
+                // Check if student is already signed out
+                if (signedOutStudentGuids.Contains(userGuid))
+                {
+                    SetRfidStatusText($"⚠️ Student {userName} already signed out.");
+                    AddRfidAttendanceRecord(userName, "Already Signed Out", "Duplicate");
+                    return;
+                }
+                
+                // Check if student was signed in
+                if (!signedInStudentGuids.Contains(userGuid))
+                {
+                    SetRfidStatusText($"⚠️ Student {userName} was not signed in.");
+                    AddRfidAttendanceRecord(userName, "Sign-Out Denied", "Not Signed In");
+                    return;
+                }
+                
+                // Validate and record via database first, then update local state based on result
+                System.Threading.Tasks.Task.Run(() => {
+                    try
+                    {
+                        var attempt = dbManager?.TryRecordAttendanceByGuid(userGuid, "Student Sign-Out (RFID)");
+                        this.Invoke(new Action(() => {
+                            if (attempt != null && attempt.Success)
+                            {
+                                // Success: update local state and UI
+                                signedInStudentGuids.Remove(userGuid);
+                                signedOutStudentGuids.Add(userGuid);
+                                SetRfidStatusText($"✅ Student {userName} signed out successfully.");
+                                AddRfidAttendanceRecord(userName, "Student Sign-Out", "Success");
+                                
+                                // Add local record for display
+                                int userIdInt = 0;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out var u))
+                                {
+                                    userIdInt = u.Id;
+                                }
+                                var local = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = userIdInt,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Student Sign-Out (RFID)",
+                                    Status = "Success"
+                                };
+                                attendanceRecords.Add(local);
+                                UpdateAttendanceDisplay(local);
+                            }
+                            else
+                            {
+                                // Denied: do not mark as signed out
+                                var reason = attempt?.Reason ?? "Denied";
+                                SetRfidStatusText($"❌ {userName}: {reason}");
+                                AddRfidAttendanceRecord(userName, "Sign-Out Denied", reason);
+                                
+                                int userIdInt = 0;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out var u2))
+                                {
+                                    userIdInt = u2.Id;
+                                }
+                                var local = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = userIdInt,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Student Sign-Out (RFID)",
+                                    Status = $"Denied: {reason}"
+                                };
+                                attendanceRecords.Add(local);
+                                UpdateAttendanceDisplay(local);
+                            }
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        this.Invoke(new Action(() => {
+                            SetRfidStatusText($"❌ Error processing sign-out: {ex.Message}");
+                            AddRfidAttendanceRecord("System", "Sign-Out Error", ex.Message);
+                        }));
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error handling student sign-out: {ex.Message}");
+                AddRfidAttendanceRecord("System", "Student Sign-Out Error", ex.Message);
+            }
+        }
+
+        private async Task HandleRfidInstructorClose(string rfidData)
+        {
+            try
+            {
+                SetRfidStatusText($"Processing RFID instructor scan for session close: {rfidData}...");
+                
+                // Get user information from database using RFID data
+                var userInfo = GetUserInfoFromRfid(rfidData);
+                if (userInfo == null)
+                {
+                    SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
+                    AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    return;
+                }
+                
+                string userName = userInfo.Username;
+                string userGuid = userInfo.EmployeeId;
+                
+                // Verify this is the same instructor who started the session
+                if (userGuid != currentRfidInstructorId)
+                {
+                    SetRfidStatusText($"❌ Only the instructor who started the session can close it.");
+                    AddRfidAttendanceRecord(userName, "Session Close Denied", "Wrong Instructor");
+                    return;
+                }
+                
+                // Check if there are students who haven't signed out yet
+                if (signedInStudentGuids.Count > 0)
+                {
+                    // Get student names for better warning message
+                    var studentNames = new List<string>();
+                    foreach (var studentGuid in signedInStudentGuids)
+                    {
+                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(studentGuid, out var student))
+                        {
+                            studentNames.Add(student.Username);
+                        }
+                    }
+                    
+                    var studentList = string.Join(", ", studentNames);
+                    SetRfidStatusText($"⚠️ Warning: {signedInStudentGuids.Count} students still signed in: {studentList}. Closing session anyway...");
+                    AddRfidAttendanceRecord("System", "Session Close Warning", $"{signedInStudentGuids.Count} students still signed in: {studentList}");
+                    
+                    // Give a brief delay to allow instructor to see the warning
+                    await System.Threading.Tasks.Task.Delay(3000);
+                }
+                
+                // Close the session
+                currentRfidSessionState = AttendanceSessionState.Inactive;
+                currentRfidInstructorId = null;
+                currentRfidScheduleId = null;
+                
+                // Clear signed-in/out students when session ends (same as fingerprint system)
+                signedInStudentGuids.Clear();
+                signedOutStudentGuids.Clear();
+                
+                UpdateRfidSessionStateDisplay();
+                SetRfidStatusText($"✅ Instructor {userName} closed RFID session.");
+                AddRfidAttendanceRecord(userName, "Session Closed", "Inactive");
+                
+                // Record instructor's sign-out attendance
+                System.Threading.Tasks.Task.Run(() => {
+                    try
+                    {
+                        RecordAttendance(userName, "Instructor Sign-Out (RFID Session End)");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Warning: Could not record instructor sign-out: {ex.Message}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"Error handling instructor close: {ex.Message}");
+                AddRfidAttendanceRecord("System", "Instructor Close Error", ex.Message);
+            }
+        }
+
+        private async Task SendRfidScanToBackend(string rfidData)
+        {
+            try
+            {
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(10);
+                    
+                    var payload = new
+                    {
+                        rfid_data = rfidData,
+                        scan_type = "rfid",
+                        location = cmbRfidLocation?.SelectedItem?.ToString() ?? "inside",
+                        timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+                    };
+
+                    var json = JsonSerializer.Serialize(payload);
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                    var response = await client.PostAsync("http://localhost:5000/api/logs/rfid-scan", content);
+                    
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        var result = JsonSerializer.Deserialize<JsonElement>(responseContent);
+                        
+                        if (result.TryGetProperty("attendance", out var attendance))
+                        {
+                            var userName = attendance.TryGetProperty("user", out var user) && user.TryGetProperty("name", out var name) 
+                                ? name.GetString() : "Unknown";
+                            var status = attendance.TryGetProperty("status", out var statusProp) 
+                                ? statusProp.GetString() : "Unknown";
+                                
+                            SetRfidStatusText($"✅ Attendance recorded: {userName} - {status}");
+                            AddRfidAttendanceRecord(userName, "Attendance Recorded", status);
+                        }
+                        else
+                        {
+                            SetRfidStatusText("✅ RFID scan processed successfully");
+                            AddRfidAttendanceRecord("System", "RFID Processed", "Success");
+                        }
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        SetRfidStatusText($"❌ Server Error: {response.StatusCode} - {errorContent}");
+                        AddRfidAttendanceRecord("System", "RFID Error", $"Server Error: {response.StatusCode}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SetRfidStatusText($"❌ Network Error: {ex.Message}");
+                AddRfidAttendanceRecord("System", "RFID Error", $"Network Error: {ex.Message}");
+            }
+        }
+
+        private User GetUserInfoFromRfid(string rfidData)
+        {
+            try
+            {
+                if (dbManager == null)
+                {
+                    Console.WriteLine("Database manager not available for RFID lookup");
+                    return null;
+                }
+
+                // Look up user by RFID tag in the database
+                var user = dbManager.GetUserByRfidTag(rfidData);
+                if (user != null)
+                {
+                    Console.WriteLine($"RFID lookup successful: {user.Username} ({user.UserType})");
+                    return user;
+                }
+                else
+                {
+                    Console.WriteLine($"RFID {rfidData} not found in database");
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error looking up RFID {rfidData}: {ex.Message}");
+                return null;
+            }
+        }
+
+        // RFID Helper Methods
+        private void SetRfidStatusText(string text)
+        {
+            if (txtRfidStatus != null)
+            {
+                txtRfidStatus.AppendText($"[{DateTime.Now:HH:mm:ss}] {text}\r\n");
+                txtRfidStatus.SelectionStart = txtRfidStatus.Text.Length;
+                txtRfidStatus.ScrollToCaret();
+            }
+        }
+
+        private void AddRfidAttendanceRecord(string user, string action, string status)
+        {
+            if (dgvRfidAttendance != null)
+            {
+                dgvRfidAttendance.Rows.Insert(0, DateTime.Now, user, "", action, status);
+            }
+        }
+
+        private void ExportRfidAttendanceToCsv(string fileName)
+        {
+            try
+            {
+                using (var writer = new System.IO.StreamWriter(fileName))
+                {
+                    writer.WriteLine("Time,User,RFID,Action,Status");
+                    
+                    foreach (DataGridViewRow row in dgvRfidAttendance.Rows)
+                    {
+                        if (row.Cells.Count >= 5)
+                        {
+                            var time = row.Cells[0].Value?.ToString() ?? "";
+                            var user = row.Cells[1].Value?.ToString() ?? "";
+                            var rfid = row.Cells[2].Value?.ToString() ?? "";
+                            var action = row.Cells[3].Value?.ToString() ?? "";
+                            var status = row.Cells[4].Value?.ToString() ?? "";
+                            
+                            writer.WriteLine($"\"{time}\",\"{user}\",\"{rfid}\",\"{action}\",\"{status}\"");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed to export RFID data: {ex.Message}");
+            }
         }
     }
 

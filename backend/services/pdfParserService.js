@@ -1106,20 +1106,25 @@ class PDFParserService {
         
         // Try different patterns to handle various formatting
         const tabularPatterns = [
-            // Compressed format with NO spaces and NO year at the end
-            // Ensure gender letter is not a middle initial by requiring not followed by a dot
-            // e.g. "1.20257024703ABAO, RUD ALBERT P.FMSIT" or "... MMSIT"
-            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)([MF])(?!\.)([A-Z0-9\s\-().\/]+)$/,
+            // Compressed format WITH explicit gender and NO year
+            // Require gender to come after a period (end of middle initial) to avoid grabbing the
+            // first letter of the given name (e.g., "MARJUNE") as gender
+            // e.g. "1.20257024703ABAO, RUD ALBERT P.FMSIT"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?\.)\s*([MF])([A-Z0-9\s\-().\/]+)$/,
 
-            // Compressed format with NO spaces and WITH year at the end
+            // Compressed format WITH explicit gender and WITH year at the end
             // e.g. "1.20220185385ALIÑAB, JESECA HEART S.FBLIS4"
-            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)([MF])(?!\.)([A-Z0-9\s\-().\/]+?)(\d+)$/,
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?\.)\s*([MF])([A-Z0-9\s\-().\/]+?)(\d+)$/,
+
+            // Compressed format with NO explicit gender, name ends with '.' then course
+            // e.g. "1.20237527612ABREGANA, MARJUNE O.MMSIT"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?\.)\s*([A-Z0-9\s\-().\/]+)$/,
 
             // Standard format with spaces: "1. 20235390104 ABAS, GAIL ISABELLE A. F BSIT-CISCO 1"
             /^(\d+)\.\s+(\d{7,12})\s+(.+?)\s+([MF])\s+(.+?)\s+(\d+)\s*$/,
             
-            // Format with minimal spaces: "1.20235390104ABAS, GAIL ISABELLE A.FBSIT-CISCO1"
-            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)([MF])(?!\.)([A-Z0-9\s\-().\/]+?)(\d+)$/,
+            // Format with minimal spaces including year: "1.20235390104ABAS, GAIL ISABELLE A.FBSIT-CISCO1"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?\.)\s*([MF])([A-Z0-9\s\-().\/]+?)(\d+)$/,
             
             // Format with multiple spaces between fields
             /^(\d+)\.\s*(\d{7,12})\s+(.+?)\s+([MF])\s+(.+?)\s+(\d+)\s*$/,
@@ -1136,7 +1141,19 @@ class PDFParserService {
             if (match) {
                 console.log(`✅ Tabular pattern ${i + 1} matched:`, match);
                 
-                let [, count, studentId, fullName, gender, course, year] = match;
+                // Determine capture layout depending on which pattern matched
+                let count, studentId, fullName, gender, course, year;
+                if (i === 0) {
+                    [, count, studentId, fullName, gender, course] = match;
+                } else if (i === 1) {
+                    [, count, studentId, fullName, gender, course, year] = match;
+                } else if (i === 2) {
+                    // No gender version
+                    [, count, studentId, fullName, course] = match;
+                    gender = null;
+                } else {
+                    [, count, studentId, fullName, gender, course, year] = match;
+                }
                 
                 // Clean up the name (remove extra spaces, handle formatting)
                 const cleanName = fullName.trim().replace(/\s+/g, ' ');
@@ -1155,14 +1172,14 @@ class PDFParserService {
                 }
 
                 // Validate gender
-                if (!['M', 'F'].includes(gender)) {
+                if (gender && !['M', 'F'].includes(gender)) {
                     console.log('❌ Invalid gender:', gender);
                     continue;
                 }
 
                 // Default year when missing (e.g., graduate programs not using year)
                 const yearLevel = parseInt(year, 10);
-                const finalYear = Number.isFinite(yearLevel) ? yearLevel : 1;
+                const finalYear = Number.isFinite(yearLevel) ? yearLevel : this.deriveYearLevel(course, null);
 
                 const student = {
                     id: uuidv4(),
@@ -1171,13 +1188,19 @@ class PDFParserService {
                     last_name: parsedName.last_name,
                     middle_name: parsedName.middle_name,
                     full_name: cleanName,
-                    gender: gender,
+                    gender: gender || null,
                     course: course.trim(),
                     year_level: finalYear,
                     email: this.generateStudentEmail(studentId, parsedName),
                     status: 'Active'
                 };
                 
+                // Guard against bad name extraction like "LASTNAME," only
+                if (!student.first_name || student.full_name.endsWith(',')) {
+                    console.log('❌ Detected incomplete name parse, continue to next pattern');
+                    continue;
+                }
+
                 console.log('👤 Created tabular student:', student);
                 return student;
             }

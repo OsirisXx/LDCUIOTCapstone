@@ -751,12 +751,12 @@ namespace FutronicAttendanceSystem.Database
             }
         }
 
-        public User GetUserById(int id)
+        public User GetUserByRfidTag(string rfidTag)
         {
             try
             {
-                var cmd = new MySqlCommand("SELECT * FROM users WHERE id = @id", connection);
-                cmd.Parameters.AddWithValue("@id", id);
+                var cmd = new MySqlCommand("SELECT * FROM users WHERE RFIDTAG = @rfidTag", connection);
+                cmd.Parameters.AddWithValue("@rfidTag", rfidTag);
                 
                 using (var reader = cmd.ExecuteReader())
                 {
@@ -764,16 +764,18 @@ namespace FutronicAttendanceSystem.Database
                     {
                         return new User
                         {
-                            Id = reader.GetInt32("id"),
-                            Username = reader.GetString("username"),
-                            FingerprintTemplate = (byte[])reader["fingerprint_template"],
-                            EmployeeId = reader.IsDBNull(3) ? null : reader.GetString(3),
-                            Department = reader.IsDBNull(4) ? null : reader.GetString(4),
-                            Email = reader.IsDBNull(5) ? null : reader.GetString(5),
-                            Phone = reader.IsDBNull(6) ? null : reader.GetString(6),
-                            IsActive = reader.GetBoolean("is_active"),
-                            CreatedAt = reader.GetDateTime("created_at"),
-                            UpdatedAt = reader.GetDateTime("updated_at")
+                            Id = 0, // USERID is a GUID string, not an integer
+                            Username = reader.GetString("FIRSTNAME") + " " + reader.GetString("LASTNAME"),
+                            FingerprintTemplate = new byte[0], // No fingerprint template in this table
+                            EmployeeId = reader.GetString("USERID"), // Use USERID as the GUID
+                            Department = reader.IsDBNull(reader.GetOrdinal("DEPARTMENT")) ? null : reader.GetString("DEPARTMENT"),
+                            Email = reader.IsDBNull(reader.GetOrdinal("EMAIL")) ? null : reader.GetString("EMAIL"),
+                            Phone = reader.IsDBNull(reader.GetOrdinal("PHONENUMBER")) ? null : reader.GetString("PHONENUMBER"),
+                            IsActive = reader.GetString("STATUS") == "Active",
+                            UserType = reader.IsDBNull(reader.GetOrdinal("USERTYPE")) ? null : reader.GetString("USERTYPE"),
+                            RfidTag = reader.IsDBNull(reader.GetOrdinal("RFIDTAG")) ? null : reader.GetString("RFIDTAG"),
+                            CreatedAt = reader.GetDateTime("CREATED_AT"),
+                            UpdatedAt = reader.GetDateTime("UPDATED_AT")
                         };
                     }
                 }
