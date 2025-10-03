@@ -5,7 +5,6 @@ import Layout from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AttendanceLogs from './pages/AttendanceLogs';
-import RFIDScanner from './pages/RFIDScanner';
 import Sessions from './pages/Sessions';
 import Users from './pages/Users';
 import Rooms from './pages/Rooms';
@@ -59,7 +58,6 @@ function AppRoutes() {
           <Route path="users" element={<Users />} />
           <Route path="sessions" element={<Sessions />} />
           <Route path="attendance-logs" element={<AttendanceLogs />} />
-          <Route path="rfid-scanner" element={<RFIDScanner />} />
           <Route path="reports" element={<Reports />} />
         </Route>
       </Routes>

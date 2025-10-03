@@ -21,7 +21,6 @@ const navigation = [
   { name: 'Academic Management', href: '/management', icon: Squares2X2Icon },
   { name: 'Attendance Logs', href: '/attendance-logs', icon: ClipboardDocumentListIcon },
   { name: 'Reports', href: '/reports', icon: ChartBarIcon },
-  { name: 'RFID Scanner', href: '/rfid-scanner', icon: CreditCardIcon },
   { name: 'Sessions', href: '/sessions', icon: ClockIcon },
   { name: 'Users', href: '/users', icon: UsersIcon },
 ];
