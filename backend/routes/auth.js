@@ -20,14 +20,25 @@ router.post('/login', [
 
         const { email, password } = req.body;
 
-        // Get user from database
-        const user = await getSingleResult(
+        // Get user from database - handle both email and student_id/faculty_id login
+        let user = await getSingleResult(
             `SELECT USERID as id, EMAIL as email, PASSWORD_HASH as password_hash, 
                     USERTYPE as role, FIRSTNAME as first_name, LASTNAME as last_name, 
-                    STATUS as status, DEPARTMENT as department
+                    STATUS as status, DEPARTMENT as department, STUDENTID as student_id, FACULTYID as faculty_id
              FROM USERS WHERE EMAIL = ?`,
             [email]
         );
+
+        // If no user found by email, try by student_id or faculty_id
+        if (!user) {
+            user = await getSingleResult(
+                `SELECT USERID as id, EMAIL as email, PASSWORD_HASH as password_hash, 
+                        USERTYPE as role, FIRSTNAME as first_name, LASTNAME as last_name, 
+                        STATUS as status, DEPARTMENT as department, STUDENTID as student_id, FACULTYID as faculty_id
+                 FROM USERS WHERE STUDENTID = ? OR FACULTYID = ?`,
+                [email, email]
+            );
+        }
 
         if (!user) {
             return res.status(401).json({ message: 'Invalid credentials' });

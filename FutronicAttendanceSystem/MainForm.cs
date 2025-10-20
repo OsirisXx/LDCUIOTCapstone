@@ -204,6 +204,7 @@ namespace FutronicAttendanceSystem
         private TabPage rfidAttendanceTab; // NEW: RFID Attendance tab
         private TabPage deviceManagementTab;
         private TabPage fingerprintUsersTab;
+        private TabPage scenariosTab; // NEW: Attendance Scenarios Configuration tab
         private PictureBox pictureFingerprint;
 		private Button btnEnroll;
         private Button btnStop;
@@ -281,6 +282,24 @@ namespace FutronicAttendanceSystem
         private Button btnRefreshFingerprintUsers;
         private bool fingerprintUsersAccessGranted = false;
         private List<User> fingerprintUsers = new List<User>();
+
+        // Attendance Scenarios Configuration controls
+        private NumericUpDown numInstructorEarlyWindow;
+        private NumericUpDown numStudentGracePeriod;
+        private NumericUpDown numInstructorLateTolerance;
+        private NumericUpDown numAutoCloseDelay;
+        private NumericUpDown numStudentEarlyArrivalWindow;
+        private NumericUpDown numInstructorEndTolerance;
+        private Button btnResetToDefaults;
+        private Button btnSaveScenarios;
+        private Button btnLoadScenarios;
+        private Label lblScenariosTitle;
+        private Label lblInstructorEarlyWindow;
+        private Label lblStudentGracePeriod;
+        private Label lblInstructorLateTolerance;
+        private Label lblAutoCloseDelay;
+        private Label lblStudentEarlyArrivalWindow;
+        private Label lblInstructorEndTolerance;
 
         // Attendance records
         private List<Database.Models.AttendanceRecord> attendanceRecords = new List<Database.Models.AttendanceRecord>();
@@ -694,11 +713,16 @@ namespace FutronicAttendanceSystem
             fingerprintUsersTab = new TabPage("Fingerprint Users");
             tabControl.TabPages.Add(fingerprintUsersTab);
 
+            // Create attendance scenarios configuration tab
+            scenariosTab = new TabPage("Attendance Scenarios");
+            tabControl.TabPages.Add(scenariosTab);
+
             InitializeEnrollmentTab();
             InitializeAttendanceTab();
             InitializeRfidAttendanceTab();
             InitializeDeviceManagementTab();
             InitializeFingerprintUsersTab();
+            InitializeScenariosTab();
         }
 
         private void InitializeEnrollmentTab()
@@ -1805,6 +1829,349 @@ namespace FutronicAttendanceSystem
             fingerprintUsersListView.Columns.Add("GUID", 140);
             fingerprintUsersTab.Controls.Add(fingerprintUsersListView);
         }
+
+        private void InitializeScenariosTab()
+        {
+            scenariosTab.Controls.Clear();
+            
+            // Title
+            lblScenariosTitle = new Label();
+            lblScenariosTitle.Location = new Point(20, 20);
+            lblScenariosTitle.Size = new Size(600, 30);
+            lblScenariosTitle.Text = "📋 Attendance System Scenarios Configuration";
+            lblScenariosTitle.Font = new Font(lblScenariosTitle.Font.FontFamily, 14, FontStyle.Bold);
+            lblScenariosTitle.ForeColor = Color.DarkBlue;
+            scenariosTab.Controls.Add(lblScenariosTitle);
+
+            // Description
+            var lblDescription = new Label();
+            lblDescription.Location = new Point(20, 55);
+            lblDescription.Size = new Size(800, 40);
+            lblDescription.Text = "Configure time windows and tolerances for different attendance scenarios. " +
+                                 "All values are in minutes. Use 'Reset to Defaults' to restore original values.";
+            lblDescription.ForeColor = Color.DarkSlateGray;
+            scenariosTab.Controls.Add(lblDescription);
+
+            int yPos = 110;
+            int labelWidth = 350;
+            int controlWidth = 80;
+            int spacing = 35;
+
+            // 1. Instructor Early Window (Scenario 1)
+            lblInstructorEarlyWindow = new Label();
+            lblInstructorEarlyWindow.Location = new Point(20, yPos);
+            lblInstructorEarlyWindow.Size = new Size(labelWidth, 25);
+            lblInstructorEarlyWindow.Text = "1. Instructor Early Arrival Window (minutes):";
+            lblInstructorEarlyWindow.Font = new Font(lblInstructorEarlyWindow.Font, FontStyle.Bold);
+            scenariosTab.Controls.Add(lblInstructorEarlyWindow);
+
+            numInstructorEarlyWindow = new NumericUpDown();
+            numInstructorEarlyWindow.Location = new Point(380, yPos);
+            numInstructorEarlyWindow.Size = new Size(controlWidth, 25);
+            numInstructorEarlyWindow.Minimum = 0;
+            numInstructorEarlyWindow.Maximum = 60;
+            numInstructorEarlyWindow.Value = 15; // Default: 15 minutes
+            numInstructorEarlyWindow.Increment = 5;
+            scenariosTab.Controls.Add(numInstructorEarlyWindow);
+
+            yPos += spacing;
+
+            // 2. Student Grace Period (Scenario 1)
+            lblStudentGracePeriod = new Label();
+            lblStudentGracePeriod.Location = new Point(20, yPos);
+            lblStudentGracePeriod.Size = new Size(labelWidth, 25);
+            lblStudentGracePeriod.Text = "2. Student Grace Period (minutes):";
+            lblStudentGracePeriod.Font = new Font(lblStudentGracePeriod.Font, FontStyle.Bold);
+            scenariosTab.Controls.Add(lblStudentGracePeriod);
+
+            numStudentGracePeriod = new NumericUpDown();
+            numStudentGracePeriod.Location = new Point(380, yPos);
+            numStudentGracePeriod.Size = new Size(controlWidth, 25);
+            numStudentGracePeriod.Minimum = 0;
+            numStudentGracePeriod.Maximum = 60;
+            numStudentGracePeriod.Value = 15; // Default: 15 minutes
+            numStudentGracePeriod.Increment = 5;
+            scenariosTab.Controls.Add(numStudentGracePeriod);
+
+            yPos += spacing;
+
+            // 3. Instructor Late Tolerance (Scenario 4)
+            lblInstructorLateTolerance = new Label();
+            lblInstructorLateTolerance.Location = new Point(20, yPos);
+            lblInstructorLateTolerance.Size = new Size(labelWidth, 25);
+            lblInstructorLateTolerance.Text = "3. Instructor Late Tolerance (minutes):";
+            lblInstructorLateTolerance.Font = new Font(lblInstructorLateTolerance.Font, FontStyle.Bold);
+            scenariosTab.Controls.Add(lblInstructorLateTolerance);
+
+            numInstructorLateTolerance = new NumericUpDown();
+            numInstructorLateTolerance.Location = new Point(380, yPos);
+            numInstructorLateTolerance.Size = new Size(controlWidth, 25);
+            numInstructorLateTolerance.Minimum = 0;
+            numInstructorLateTolerance.Maximum = 120;
+            numInstructorLateTolerance.Value = 30; // Default: 30 minutes
+            numInstructorLateTolerance.Increment = 5;
+            scenariosTab.Controls.Add(numInstructorLateTolerance);
+
+            yPos += spacing;
+
+            // 4. Auto Close Delay (Scenario 5)
+            lblAutoCloseDelay = new Label();
+            lblAutoCloseDelay.Location = new Point(20, yPos);
+            lblAutoCloseDelay.Size = new Size(labelWidth, 25);
+            lblAutoCloseDelay.Text = "4. Auto Close Delay (minutes):";
+            lblAutoCloseDelay.Font = new Font(lblAutoCloseDelay.Font, FontStyle.Bold);
+            scenariosTab.Controls.Add(lblAutoCloseDelay);
+
+            numAutoCloseDelay = new NumericUpDown();
+            numAutoCloseDelay.Location = new Point(380, yPos);
+            numAutoCloseDelay.Size = new Size(controlWidth, 25);
+            numAutoCloseDelay.Minimum = 0;
+            numAutoCloseDelay.Maximum = 120;
+            numAutoCloseDelay.Value = 30; // Default: 30 minutes
+            numAutoCloseDelay.Increment = 5;
+            scenariosTab.Controls.Add(numAutoCloseDelay);
+
+            yPos += spacing;
+
+            // 5. Student Early Arrival Window (Scenario 15)
+            lblStudentEarlyArrivalWindow = new Label();
+            lblStudentEarlyArrivalWindow.Location = new Point(20, yPos);
+            lblStudentEarlyArrivalWindow.Size = new Size(labelWidth, 25);
+            lblStudentEarlyArrivalWindow.Text = "5. Student Early Arrival Window (minutes):";
+            lblStudentEarlyArrivalWindow.Font = new Font(lblStudentEarlyArrivalWindow.Font, FontStyle.Bold);
+            scenariosTab.Controls.Add(lblStudentEarlyArrivalWindow);
+
+            numStudentEarlyArrivalWindow = new NumericUpDown();
+            numStudentEarlyArrivalWindow.Location = new Point(380, yPos);
+            numStudentEarlyArrivalWindow.Size = new Size(controlWidth, 25);
+            numStudentEarlyArrivalWindow.Minimum = 0;
+            numStudentEarlyArrivalWindow.Maximum = 60;
+            numStudentEarlyArrivalWindow.Value = 15; // Default: 15 minutes
+            numStudentEarlyArrivalWindow.Increment = 5;
+            scenariosTab.Controls.Add(numStudentEarlyArrivalWindow);
+
+            yPos += spacing;
+
+            // 6. Instructor End Tolerance (Scenario 2)
+            lblInstructorEndTolerance = new Label();
+            lblInstructorEndTolerance.Location = new Point(20, yPos);
+            lblInstructorEndTolerance.Size = new Size(labelWidth, 25);
+            lblInstructorEndTolerance.Text = "6. Instructor End Session Tolerance (minutes):";
+            lblInstructorEndTolerance.Font = new Font(lblInstructorEndTolerance.Font, FontStyle.Bold);
+            scenariosTab.Controls.Add(lblInstructorEndTolerance);
+
+            numInstructorEndTolerance = new NumericUpDown();
+            numInstructorEndTolerance.Location = new Point(380, yPos);
+            numInstructorEndTolerance.Size = new Size(controlWidth, 25);
+            numInstructorEndTolerance.Minimum = 0;
+            numInstructorEndTolerance.Maximum = 60;
+            numInstructorEndTolerance.Value = 15; // Default: 15 minutes
+            numInstructorEndTolerance.Increment = 5;
+            scenariosTab.Controls.Add(numInstructorEndTolerance);
+
+            yPos += 50;
+
+            // Control buttons
+            btnResetToDefaults = new Button();
+            btnResetToDefaults.Location = new Point(20, yPos);
+            btnResetToDefaults.Size = new Size(150, 35);
+            btnResetToDefaults.Text = "Reset to Defaults";
+            btnResetToDefaults.BackColor = Color.LightCoral;
+            btnResetToDefaults.Font = new Font(btnResetToDefaults.Font, FontStyle.Bold);
+            btnResetToDefaults.Click += BtnResetToDefaults_Click;
+            scenariosTab.Controls.Add(btnResetToDefaults);
+
+            btnSaveScenarios = new Button();
+            btnSaveScenarios.Location = new Point(180, yPos);
+            btnSaveScenarios.Size = new Size(120, 35);
+            btnSaveScenarios.Text = "Save Settings";
+            btnSaveScenarios.BackColor = Color.LightGreen;
+            btnSaveScenarios.Font = new Font(btnSaveScenarios.Font, FontStyle.Bold);
+            btnSaveScenarios.Click += BtnSaveScenarios_Click;
+            scenariosTab.Controls.Add(btnSaveScenarios);
+
+            btnLoadScenarios = new Button();
+            btnLoadScenarios.Location = new Point(310, yPos);
+            btnLoadScenarios.Size = new Size(120, 35);
+            btnLoadScenarios.Text = "Load Settings";
+            btnLoadScenarios.BackColor = Color.LightBlue;
+            btnLoadScenarios.Font = new Font(btnLoadScenarios.Font, FontStyle.Bold);
+            btnLoadScenarios.Click += BtnLoadScenarios_Click;
+            scenariosTab.Controls.Add(btnLoadScenarios);
+
+            yPos += 50;
+
+            // Scenario descriptions panel
+            var descriptionPanel = new Panel();
+            descriptionPanel.Location = new Point(20, yPos);
+            descriptionPanel.Size = new Size(800, 300);
+            descriptionPanel.BorderStyle = BorderStyle.FixedSingle;
+            descriptionPanel.BackColor = Color.FromArgb(248, 248, 255);
+            scenariosTab.Controls.Add(descriptionPanel);
+
+            var lblDescriptionsTitle = new Label();
+            lblDescriptionsTitle.Location = new Point(10, 10);
+            lblDescriptionsTitle.Size = new Size(780, 25);
+            lblDescriptionsTitle.Text = "📋 Scenario Descriptions:";
+            lblDescriptionsTitle.Font = new Font(lblDescriptionsTitle.Font, FontStyle.Bold);
+            lblDescriptionsTitle.ForeColor = Color.DarkBlue;
+            descriptionPanel.Controls.Add(lblDescriptionsTitle);
+
+            var txtDescriptions = new TextBox();
+            txtDescriptions.Location = new Point(10, 40);
+            txtDescriptions.Size = new Size(780, 250);
+            txtDescriptions.Multiline = true;
+            txtDescriptions.ReadOnly = true;
+            txtDescriptions.ScrollBars = ScrollBars.Vertical;
+            txtDescriptions.BackColor = Color.White;
+            txtDescriptions.Text = @"1. Instructor Early Window: How early an instructor can start a session before scheduled time
+2. Student Grace Period: How late a student can arrive and still be marked 'Present'
+3. Instructor Late Tolerance: How late an instructor can be and still start a session (marked as 'Unscheduled')
+4. Auto Close Delay: How long after scheduled end time the system will auto-close an active session
+5. Student Early Arrival Window: How early students can scan and be marked as 'Early Arrival'
+6. Instructor End Tolerance: How early/late an instructor can end a session relative to scheduled end time
+
+These settings allow you to customize the attendance system behavior for different academic policies and requirements.";
+            descriptionPanel.Controls.Add(txtDescriptions);
+
+            // Load current settings
+            LoadScenariosFromConfig();
+        }
+
+        // ============= Attendance Scenarios Configuration Methods =============
+        
+        private void BtnResetToDefaults_Click(object sender, EventArgs e)
+        {
+            var result = MessageBox.Show(
+                "Are you sure you want to reset all attendance scenario values to their defaults?",
+                "Reset to Defaults",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (result == DialogResult.Yes)
+            {
+                numInstructorEarlyWindow.Value = 15;
+                numStudentGracePeriod.Value = 15;
+                numInstructorLateTolerance.Value = 30;
+                numAutoCloseDelay.Value = 30;
+                numStudentEarlyArrivalWindow.Value = 15;
+                numInstructorEndTolerance.Value = 15;
+
+                MessageBox.Show("All values have been reset to defaults.", "Reset Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void BtnSaveScenarios_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                var scenariosConfig = new
+                {
+                    InstructorEarlyWindow = (int)numInstructorEarlyWindow.Value,
+                    StudentGracePeriod = (int)numStudentGracePeriod.Value,
+                    InstructorLateTolerance = (int)numInstructorLateTolerance.Value,
+                    AutoCloseDelay = (int)numAutoCloseDelay.Value,
+                    StudentEarlyArrivalWindow = (int)numStudentEarlyArrivalWindow.Value,
+                    InstructorEndTolerance = (int)numInstructorEndTolerance.Value
+                };
+
+                string jsonString = System.Text.Json.JsonSerializer.Serialize(scenariosConfig, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "attendance_scenarios.json");
+                File.WriteAllText(configPath, jsonString);
+
+                MessageBox.Show($"Scenarios configuration saved to:\n{configPath}", "Save Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error saving scenarios configuration: {ex.Message}", "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void BtnLoadScenarios_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "attendance_scenarios.json");
+                
+                if (!File.Exists(configPath))
+                {
+                    MessageBox.Show("No saved configuration found. Using default values.", "Load Configuration", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                string jsonString = File.ReadAllText(configPath);
+                var scenariosConfig = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(jsonString);
+
+                if (scenariosConfig != null)
+                {
+                    if (scenariosConfig.TryGetValue("InstructorEarlyWindow", out var instructorEarlyWindow))
+                        numInstructorEarlyWindow.Value = Convert.ToDecimal(instructorEarlyWindow.ToString());
+                    
+                    if (scenariosConfig.TryGetValue("StudentGracePeriod", out var studentGracePeriod))
+                        numStudentGracePeriod.Value = Convert.ToDecimal(studentGracePeriod.ToString());
+                    
+                    if (scenariosConfig.TryGetValue("InstructorLateTolerance", out var instructorLateTolerance))
+                        numInstructorLateTolerance.Value = Convert.ToDecimal(instructorLateTolerance.ToString());
+                    
+                    if (scenariosConfig.TryGetValue("AutoCloseDelay", out var autoCloseDelay))
+                        numAutoCloseDelay.Value = Convert.ToDecimal(autoCloseDelay.ToString());
+                    
+                    if (scenariosConfig.TryGetValue("StudentEarlyArrivalWindow", out var studentEarlyArrivalWindow))
+                        numStudentEarlyArrivalWindow.Value = Convert.ToDecimal(studentEarlyArrivalWindow.ToString());
+                    
+                    if (scenariosConfig.TryGetValue("InstructorEndTolerance", out var instructorEndTolerance))
+                        numInstructorEndTolerance.Value = Convert.ToDecimal(instructorEndTolerance.ToString());
+
+                    MessageBox.Show("Scenarios configuration loaded successfully.", "Load Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading scenarios configuration: {ex.Message}", "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void LoadScenariosFromConfig()
+        {
+            try
+            {
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "attendance_scenarios.json");
+                
+                if (File.Exists(configPath))
+                {
+                    string jsonString = File.ReadAllText(configPath);
+                    var scenariosConfig = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(jsonString);
+
+                    if (scenariosConfig != null)
+                    {
+                        if (scenariosConfig.TryGetValue("InstructorEarlyWindow", out var instructorEarlyWindow))
+                            numInstructorEarlyWindow.Value = Convert.ToDecimal(instructorEarlyWindow.ToString());
+                        
+                        if (scenariosConfig.TryGetValue("StudentGracePeriod", out var studentGracePeriod))
+                            numStudentGracePeriod.Value = Convert.ToDecimal(studentGracePeriod.ToString());
+                        
+                        if (scenariosConfig.TryGetValue("InstructorLateTolerance", out var instructorLateTolerance))
+                            numInstructorLateTolerance.Value = Convert.ToDecimal(instructorLateTolerance.ToString());
+                        
+                        if (scenariosConfig.TryGetValue("AutoCloseDelay", out var autoCloseDelay))
+                            numAutoCloseDelay.Value = Convert.ToDecimal(autoCloseDelay.ToString());
+                        
+                        if (scenariosConfig.TryGetValue("StudentEarlyArrivalWindow", out var studentEarlyArrivalWindow))
+                            numStudentEarlyArrivalWindow.Value = Convert.ToDecimal(studentEarlyArrivalWindow.ToString());
+                        
+                        if (scenariosConfig.TryGetValue("InstructorEndTolerance", out var instructorEndTolerance))
+                            numInstructorEndTolerance.Value = Convert.ToDecimal(instructorEndTolerance.ToString());
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Silently fail and use default values if config can't be loaded
+                Console.WriteLine($"Could not load scenarios config: {ex.Message}");
+            }
+        }
+
+        // ============= End of Attendance Scenarios Configuration Methods =============
 
         private bool PromptForAdminPassword()
         {
@@ -3871,6 +4238,20 @@ namespace FutronicAttendanceSystem
                                     {
                                         Console.WriteLine($"ATTENDANCE DENIED - Full error: {attempt.Reason}");
                                     }
+                                    else
+                                    {
+                                        // If attendance successful, check if we need to control the lock
+                                        System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControl(userGuid, actionToRecord);
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control request failed: {lockEx.Message}");
+                                            }
+                                        });
+                                    }
                                 }));
                             }
                             catch (Exception ex)
@@ -3976,6 +4357,260 @@ namespace FutronicAttendanceSystem
             catch (Exception ex)
             {
                 Console.WriteLine($"Error updating attendance display: {ex.Message}");
+            }
+        }
+
+        // Cache for discovered ESP32 devices
+        private static Dictionary<string, string> discoveredESP32Devices = new Dictionary<string, string>();
+        private static DateTime lastDiscoveryTime = DateTime.MinValue;
+
+        // Request lock control - Auto-discover and send command to ESP32
+        private async Task RequestLockControl(string userGuid, string action)
+        {
+            try
+            {
+                Console.WriteLine("=== LOCK CONTROL REQUEST START ===");
+                Console.WriteLine($"User GUID: {userGuid}");
+                Console.WriteLine($"Action: {action}");
+
+                // Get user info to check if instructor
+                User user = null;
+                if (userLookupByGuid != null)
+                {
+                    userLookupByGuid.TryGetValue(userGuid, out user);
+                }
+
+                if (user == null)
+                {
+                    Console.WriteLine("❌ User not found");
+                    return;
+                }
+
+                Console.WriteLine($"User: {user.FirstName} {user.LastName} - Type: {user.UserType}");
+
+                // Only instructors can control the lock
+                if (user.UserType?.ToLower() != "instructor")
+                {
+                    Console.WriteLine("⚠️ User is not an instructor - skipping lock control");
+                    return;
+                }
+
+                // Determine lock action
+                string lockAction = action.Contains("Check In") || action.Contains("Sign-In") ? "open" : "close";
+                Console.WriteLine($"Lock Action: {lockAction}");
+
+                // Auto-discover ESP32 on the network
+                string esp32Ip = await DiscoverESP32();
+                
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network");
+                    this.Invoke(new Action(() => {
+                        SetStatusText("❌ No lock controller found");
+                    }));
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                Console.WriteLine($"Sending to ESP32: {esp32Url}");
+
+                // Create payload for ESP32
+                var payload = new
+                {
+                    action = lockAction,
+                    user = $"{user.FirstName} {user.LastName}"
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    
+                    // Add API key to request header for security
+                    string apiKey = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Must match ESP32 API key
+                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+                    Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
+                    
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    Console.WriteLine($"ESP32 Response Status: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"ESP32 Response: {responseContent}");
+                        
+                        if (lockAction == "open")
+                        {
+                            Console.WriteLine("🔓 Door unlocked for instructor");
+                            this.Invoke(new Action(() => {
+                                SetStatusText("🔓 Door unlocked");
+                            }));
+                        }
+                        else
+                        {
+                            Console.WriteLine("🔒 Door locked by instructor");
+                            this.Invoke(new Action(() => {
+                                SetStatusText("🔒 Door locked");
+                            }));
+                        }
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"❌ ESP32 request failed: {response.StatusCode}");
+                        Console.WriteLine($"Error: {errorContent}");
+                        
+                        this.Invoke(new Action(() => {
+                            SetStatusText($"❌ Lock control failed: {response.StatusCode}");
+                        }));
+                    }
+                }
+                
+                Console.WriteLine("=== LOCK CONTROL REQUEST END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error requesting lock control: {ex.Message}");
+                
+                this.Invoke(new Action(() => {
+                    SetStatusText($"❌ Lock error: {ex.Message}");
+                }));
+            }
+        }
+
+        // Auto-discover ESP32 on the local network
+        private async Task<string> DiscoverESP32()
+        {
+            try
+            {
+                // Use cached result if recent (within 5 minutes)
+                if (discoveredESP32Devices.Count > 0 && 
+                    (DateTime.Now - lastDiscoveryTime).TotalMinutes < 5)
+                {
+                    var cachedIp = discoveredESP32Devices.Values.FirstOrDefault();
+                    Console.WriteLine($"Using cached ESP32 IP: {cachedIp}");
+                    return cachedIp;
+                }
+
+                Console.WriteLine("🔍 Discovering ESP32 devices on network...");
+
+                // Get local network range - prefer WiFi/Ethernet with valid IP
+                var allIps = System.Net.Dns.GetHostEntry(System.Net.Dns.GetHostName())
+                    .AddressList
+                    .Where(ip => ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    .Where(ip => !ip.ToString().StartsWith("169.254")) // Skip APIPA
+                    .Where(ip => !ip.ToString().StartsWith("192.168.56")) // Skip VirtualBox
+                    .Where(ip => !ip.ToString().StartsWith("192.168.198")) // Skip VMware
+                    .Where(ip => !ip.ToString().StartsWith("192.168.240")) // Skip VMware
+                    .ToList();
+
+                Console.WriteLine($"Found {allIps.Count} valid network adapters:");
+                foreach (var ip in allIps)
+                {
+                    Console.WriteLine($"  - {ip}");
+                }
+
+                // Prefer 192.168.1.x or 192.168.0.x (common home networks)
+                var localIp = allIps.FirstOrDefault(ip => ip.ToString().StartsWith("192.168.1.") || ip.ToString().StartsWith("192.168.0."))
+                           ?? allIps.FirstOrDefault();
+
+                if (localIp == null)
+                {
+                    Console.WriteLine("❌ Could not determine local IP (no valid network connection)");
+                    Console.WriteLine("⚠️ Your computer may not be connected to WiFi/network");
+                    Console.WriteLine("💡 Trying common network ranges...");
+                    
+                    // Try common network ranges as fallback
+                    var commonRanges = new[] { "192.168.1", "192.168.0", "192.168.100", "10.0.0" };
+                    foreach (var range in commonRanges)
+                    {
+                        Console.WriteLine($"Trying range: {range}.x");
+                        var found = await ScanNetworkRange(range);
+                        if (!string.IsNullOrEmpty(found))
+                        {
+                            return found;
+                        }
+                    }
+                    
+                    return null;
+                }
+
+                string networkPrefix = string.Join(".", localIp.ToString().Split('.').Take(3));
+                Console.WriteLine($"Local IP: {localIp}");
+                Console.WriteLine($"Scanning network: {networkPrefix}.x");
+                
+                return await ScanNetworkRange(networkPrefix);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Discovery error: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Scan a specific network range for ESP32
+        private async Task<string> ScanNetworkRange(string networkPrefix)
+        {
+            try
+            {
+
+                // Scan common IP ranges (fast scan of likely IPs)
+                var likelyIPs = new List<int> { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 20, 50, 100, 101, 102, 200, 254 };
+                
+                Console.WriteLine($"Scanning IPs: {string.Join(", ", likelyIPs.Select(ip => $"{networkPrefix}.{ip}"))}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromMilliseconds(500); // Fast timeout
+
+                    foreach (int lastOctet in likelyIPs)
+                    {
+                        string testIp = $"{networkPrefix}.{lastOctet}";
+                        
+                        try
+                        {
+                            Console.WriteLine($"  Checking {testIp}...");
+                            var response = await client.GetAsync($"http://{testIp}/api/health");
+                            
+                            if (response.IsSuccessStatusCode)
+                            {
+                                var content = await response.Content.ReadAsStringAsync();
+                                Console.WriteLine($"  Response from {testIp}: {content.Substring(0, Math.Min(100, content.Length))}...");
+                                
+                                // Check if it's an ESP32 lock controller
+                                if (content.Contains("ESP32") && content.Contains("Lock"))
+                                {
+                                    Console.WriteLine($"✅ Found ESP32 at: {testIp}");
+                                    discoveredESP32Devices[testIp] = testIp;
+                                    lastDiscoveryTime = DateTime.Now;
+                                    return testIp;
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"  ❌ {testIp} responded but not an ESP32 Lock Controller");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // Ignore connection errors, continue scanning
+                            Console.WriteLine($"  ✗ {testIp} - {ex.Message.Split('\n')[0]}");
+                        }
+                    }
+                }
+
+                Console.WriteLine($"⚠️ No ESP32 found in {networkPrefix}.x");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Scan error: {ex.Message}");
+                return null;
             }
         }
 
@@ -5279,10 +5914,13 @@ namespace FutronicAttendanceSystem
                     AddRfidAttendanceRecord(userName, "Session Started", $"Active - {validationResult.SubjectName}");
                     
                     // Record instructor's sign-in attendance
-                    System.Threading.Tasks.Task.Run(() => {
+                    System.Threading.Tasks.Task.Run(async () => {
                         try
                         {
                             RecordAttendance(userName, "Instructor Sign-In (RFID Session Start)");
+                            
+                            // Request lock control for instructor
+                            await RequestLockControl(userGuid, "Instructor Sign-In (RFID Session Start)");
                         }
                         catch (Exception ex)
                         {
@@ -5588,10 +6226,13 @@ namespace FutronicAttendanceSystem
                 AddRfidAttendanceRecord(userName, "Session Closed", "Inactive");
                 
                 // Record instructor's sign-out attendance
-                System.Threading.Tasks.Task.Run(() => {
+                System.Threading.Tasks.Task.Run(async () => {
                     try
                     {
                         RecordAttendance(userName, "Instructor Sign-Out (RFID Session End)");
+                        
+                        // Request lock control for instructor sign-out
+                        await RequestLockControl(userGuid, "Instructor Sign-Out (RFID Session End)");
                     }
                     catch (Exception ex)
                     {
@@ -5809,6 +6450,7 @@ namespace FutronicAttendanceSystem
             record.Template = Template ?? new byte[0]; // Prevent null template
             return record;
         }
+
     }
 
 }

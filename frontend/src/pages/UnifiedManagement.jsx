@@ -38,6 +38,7 @@ function UnifiedManagement() {
   const [modalData, setModalData] = useState(null);
   const [modalType, setModalType] = useState(''); // 'room', 'subject', 'schedule'
   const [expandedCards, setExpandedCards] = useState(new Set());
+  const [studentSearchTerm, setStudentSearchTerm] = useState('');
   
   // Bulk operations states
   const [selectedItems, setSelectedItems] = useState(new Set());
@@ -687,6 +688,19 @@ function UnifiedManagement() {
     return `${displayHour}:${minutes} ${ampm}`;
   };
 
+  const filterStudents = (students, searchTerm) => {
+    if (!Array.isArray(students) || !searchTerm) return students;
+    
+    const searchLower = searchTerm.toLowerCase();
+    return students.filter(student => 
+      student.FIRSTNAME?.toLowerCase().includes(searchLower) ||
+      student.LASTNAME?.toLowerCase().includes(searchLower) ||
+      student.STUDENTID?.toLowerCase().includes(searchLower) ||
+      student.DEPARTMENT?.toLowerCase().includes(searchLower) ||
+      student.YEARLEVEL?.toString().includes(searchLower)
+    );
+  };
+
   const filterData = (items, searchTerm) => {
     if (!Array.isArray(items)) return [];
     if (!searchTerm) return items;
@@ -1117,11 +1131,25 @@ function UnifiedManagement() {
               </div>
 
               <div>
-                <h3 className="text-lg font-semibold text-gray-900 mb-3">
-                  Students ({modalData.students?.length || 0})
-                </h3>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    Students ({modalData.students?.length || 0})
+                  </h3>
+                  {modalData.students?.length > 0 && (
+                    <div className="relative w-64">
+                      <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+                      <input
+                        type="text"
+                        placeholder="Search students..."
+                        value={studentSearchTerm}
+                        onChange={(e) => setStudentSearchTerm(e.target.value)}
+                        className="w-full pl-10 pr-3 py-1 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                  )}
+                </div>
                 <div className="space-y-3 max-h-64 overflow-y-auto">
-                  {modalData.students?.map((student) => (
+                  {filterStudents(modalData.students, studentSearchTerm)?.map((student) => (
                     <div key={student.USERID} className="bg-gray-50 rounded p-3">
                       <div className="font-medium text-gray-900">
                         {student.FIRSTNAME} {student.LASTNAME}
@@ -1133,6 +1161,11 @@ function UnifiedManagement() {
                       <div className="text-xs text-gray-500">{student.EMAIL}</div>
                     </div>
                   ))}
+                  {filterStudents(modalData.students, studentSearchTerm)?.length === 0 && studentSearchTerm && (
+                    <div className="text-center py-4 text-gray-500">
+                      No students found matching "{studentSearchTerm}"
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1145,7 +1178,14 @@ function UnifiedManagement() {
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   {modalData.schedules.map((schedule) => (
                     <div key={schedule.SCHEDULEID} className="bg-gray-50 rounded p-3">
-                      <div className="font-medium text-gray-900">{schedule.DAYOFWEEK}</div>
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="font-medium text-gray-900">{schedule.DAYOFWEEK}</div>
+                        {((schedule.ISLAB === 1) || (schedule.ISLAB === '1') || (schedule.ISLAB === true)) ? (
+                          <span className="inline-flex items-center rounded-full bg-purple-100 text-purple-800 px-2 py-0.5 text-xs font-medium">LAB</span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full bg-blue-100 text-blue-800 px-2 py-0.5 text-xs font-medium">LEC</span>
+                        )}
+                      </div>
                       <div className="text-sm text-gray-600">
                         {formatTime(schedule.STARTTIME)} - {formatTime(schedule.ENDTIME)}
                       </div>
@@ -1669,6 +1709,7 @@ function UnifiedManagement() {
                   setShowModal(false);
                   setModalData(null);
                   setModalType('');
+                  setStudentSearchTerm('');
                 }}
                 className="text-gray-400 hover:text-gray-600"
               >
@@ -1686,6 +1727,7 @@ function UnifiedManagement() {
                   setShowModal(false);
                   setModalData(null);
                   setModalType('');
+                  setStudentSearchTerm('');
                 }}
                 className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
               >

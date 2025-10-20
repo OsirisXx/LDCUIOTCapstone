@@ -283,6 +283,12 @@ router.get('/subject/:id', authenticateToken, requireInstructor, async (req, res
     try {
         const { id } = req.params;
 
+        // Check if optional column exists to avoid selecting non-existent fields
+        const isLabCol = await getSingleResult(
+            `SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'CLASSSCHEDULES' AND COLUMN_NAME = 'ISLAB'`
+        );
+        const selectIsLab = (isLabCol && isLabCol.cnt > 0) ? 'COALESCE(cs.ISLAB,0) as ISLAB' : '0 as ISLAB';
+
         // Get subject details
         const subject = await getSingleResult(`
             SELECT 
@@ -321,6 +327,7 @@ router.get('/subject/:id', authenticateToken, requireInstructor, async (req, res
                 cs.DAYOFWEEK,
                 cs.STARTTIME,
                 cs.ENDTIME,
+                ${selectIsLab},
                 r.ROOMNUMBER,
                 r.ROOMNAME,
                 r.BUILDING

@@ -876,9 +876,18 @@ router.put('/:id', [
     requireAdmin,
     body('first_name').optional().trim().isLength({ min: 1 }),
     body('last_name').optional().trim().isLength({ min: 1 }),
-    body('email').optional().isEmail().normalizeEmail(),
+    body('email').optional().custom((value) => {
+        if (value === '' || value === null || value === undefined) {
+            return true; // Allow empty/null emails
+        }
+        return require('validator').isEmail(value);
+    }).normalizeEmail(),
     body('user_type').optional().isIn(['student', 'instructor', 'admin']),
-    body('status').optional().isIn(['active', 'inactive']),
+    body('status').optional().custom((value) => {
+        if (!value) return true; // Allow empty/null status
+        const validStatuses = ['active', 'inactive', 'Active', 'Inactive'];
+        return validStatuses.includes(value);
+    }),
     body('rfid_tag').optional().isString().isLength({ min: 4, max: 50 })
 ], async (req, res) => {
     try {
@@ -887,7 +896,11 @@ router.put('/:id', [
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
             console.log('Validation errors:', errors.array());
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ 
+                message: 'Validation failed',
+                errors: errors.array(),
+                receivedData: req.body
+            });
         }
 
         const { id } = req.params;
@@ -897,8 +910,15 @@ router.put('/:id', [
         Object.keys(updateFields).forEach(key => {
             if (updateFields[key] === undefined) {
                 delete updateFields[key];
-            } else if ((key === 'student_id' || key === 'employee_id') && updateFields[key] === '') {
+            } else if ((key === 'student_id' || key === 'faculty_id') && updateFields[key] === '') {
                 updateFields[key] = null;
+            } else if (key === 'status') {
+                // Normalize status values to match database
+                if (updateFields[key] === 'active') {
+                    updateFields[key] = 'Active';
+                } else if (updateFields[key] === 'inactive') {
+                    updateFields[key] = 'Inactive';
+                }
             }
         });
 
@@ -938,6 +958,7 @@ router.put('/:id', [
         const fieldMap = {
             first_name: 'FIRSTNAME',
             last_name: 'LASTNAME',
+            email: 'EMAIL',
             user_type: 'USERTYPE',
             year_level: 'YEARLEVEL',
             department: 'DEPARTMENT',

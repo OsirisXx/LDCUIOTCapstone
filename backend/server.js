@@ -39,6 +39,7 @@ app.use('/api/devices', require('./routes/devices'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/unified', require('./routes/unified'));
 app.use('/api/import', require('./routes/import'));
+app.use('/api/lock-control', require('./routes/lockControl'));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

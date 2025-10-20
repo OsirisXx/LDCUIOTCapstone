@@ -52,3 +52,15 @@ AND COLUMN_NAME IN ('STATUS', 'SCANTYPE');
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
