@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   ChartBarIcon,
   CalendarDaysIcon,
@@ -597,8 +598,19 @@ function Reports() {
         </div>
 
         {/* Clear Group Records Confirmation Dialog */}
-        {showClearDialog && (
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+        {showClearDialog && createPortal(
+          <div 
+            className="fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60]"
+            style={{
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              width: '100vw',
+              height: '100vh',
+              zIndex: 60
+            }}
+          >
             <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
               <div className="mt-3 text-center">
                 <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100">
@@ -630,7 +642,8 @@ function Reports() {
                 </div>
               </div>
             </div>
-          </div>
+          </div>,
+          document.body
         )}
       </div>
     );
@@ -1028,8 +1041,19 @@ function Reports() {
       )}
 
       {/* Report Details Modal */}
-      {showDetailModal && selectedReport && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+      {showDetailModal && selectedReport && createPortal(
+        <div 
+          className="fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60]"
+          style={{
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: '100vw',
+            height: '100vh',
+            zIndex: 60
+          }}
+        >
           <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-4xl shadow-lg rounded-md bg-white">
             <div className="mt-3">
               <div className="flex justify-between items-center mb-6">
@@ -1154,7 +1178,8 @@ function Reports() {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
     </div>

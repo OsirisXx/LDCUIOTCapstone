@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { PlusIcon, PencilIcon, TrashIcon, BuildingOfficeIcon, MapPinIcon, UsersIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 import axios from 'axios';
@@ -355,8 +356,19 @@ function Rooms() {
       )}
 
       {/* Add/Edit Room Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+      {showModal && createPortal(
+        <div 
+          className="fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60]"
+          style={{
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: '100vw',
+            height: '100vh',
+            zIndex: 60
+          }}
+        >
           <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
             <div className="mt-3">
               <h3 className="text-lg font-medium text-gray-900 mb-4">
@@ -447,12 +459,13 @@ function Rooms() {
               </form>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Delete Confirmation Modal */}
       {showDeleteModal && deleteData && (
-        <div className="fixed inset-0 overflow-y-auto z-50">
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
           {/* Backdrop with blur and fade animation */}
           <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
             modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'

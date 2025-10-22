@@ -231,7 +231,7 @@ router.get('/active', authenticateToken, requireInstructor, async (req, res) => 
                 GROUP BY ar.SCHEDULEID
             ) attendance_count ON cs.SCHEDULEID = attendance_count.SCHEDULEID
             WHERE cs.DAYOFWEEK = ?
-            AND cs.ACADEMICYEAR = '2024-2025'
+            AND cs.ACADEMICYEAR = '2025-2026'
             AND cs.SEMESTER = 'First Semester'
             AND (
                 TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME OR

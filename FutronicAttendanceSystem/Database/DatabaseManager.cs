@@ -22,6 +22,10 @@ namespace FutronicAttendanceSystem.Database
         public string CurrentRoomId { get; set; }
         public string CurrentLocation { get; set; } = "inside";
         
+        // Current academic settings
+        public string CurrentAcademicYear { get; private set; } = "2024-2025";
+        public string CurrentSemester { get; private set; } = "First Semester";
+        
         // Device information
         public Models.Device CurrentDevice { get; private set; }
 
@@ -38,6 +42,7 @@ namespace FutronicAttendanceSystem.Database
             Console.WriteLine($"DatabaseManager: Server={config.Server}, Database={config.Database}, User={config.Username}");
             
             InitializeDatabase();
+            LoadAcademicSettings();
             try { RegisterDevice(); } catch { /* Non-fatal for new schema without DEVICES */ }
         }
 
@@ -51,6 +56,45 @@ namespace FutronicAttendanceSystem.Database
             catch (Exception ex)
             {
                 throw new Exception($"Failed to connect to database: {ex.Message}", ex);
+            }
+        }
+
+        private void LoadAcademicSettings()
+        {
+            try
+            {
+                // Load current academic year
+                var academicYearCmd = new MySqlCommand("SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year'", connection);
+                var academicYearResult = academicYearCmd.ExecuteScalar();
+                if (academicYearResult != null && !string.IsNullOrWhiteSpace(academicYearResult.ToString()))
+                {
+                    CurrentAcademicYear = academicYearResult.ToString();
+                }
+                else
+                {
+                    LogMessage("WARNING", "No academic year setting found, using default: 2024-2025");
+                }
+
+                // Load current semester
+                var semesterCmd = new MySqlCommand("SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester'", connection);
+                var semesterResult = semesterCmd.ExecuteScalar();
+                if (semesterResult != null && !string.IsNullOrWhiteSpace(semesterResult.ToString()))
+                {
+                    CurrentSemester = semesterResult.ToString();
+                }
+                else
+                {
+                    LogMessage("WARNING", "No semester setting found, using default: First Semester");
+                }
+
+                LogMessage("INFO", $"Loaded academic settings - Year: {CurrentAcademicYear}, Semester: {CurrentSemester}");
+                Console.WriteLine($"Academic Settings Loaded - Year: {CurrentAcademicYear}, Semester: {CurrentSemester}");
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to load academic settings: {ex.Message}");
+                LogMessage("WARNING", "Using default academic settings - Year: 2024-2025, Semester: First Semester");
+                Console.WriteLine($"Warning: Failed to load academic settings, using defaults: {ex.Message}");
             }
         }
 
@@ -755,28 +799,46 @@ namespace FutronicAttendanceSystem.Database
         {
             try
             {
-                var cmd = new MySqlCommand("SELECT * FROM users WHERE RFIDTAG = @rfidTag", connection);
+                Console.WriteLine($"====== DATABASE RFID LOOKUP ======");
+                Console.WriteLine($"Searching for RFIDTAG = '{rfidTag}'");
+                
+                var cmd = new MySqlCommand("SELECT * FROM USERS WHERE RFIDTAG = @rfidTag", connection);
                 cmd.Parameters.AddWithValue("@rfidTag", rfidTag);
                 
                 using (var reader = cmd.ExecuteReader())
                 {
                     if (reader.Read())
                     {
+                        string firstName = reader.GetString("FIRSTNAME");
+                        string lastName = reader.GetString("LASTNAME");
+                        string userType = reader.IsDBNull(reader.GetOrdinal("USERTYPE")) ? "NULL" : reader.GetString("USERTYPE");
+                        string status = reader.GetString("STATUS");
+                        
+                        Console.WriteLine($"✅ RFID Match Found!");
+                        Console.WriteLine($"   Name: {firstName} {lastName}");
+                        Console.WriteLine($"   UserType: {userType}");
+                        Console.WriteLine($"   Status: {status}");
+                        
                         return new User
                         {
                             Id = 0, // USERID is a GUID string, not an integer
-                            Username = reader.GetString("FIRSTNAME") + " " + reader.GetString("LASTNAME"),
+                            Username = firstName + " " + lastName,
                             FingerprintTemplate = new byte[0], // No fingerprint template in this table
                             EmployeeId = reader.GetString("USERID"), // Use USERID as the GUID
                             Department = reader.IsDBNull(reader.GetOrdinal("DEPARTMENT")) ? null : reader.GetString("DEPARTMENT"),
                             Email = reader.IsDBNull(reader.GetOrdinal("EMAIL")) ? null : reader.GetString("EMAIL"),
                             Phone = reader.IsDBNull(reader.GetOrdinal("PHONENUMBER")) ? null : reader.GetString("PHONENUMBER"),
-                            IsActive = reader.GetString("STATUS") == "Active",
+                            IsActive = status == "Active",
                             UserType = reader.IsDBNull(reader.GetOrdinal("USERTYPE")) ? null : reader.GetString("USERTYPE"),
                             RfidTag = reader.IsDBNull(reader.GetOrdinal("RFIDTAG")) ? null : reader.GetString("RFIDTAG"),
                             CreatedAt = reader.GetDateTime("CREATED_AT"),
                             UpdatedAt = reader.GetDateTime("UPDATED_AT")
                         };
+                    }
+                    else
+                    {
+                        Console.WriteLine($"❌ No match found in database");
+                        Console.WriteLine($"   Query: SELECT * FROM USERS WHERE RFIDTAG = '{rfidTag}'");
                     }
                 }
                 
@@ -955,7 +1017,14 @@ namespace FutronicAttendanceSystem.Database
                 // Map action to scan type and status
                 string scanType = string.Equals(action, "Check In", StringComparison.OrdinalIgnoreCase) ? "time_in" : "time_out";
                 string status = "Present";
-                string authMethod = "Fingerprint";
+                
+                // Determine auth method based on action string
+                string authMethod = "Fingerprint"; // Default
+                if (action != null && action.IndexOf("RFID", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    authMethod = "RFID";
+                }
+                
                 string location = CurrentLocation; // Use current location setting
 
                 // Compose insert
@@ -979,7 +1048,14 @@ namespace FutronicAttendanceSystem.Database
 
                 insertCmd.ExecuteNonQuery();
                 
-                LogMessage("INFO", $"Attendance recorded successfully for user GUID: {userGuid}, action: {action}");
+                LogMessage("INFO", $"Attendance recorded successfully for user GUID: {userGuid}, action: {action}, authMethod: {authMethod}");
+                Console.WriteLine($"✅ Attendance saved to ATTENDANCERECORDS:");
+                Console.WriteLine($"   UserGUID: {userGuid}");
+                Console.WriteLine($"   Action: {action}");
+                Console.WriteLine($"   AuthMethod: {authMethod}");
+                Console.WriteLine($"   ScheduleID: {scheduleId}");
+                Console.WriteLine($"   SessionID: {sessionId ?? "NULL"}");
+                
                 return new AttendanceAttemptResult { Success = true, ScheduleId = scheduleId, SubjectName = scheduleValidation.SubjectName };
             }
             catch (Exception ex)
@@ -1031,14 +1107,33 @@ namespace FutronicAttendanceSystem.Database
 
                 // Get user type
                 string userType = null;
+                
+                Console.WriteLine($"====== SCHEDULE VALIDATION DEBUG ======");
+                Console.WriteLine($"UserGUID: {userGuid}");
+                Console.WriteLine($"Room: {CurrentRoomId}");
+                Console.WriteLine($"Day: {currentDay}");
+                Console.WriteLine($"Time: {currentTime}");
+                
                 using (var cmdGetUserType = new MySqlCommand(@"
-                    SELECT USERTYPE FROM USERS WHERE USERID = @userGuid", connection))
+                    SELECT USERTYPE, FIRSTNAME, LASTNAME, EMAIL FROM USERS WHERE USERID = @userGuid", connection))
                 {
                     cmdGetUserType.Parameters.AddWithValue("@userGuid", userGuid);
-                    var userTypeObj = cmdGetUserType.ExecuteScalar();
-                    if (userTypeObj != null)
+                    
+                    using (var reader = cmdGetUserType.ExecuteReader())
                     {
-                        userType = userTypeObj.ToString();
+                        if (reader.Read())
+                        {
+                            userType = reader.GetString("USERTYPE");
+                            string firstName = reader.IsDBNull(reader.GetOrdinal("FIRSTNAME")) ? "" : reader.GetString("FIRSTNAME");
+                            string lastName = reader.IsDBNull(reader.GetOrdinal("LASTNAME")) ? "" : reader.GetString("LASTNAME");
+                            string email = reader.IsDBNull(reader.GetOrdinal("EMAIL")) ? "" : reader.GetString("EMAIL");
+                            
+                            Console.WriteLine($"User Found: {firstName} {lastName} ({email}) - Type: {userType}");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"❌ No user found with USERID = {userGuid}");
+                        }
                     }
                 }
 
@@ -1064,12 +1159,14 @@ namespace FutronicAttendanceSystem.Database
                           AND cs.ROOMID = @roomId
                           AND cs.DAYOFWEEK = @currentDay
                           AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
-                          AND cs.ACADEMICYEAR = '2025-2026'
-                          AND cs.SEMESTER = 'First Semester'", connection))
+                          AND cs.ACADEMICYEAR = @academicYear
+                          AND cs.SEMESTER = @semester", connection))
                     {
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@currentDay", currentDay);
+                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
+                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
 
                         using (var reader = cmdCheckInstructorSchedule.ExecuteReader())
                         {
@@ -1082,6 +1179,7 @@ namespace FutronicAttendanceSystem.Database
                                 
                                 LogMessage("INFO", $"Found instructor schedule: {result.SubjectName} (ID: {result.ScheduleId})");
                                 LogMessage("DEBUG", $"Schedule details - Start: {reader.GetString("STARTTIME")}, End: {reader.GetString("ENDTIME")}");
+                                Console.WriteLine($"✅ Found instructor schedule: {result.SubjectName} (ScheduleID: {result.ScheduleId})");
                             }
                             else
                             {
@@ -1126,10 +1224,49 @@ namespace FutronicAttendanceSystem.Database
                 // AND check if there's an active session (instructor must start session first)
                 else if (userType != null && userType.Equals("student", StringComparison.OrdinalIgnoreCase))
                 {
+                    LogMessage("DEBUG", $"Student validation for user {userGuid}: Day={currentDay}, Time={currentTime}, Room={CurrentRoomId}");
+                    Console.WriteLine($"====== STUDENT VALIDATION ======");
+                    Console.WriteLine($"UserGUID: {userGuid}");
+                    Console.WriteLine($"Room: {CurrentRoomId}");
+                    Console.WriteLine($"Day: {currentDay}");
+                    Console.WriteLine($"Current SQL Time: TIME(NOW())");
+                    
                     // First check if student is enrolled in a scheduled class
                     string scheduleId = null;
                     string subjectName = null;
                     
+                    // First, check if student has ANY enrollments
+                    using (var cmdCheckEnrollment = new MySqlCommand(@"
+                        SELECT se.ENROLLMENTID, s.SUBJECTNAME, s.SUBJECTID
+                        FROM SUBJECTENROLLMENT se
+                        JOIN SUBJECTS s ON se.SUBJECTID = s.SUBJECTID
+                        WHERE se.USERID = @userGuid AND se.STATUS = 'enrolled'", connection))
+                    {
+                        cmdCheckEnrollment.Parameters.AddWithValue("@userGuid", userGuid);
+                        
+                        int enrollmentCount = 0;
+                        using (var enrollReader = cmdCheckEnrollment.ExecuteReader())
+                        {
+                            while (enrollReader.Read())
+                            {
+                                enrollmentCount++;
+                                string enrolledSubjectName = enrollReader.GetString("SUBJECTNAME");
+                                string enrolledSubjectId = enrollReader.GetString("SUBJECTID");
+                                Console.WriteLine($"  - Enrolled in: {enrolledSubjectName} (ID: {enrolledSubjectId})");
+                            }
+                        }
+                        
+                        Console.WriteLine($"Student has {enrollmentCount} active enrollment(s)");
+                        
+                        if (enrollmentCount == 0)
+                        {
+                            Console.WriteLine($"❌ Student {userGuid} has NO enrollments in database!");
+                            result.Reason = "Student is not enrolled in any subjects";
+                            return result;
+                        }
+                    }
+                    
+                    // Use TIME(NOW()) BETWEEN for consistent time comparison (same as instructor check)
                     using (var cmdCheckStudentSchedule = new MySqlCommand(@"
                         SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
                         FROM CLASSSCHEDULES cs
@@ -1139,15 +1276,15 @@ namespace FutronicAttendanceSystem.Database
                           AND se.STATUS = 'enrolled'
                           AND cs.ROOMID = @roomId
                           AND cs.DAYOFWEEK = @currentDay
-                          AND cs.STARTTIME <= @currentTime
-                          AND cs.ENDTIME >= @currentTime
-                          AND cs.ACADEMICYEAR = '2025-2026'
-                          AND cs.SEMESTER = 'First Semester'", connection))
+                          AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                          AND cs.ACADEMICYEAR = @academicYear
+                          AND cs.SEMESTER = @semester", connection))
                     {
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@currentDay", currentDay);
-                        cmdCheckStudentSchedule.Parameters.AddWithValue("@currentTime", currentTime);
+                        cmdCheckStudentSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
+                        cmdCheckStudentSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
 
                         using (var reader = cmdCheckStudentSchedule.ExecuteReader())
                         {
@@ -1155,9 +1292,16 @@ namespace FutronicAttendanceSystem.Database
                             {
                                 scheduleId = reader.GetString("SCHEDULEID");
                                 subjectName = reader.GetString("SUBJECTNAME");
+                                
+                                LogMessage("INFO", $"Found student schedule: {subjectName} (ID: {scheduleId})");
+                                LogMessage("DEBUG", $"Schedule details - Start: {reader.GetString("STARTTIME")}, End: {reader.GetString("ENDTIME")}");
+                                Console.WriteLine($"✅ Found student schedule: {subjectName} (ScheduleID: {scheduleId})");
+                                Console.WriteLine($"   Start: {reader.GetString("STARTTIME")}, End: {reader.GetString("ENDTIME")}");
                             }
                             else
                             {
+                                LogMessage("WARNING", $"No schedule found for student {userGuid} at {currentDay} {currentTime} in room {CurrentRoomId}");
+                                Console.WriteLine($"❌ No schedule found for student {userGuid} at {currentDay} {currentTime} in room {CurrentRoomId}");
                                 result.Reason = "Student is not enrolled in any class scheduled at this time";
                                 return result;
                             }
@@ -1167,6 +1311,10 @@ namespace FutronicAttendanceSystem.Database
                     // If student is enrolled, check if there's an active session for this schedule
                     if (!string.IsNullOrEmpty(scheduleId))
                     {
+                        LogMessage("DEBUG", $"Checking for active session with scheduleId: {scheduleId}");
+                        Console.WriteLine($"DEBUG: Checking for active session with scheduleId: {scheduleId}");
+                        
+                        // FIRST: Try exact schedule match
                         using (var cmdCheckActiveSession = new MySqlCommand(@"
                             SELECT SESSIONID, STATUS, STARTTIME
                             FROM SESSIONS 
@@ -1185,11 +1333,54 @@ namespace FutronicAttendanceSystem.Database
                                     result.ScheduleId = scheduleId;
                                     result.SubjectName = subjectName;
                                     result.Reason = "Student is enrolled and active session exists";
+                                    
+                                    var sessionId = reader.GetString("SESSIONID");
+                                    LogMessage("INFO", $"Active session found: {sessionId} for student {userGuid}");
+                                    Console.WriteLine($"✅ Active session found: {sessionId} for student {userGuid}");
+                                    return result;
+                                }
+                            }
+                        }
+                        
+                        // FALLBACK: If exact match fails, try matching by room + subject + date
+                        // This handles cases where instructor and student schedules have different IDs but same subject
+                        Console.WriteLine($"⚠️ No exact schedule match, trying subject-based lookup...");
+                        using (var cmdCheckSessionBySubject = new MySqlCommand(@"
+                            SELECT s.SESSIONID, s.STATUS, s.STARTTIME, cs.SCHEDULEID, subj.SUBJECTNAME
+                            FROM SESSIONS s
+                            JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
+                            JOIN SUBJECTS subj ON cs.SUBJECTID = subj.SUBJECTID
+                            WHERE subj.SUBJECTNAME = @subjectName
+                              AND s.ROOMID = @roomId
+                              AND s.SESSIONDATE = CURRENT_DATE
+                              AND s.STATUS = 'active'", connection))
+                        {
+                            cmdCheckSessionBySubject.Parameters.AddWithValue("@subjectName", subjectName);
+                            cmdCheckSessionBySubject.Parameters.AddWithValue("@roomId", CurrentRoomId);
+                            
+                            using (var reader = cmdCheckSessionBySubject.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    // Found session by subject name match
+                                    result.IsValid = true;
+                                    result.ScheduleId = scheduleId;
+                                    result.SubjectName = subjectName;
+                                    result.Reason = "Student is enrolled and active session exists (matched by subject)";
+                                    
+                                    var sessionId = reader.GetString("SESSIONID");
+                                    var sessionScheduleId = reader.GetString("SCHEDULEID");
+                                    LogMessage("INFO", $"Active session found by subject: {sessionId} (scheduleId: {sessionScheduleId}) for student {userGuid}");
+                                    Console.WriteLine($"✅ Active session found by subject match: {sessionId}");
+                                    Console.WriteLine($"   Session ScheduleID: {sessionScheduleId} vs Student ScheduleID: {scheduleId}");
                                 }
                                 else
                                 {
                                     // No active session - instructor must start session first
                                     result.Reason = "No active class session. Instructor must start the session first.";
+                                    LogMessage("WARNING", $"No active session found for scheduleId: {scheduleId} or subject: {subjectName}");
+                                    Console.WriteLine($"❌ No active session found for scheduleId: {scheduleId}");
+                                    Console.WriteLine($"❌ Also no session found for subject: {subjectName} in room: {CurrentRoomId}");
                                 }
                             }
                         }
@@ -1317,6 +1508,11 @@ namespace FutronicAttendanceSystem.Database
                 }
 
                 // Create new session
+                Console.WriteLine($"====== CREATING SESSION ======");
+                Console.WriteLine($"ScheduleID: {scheduleId}");
+                Console.WriteLine($"InstructorID: {instructorGuid}");
+                Console.WriteLine($"RoomID: {CurrentRoomId}");
+                
                 using (var cmdCreateSession = new MySqlCommand(@"
                     INSERT INTO SESSIONS (SESSIONID, SCHEDULEID, INSTRUCTORID, ROOMID, SESSIONDATE, STARTTIME, STATUS, DOORUNLOCKEDAT, ACADEMICYEAR, SEMESTER)
                     VALUES (UUID(), @scheduleId, @instructorId, @roomId, CURRENT_DATE, CURRENT_TIMESTAMP, 'active', CURRENT_TIMESTAMP,
@@ -1328,6 +1524,7 @@ namespace FutronicAttendanceSystem.Database
                     cmdCreateSession.Parameters.AddWithValue("@roomId", CurrentRoomId);
                     
                     cmdCreateSession.ExecuteNonQuery();
+                    Console.WriteLine($"✅ Session created successfully");
                 }
 
                 // Unlock door
@@ -1573,10 +1770,12 @@ namespace FutronicAttendanceSystem.Database
                     JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
                     JOIN USERS u ON s.INSTRUCTORID = u.USERID
                     WHERE cs.DAYOFWEEK = @today
-                      AND cs.ACADEMICYEAR = '2025-2026'
-                      AND cs.SEMESTER = 'First Semester'", connection))
+                      AND cs.ACADEMICYEAR = @academicYear
+                      AND cs.SEMESTER = @semester", connection))
                 {
                     cmd.Parameters.AddWithValue("@today", today);
+                    cmd.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
+                    cmd.Parameters.AddWithValue("@semester", CurrentSemester);
                     using (var reader = cmd.ExecuteReader())
                     {
                         LogMessage("DEBUG", $"Schedules for {today}:");
@@ -1641,6 +1840,133 @@ namespace FutronicAttendanceSystem.Database
                 // Fallback
             }
             return "Unknown";
+        }
+
+        // NEW METHODS FOR DUAL SENSOR SUPPORT
+
+        /// <summary>
+        /// Get all available rooms (for room selection in startup dialog)
+        /// </summary>
+        public List<Models.Room> GetAllAvailableRooms()
+        {
+            return LoadAllRooms(); // Reuse existing method
+        }
+
+        /// <summary>
+        /// Register or update a dual sensor device (inside or outside)
+        /// </summary>
+        public bool RegisterDualSensorDevice(string deviceName, string roomId, string position, int sensorIndex)
+        {
+            try
+            {
+                var ipAddress = GetLocalIPAddress();
+                string location = position.ToLower(); // "inside" or "outside"
+                string fullDeviceName = $"{deviceName}_{position}";
+
+                // Check if device already exists
+                var findCmd = new MySqlCommand(@"
+                    SELECT DEVICEID FROM DEVICES WHERE DEVICENAME = @deviceName LIMIT 1", connection);
+                findCmd.Parameters.AddWithValue("@deviceName", fullDeviceName);
+                
+                var existingDeviceId = findCmd.ExecuteScalar()?.ToString();
+                
+                if (string.IsNullOrEmpty(existingDeviceId))
+                {
+                    // Create new device
+                    var insertCmd = new MySqlCommand(@"
+                        INSERT INTO DEVICES (DEVICEID, DEVICETYPE, DEVICENAME, LOCATION, ROOMID, IPADDRESS, LASTSEEN, STATUS) 
+                        VALUES (UUID(), 'Fingerprint_Scanner', @deviceName, @location, @roomId, @ipAddress, NOW(), 'Active')", connection);
+
+                    insertCmd.Parameters.AddWithValue("@deviceName", fullDeviceName);
+                    insertCmd.Parameters.AddWithValue("@location", location);
+                    insertCmd.Parameters.AddWithValue("@roomId", roomId);
+                    insertCmd.Parameters.AddWithValue("@ipAddress", ipAddress);
+                    
+                    insertCmd.ExecuteNonQuery();
+                    
+                    LogMessage("INFO", $"Registered new dual sensor device: {fullDeviceName} in room {roomId} as {position}");
+                    return true;
+                }
+                else
+                {
+                    // Update existing device
+                    var updateCmd = new MySqlCommand(@"
+                        UPDATE DEVICES SET 
+                            ROOMID = @roomId,
+                            LOCATION = @location,
+                            IPADDRESS = @ipAddress,
+                            LASTSEEN = NOW(),
+                            STATUS = 'Active'
+                        WHERE DEVICEID = @deviceId", connection);
+
+                    updateCmd.Parameters.AddWithValue("@roomId", roomId);
+                    updateCmd.Parameters.AddWithValue("@location", location);
+                    updateCmd.Parameters.AddWithValue("@ipAddress", ipAddress);
+                    updateCmd.Parameters.AddWithValue("@deviceId", existingDeviceId);
+                    updateCmd.ExecuteNonQuery();
+                    
+                    LogMessage("INFO", $"Updated dual sensor device: {fullDeviceName} in room {roomId} as {position}");
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to register dual sensor device: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Record attendance with specific device ID (for dual sensor tracking)
+        /// </summary>
+        public AttendanceAttemptResult RecordAttendanceWithDeviceId(string userGuid, string deviceId, string location, string notes = null)
+        {
+            try
+            {
+                // Determine action based on location
+                string action = location.ToLower() == "inside" ? "Check In" : "Check Out";
+                
+                // Use existing attendance recording logic
+                var result = InternalTryRecordAttendance(userGuid, action, notes);
+                
+                if (result.Success)
+                {
+                    LogMessage("INFO", $"Attendance recorded via device {deviceId} - User: {userGuid}, Location: {location}");
+                }
+                
+                return result;
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to record attendance with device ID: {ex.Message}");
+                return new AttendanceAttemptResult { Success = false, Reason = ex.Message };
+            }
+        }
+
+        /// <summary>
+        /// Update device heartbeat for dual sensor
+        /// </summary>
+        public bool UpdateDeviceHeartbeat(string deviceName, string position)
+        {
+            try
+            {
+                string fullDeviceName = $"{deviceName}_{position}";
+                
+                var cmd = new MySqlCommand(@"
+                    UPDATE DEVICES SET 
+                        LASTSEEN = NOW(),
+                        STATUS = 'Active'
+                    WHERE DEVICENAME = @deviceName", connection);
+                    
+                cmd.Parameters.AddWithValue("@deviceName", fullDeviceName);
+                
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to update device heartbeat: {ex.Message}");
+                return false;
+            }
         }
 
         public void Dispose()

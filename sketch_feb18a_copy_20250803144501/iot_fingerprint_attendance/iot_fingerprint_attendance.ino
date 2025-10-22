@@ -2,6 +2,11 @@
  * IoT Solenoid Lock Control System
  * ESP32 + Solenoid Lock
  * Controls solenoid lock via web API
+ * 
+ * SIMPLIFIED INSTRUCTOR LOGIC:
+ * - Any successful instructor scan with active schedule = door opens
+ * - No complex state management (start/end session) - backend handles that
+ * - Prevents inconsistent door access for instructors
  */
 
 #include <WiFi.h>
@@ -9,6 +14,9 @@
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
 #include <WebServer.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 // WiFi credentials - 2.4GHz Network (ESP32 Compatible)
 const char* ssid = "WIFi2.4";         // 2.4GHz network
@@ -43,9 +51,60 @@ WebServer server(80);
 #define RELAY_PIN 5     // Relay control pin for solenoid lock
 #define LOCK_DURATION 3000  // How long to keep lock open (3 seconds)
 
+// OLED Display Configuration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+
+// Using ESP32 default I2C pins (SDA=21, SCL=22)
+
+// Initialize OLED display
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Global variable to track if display is working
+bool displayWorking = false;
+
+// Lock timing variables for non-blocking operation
+unsigned long lockOpenTime = 0;
+bool lockIsOpen = false;
+
+// Display timing variables for non-blocking operation
+unsigned long displayOnTime = 0;
+bool displayIsOn = false;
+const unsigned long DISPLAY_DURATION = 3000; // Display stays on for 3 seconds
+
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  
+  // Initialize I2C for OLED (use default ESP32 I2C pins)
+  Wire.begin();
+  
+  // Initialize OLED display (simple approach like working code)
+  Serial.println("🖥️ Initializing OLED display...");
+  
+  if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("✅ OLED display initialized successfully!");
+    displayWorking = true;
+  } else {
+    Serial.println("❌ OLED display initialization failed!");
+    Serial.println("Continuing without display...");
+    displayWorking = false;
+  }
+  
+  // Show initial display (like working code)
+  if (displayWorking) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0,0);
+    display.println("IoT Lock System");
+    display.println("Initializing...");
+    display.display();
+    delay(2000); // Show for 2 seconds like working code
+  }
   
   // Initialize pins
   pinMode(BUZZER_PIN, OUTPUT);
@@ -67,6 +126,20 @@ void setup() {
    Serial.println("🔗 Lock control endpoint: http://" + WiFi.localIP().toString() + "/api/lock-control");
    
   Serial.println("System ready! Solenoid lock controller initialized.");
+  
+  // Show startup message for 3 seconds to confirm OLED connection
+  if (displayWorking) {
+    Serial.println("🖥️ Testing OLED display connection...");
+    displayStartupMessage();
+    delay(3000);
+    
+    // Turn off display to save power
+    Serial.println("🖥️ OLED test complete - turning off to save power");
+    turnOffDisplay();
+  } else {
+    Serial.println("🖥️ OLED display not working - skipping startup test");
+  }
+  
   beepSuccess();
 }
 
@@ -91,7 +164,19 @@ void loop() {
     }
   }
   
-    // Handle web server requests
+  // Handle lock timing (non-blocking)
+  if (lockIsOpen && (millis() - lockOpenTime >= LOCK_DURATION)) {
+    Serial.println("⏰ Lock duration expired - closing lock automatically");
+    closeLock();
+  }
+  
+  // Handle display timing (non-blocking)
+  if (displayIsOn && (millis() - displayOnTime >= DISPLAY_DURATION)) {
+    Serial.println("⏰ Display duration expired - turning off display automatically");
+    turnOffDisplay();
+  }
+  
+  // Handle web server requests
   server.handleClient();
 
   // Handle Serial commands
@@ -340,8 +425,11 @@ void discoverServerUDP() {
 
  // Web Server Setup
  void setupWebServer() {
-   // Lock control endpoint
+   // Lock control endpoint (for fingerprint authentication)
    server.on("/api/lock-control", HTTP_POST, handleLockControl);
+   
+   // RFID scan endpoint (for RFID authentication)
+   server.on("/api/rfid-scan", HTTP_POST, handleRfidScan);
    
    // Health check endpoint
    server.on("/api/health", HTTP_GET, handleHealthCheck);
@@ -349,6 +437,210 @@ void discoverServerUDP() {
    // Default handler
    server.onNotFound(handleNotFound);
  }
+
+// OLED Display Functions
+void displayMessage(String line1, String line2 = "", String line3 = "", String line4 = "") {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - skipping display update");
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  
+  if (line1.length() > 0) {
+    display.println(line1);
+  }
+  if (line2.length() > 0) {
+    display.println(line2);
+  }
+  if (line3.length() > 0) {
+    display.println(line3);
+  }
+  if (line4.length() > 0) {
+    display.println(line4);
+  }
+  
+  display.display();
+}
+
+void displayFingerprintMatch(String userName, bool lockOpened, String userType = "") {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - skipping fingerprint match display");
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  
+  display.println("Fingerprint match");
+  display.println("found");
+  display.println("");
+  display.println(userName);
+  display.println("");
+  
+  if (lockOpened) {
+    display.setTextColor(SSD1306_WHITE);
+    if (userType == "instructor") {
+      display.println("Door unlocked");
+      display.println("(Instructor)");
+    } else {
+      display.println("Door unlocked");
+      display.println("(Student)");
+    }
+  } else {
+    display.setTextColor(SSD1306_WHITE);
+    if (userType == "student") {
+      display.println("Access denied");
+      display.println("No active session");
+    } else {
+      display.println("Access denied");
+    }
+  }
+  
+  display.display();
+  
+  // Turn on display with timer
+  turnOnDisplay();
+}
+
+void displayRfidScanResult(String userName, bool lockOpened, String userType = "") {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - skipping RFID scan display");
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  
+  display.println("RFID card");
+  display.println("scanned");
+  display.println("");
+  display.println(userName);
+  display.println("");
+  
+  if (lockOpened) {
+    display.setTextColor(SSD1306_WHITE);
+    if (userType == "instructor") {
+      display.println("Door unlocked");
+      display.println("(Instructor)");
+    } else {
+      display.println("Door unlocked");
+      display.println("(Student)");
+    }
+  } else {
+    display.setTextColor(SSD1306_WHITE);
+    if (userType == "student") {
+      display.println("Access denied");
+      display.println("No active session");
+    } else {
+      display.println("Access denied");
+    }
+  }
+  
+  display.display();
+  
+  // Turn on display with timer
+  turnOnDisplay();
+}
+
+void displayNoMatch() {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - skipping no match display");
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("No match found");
+  display.println("");
+  display.println("Try again");
+  display.display();
+  
+  // Turn on display with timer
+  turnOnDisplay();
+}
+
+void displaySystemStatus() {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - skipping system status display");
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("IoT Lock System");
+  display.println("Ready");
+  display.println("");
+  display.print("IP: ");
+  display.println(WiFi.localIP());
+  display.println("");
+  display.println("Waiting for scan...");
+  display.display();
+  
+  // Turn on display with timer
+  turnOnDisplay();
+}
+
+void turnOnDisplay() {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - cannot turn on");
+    return;
+  }
+  
+  // Set display timer
+  displayIsOn = true;
+  displayOnTime = millis();
+  
+  Serial.println("🖥️ Display turned on - will auto-turn off in " + String(DISPLAY_DURATION/1000) + " seconds");
+}
+
+void turnOffDisplay() {
+  if (!displayWorking) {
+    return;
+  }
+  
+  display.clearDisplay();
+  display.display();
+  
+  // Reset display timer
+  displayIsOn = false;
+  displayOnTime = 0;
+  
+  Serial.println("🖥️ Display turned off");
+}
+
+void displayStartupMessage() {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - skipping startup message");
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("=== OLED TEST ===");
+  display.println("");
+  display.println("Display Connected");
+  display.println("Successfully!");
+  display.println("");
+  display.println("System Starting...");
+  display.display();
+  
+  // Turn on display with timer
+  turnOnDisplay();
+}
 
 // Handle lock control requests with API key authentication
 void handleLockControl() {
@@ -395,16 +687,59 @@ void handleLockControl() {
     
     String action = doc["action"];
     String user = doc["user"];
+    String userType = doc["userType"] | "";
+    bool sessionActive = doc["sessionActive"] | false;
     
     Serial.print("🔓 Action: ");
     Serial.println(action);
     Serial.print("👤 User: ");
     Serial.println(user);
+    Serial.print("👤 User Type: ");
+    Serial.println(userType);
+    Serial.print("📅 Session Active: ");
+    Serial.println(sessionActive ? "Yes" : "No");
     
-    if (action == "open") {
+    // Determine if lock should open based on user type and session state
+    bool shouldOpenLock = false;
+    if (userType == "instructor") {
+      // Instructors can always open the door (simplified logic to avoid state confusion)
+      shouldOpenLock = true;
+    } else if (userType == "student" && sessionActive) {
+      // Students can open door during active session (even if already signed in)
+      shouldOpenLock = true;
+    }
+    
+    // Display fingerprint match result on OLED
+    displayFingerprintMatch(user, shouldOpenLock, userType);
+    
+    // Also show in Serial for debugging
+    Serial.println("🔐 FINGERPRINT AUTHENTICATION RESULT:");
+    Serial.print("👤 User: ");
+    Serial.println(user);
+    Serial.print("🔓 Lock Action: ");
+    Serial.println(shouldOpenLock ? "OPEN" : "DENIED");
+    Serial.print("👤 User Type: ");
+    Serial.println(userType);
+    Serial.print("📅 Session Active: ");
+    Serial.println(sessionActive ? "YES" : "NO");
+    Serial.print("💡 Logic: ");
+    if (userType == "instructor") {
+      Serial.println("Instructor - Always allowed (simplified logic)");
+    } else if (userType == "student" && sessionActive) {
+      Serial.println("Student with active session - Allowed (can go in/out)");
+    } else {
+      Serial.println("Student without active session - Denied");
+    }
+    
+    if (action == "open" && shouldOpenLock) {
       Serial.println("🔓 Opening solenoid lock via web request...");
       openLock();
+      beepSuccess();
       server.send(200, "application/json", "{\"message\":\"Lock opened successfully\",\"action\":\"open\",\"user\":\"" + user + "\"}");
+    } else if (action == "open" && !shouldOpenLock) {
+      Serial.println("❌ Access denied - lock not opened");
+      beepError();
+      server.send(200, "application/json", "{\"message\":\"Access denied\",\"action\":\"denied\",\"user\":\"" + user + "\"}");
     } else if (action == "close") {
       Serial.println("🔒 Closing solenoid lock via web request...");
       closeLock();
@@ -412,6 +747,8 @@ void handleLockControl() {
     } else {
       server.send(400, "application/json", "{\"error\":\"Invalid action. Use 'open' or 'close'\"}");
     }
+    
+    // Note: Display will be turned off by the main loop timing mechanism
   } else {
     server.send(400, "application/json", "{\"error\":\"No JSON data received\"}");
   }
@@ -423,6 +760,88 @@ void handleLockControl() {
    server.send(200, "application/json", response);
  }
 
+ // Handle RFID scan requests
+ void handleRfidScan() {
+   Serial.println("🔖 RFID scan request received");
+   
+   if (server.hasArg("plain")) {
+     String jsonString = server.arg("plain");
+     Serial.println("🔖 RFID scan request received: " + jsonString);
+     
+     DynamicJsonDocument doc(512);
+     DeserializationError error = deserializeJson(doc, jsonString);
+     
+     if (error) {
+       Serial.println("❌ JSON parsing failed");
+       server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+       return;
+     }
+     
+     String rfidData = doc["rfid_data"];
+     String user = doc["user"];
+     String userType = doc["userType"] | "";
+     bool sessionActive = doc["sessionActive"] | false;
+     
+     Serial.print("🔖 RFID Data: ");
+     Serial.println(rfidData);
+     Serial.print("👤 User: ");
+     Serial.println(user);
+     Serial.print("👤 User Type: ");
+     Serial.println(userType);
+     Serial.print("📅 Session Active: ");
+     Serial.println(sessionActive ? "Yes" : "No");
+     
+     // Determine if lock should open based on user type and session state
+     bool shouldOpenLock = false;
+     if (userType == "instructor") {
+       // Instructors can always open the door (simplified logic to avoid state confusion)
+       shouldOpenLock = true;
+     } else if (userType == "student" && sessionActive) {
+       // Students can open door during active session (even if already signed in)
+       shouldOpenLock = true;
+     }
+     
+     // Display RFID scan result on OLED
+     displayRfidScanResult(user, shouldOpenLock, userType);
+     
+     // Also show in Serial for debugging
+     Serial.println("🔖 RFID AUTHENTICATION RESULT:");
+     Serial.print("👤 User: ");
+     Serial.println(user);
+     Serial.print("🔖 RFID: ");
+     Serial.println(rfidData);
+     Serial.print("🔓 Lock Action: ");
+     Serial.println(shouldOpenLock ? "OPEN" : "DENIED");
+     Serial.print("👤 User Type: ");
+     Serial.println(userType);
+     Serial.print("📅 Session Active: ");
+     Serial.println(sessionActive ? "YES" : "NO");
+     Serial.print("💡 Logic: ");
+     if (userType == "instructor") {
+       Serial.println("Instructor - Always allowed (simplified logic)");
+     } else if (userType == "student" && sessionActive) {
+       Serial.println("Student with active session - Allowed (can go in/out)");
+     } else {
+       Serial.println("Student without active session - Denied");
+     }
+     
+     if (shouldOpenLock) {
+       Serial.println("🔓 Opening solenoid lock via RFID scan...");
+       openLock();
+       beepSuccess();
+       server.send(200, "application/json", "{\"message\":\"RFID scan processed - Lock opened\",\"action\":\"open\",\"user\":\"" + user + "\",\"rfid\":\"" + rfidData + "\"}");
+     } else {
+       Serial.println("❌ Access denied - RFID scan not authorized");
+       beepError();
+       server.send(200, "application/json", "{\"message\":\"RFID scan processed - Access denied\",\"action\":\"denied\",\"user\":\"" + user + "\",\"rfid\":\"" + rfidData + "\"}");
+     }
+     
+     // Note: Display will be turned off by the main loop timing mechanism
+   } else {
+     server.send(400, "application/json", "{\"error\":\"No JSON data received\"}");
+   }
+ }
+
  // Handle not found requests
  void handleNotFound() {
    server.send(404, "application/json", "{\"error\":\"Endpoint not found\"}");
@@ -431,20 +850,49 @@ void handleLockControl() {
  // Solenoid Lock Control Functions
 void openLock() {
   Serial.println("🔓 Opening solenoid lock...");
+  Serial.print("🔧 Relay Pin: ");
+  Serial.print(RELAY_PIN);
+  Serial.print(" | Before: ");
+  Serial.println(digitalRead(RELAY_PIN) ? "HIGH" : "LOW");
+  
   digitalWrite(RELAY_PIN, HIGH); // Activate relay (HIGH = ON for most relay modules)
+  
+  Serial.print("🔧 Relay Pin: ");
+  Serial.print(RELAY_PIN);
+  Serial.print(" | After: ");
+  Serial.println(digitalRead(RELAY_PIN) ? "HIGH" : "LOW");
+  
   Serial.println("✅ Lock opened - Relay activated");
+  Serial.println("🔓 Lock will stay open for " + String(LOCK_DURATION/1000) + " seconds");
   
-  // Keep lock open for specified duration
-  delay(LOCK_DURATION);
+  // Set timer for non-blocking lock control
+  lockOpenTime = millis();
+  lockIsOpen = true;
   
-  // Close lock
-  closeLock();
+  Serial.println("🔧 Lock timer set - lockIsOpen = " + String(lockIsOpen));
 }
 
 void closeLock() {
   Serial.println("🔒 Closing solenoid lock...");
+  Serial.print("🔧 Relay Pin: ");
+  Serial.print(RELAY_PIN);
+  Serial.print(" | Before: ");
+  Serial.println(digitalRead(RELAY_PIN) ? "HIGH" : "LOW");
+  
   digitalWrite(RELAY_PIN, LOW); // Deactivate relay (LOW = OFF)
+  
+  Serial.print("🔧 Relay Pin: ");
+  Serial.print(RELAY_PIN);
+  Serial.print(" | After: ");
+  Serial.println(digitalRead(RELAY_PIN) ? "HIGH" : "LOW");
+  
   Serial.println("✅ Lock closed - Relay deactivated");
+  
+  // Reset lock timer
+  lockIsOpen = false;
+  lockOpenTime = 0;
+  
+  Serial.println("🔧 Lock timer reset - lockIsOpen = " + String(lockIsOpen));
 }
 
  // Manual lock control via Serial commands
@@ -484,6 +932,7 @@ void blinkError() {
     delay(400);
   }
 }
+
 
 
 // Handle Serial commands
@@ -555,15 +1004,39 @@ void handleSerialCommands() {
        Serial.print("  Port: 80");
        Serial.println();
        Serial.println("🔗 Available endpoints:");
-       Serial.println("  POST /api/lock-control - Control solenoid lock");
+       Serial.println("  POST /api/lock-control - Control solenoid lock (fingerprint)");
+       Serial.println("  POST /api/rfid-scan - Handle RFID card scans");
        Serial.println("  GET  /api/health - Health check");
        Serial.println();
-       Serial.println("📡 Test with: curl -X POST http://" + WiFi.localIP().toString() + "/api/lock-control -H 'Content-Type: application/json' -d '{\"action\":\"open\",\"user\":\"test\"}'");
+       Serial.println("📡 Test fingerprint: curl -X POST http://" + WiFi.localIP().toString() + "/api/lock-control -H 'Content-Type: application/json' -d '{\"action\":\"open\",\"user\":\"test\"}'");
+       Serial.println("📡 Test RFID: curl -X POST http://" + WiFi.localIP().toString() + "/api/rfid-scan -H 'Content-Type: application/json' -d '{\"rfid_data\":\"123456\",\"user\":\"test\"}'");
          } else if (command.startsWith("setip ")) {
        String newIP = command.substring(6);
        discoveredServerIP = newIP;
        ipDiscovered = true;
        Serial.println("🔧 Server IP manually set to: " + discoveredServerIP);
+    } else if (command == "display_on") {
+      Serial.println("🖥️ Turning on OLED display...");
+      displaySystemStatus();
+    } else if (command == "display_off") {
+      Serial.println("🖥️ Turning off OLED display...");
+      turnOffDisplay();
+    } else if (command == "display_test") {
+      Serial.println("🖥️ Testing OLED display...");
+      displayStartupMessage();
+      delay(3000);
+      turnOffDisplay();
+      Serial.println("🖥️ OLED test complete");
+    } else if (command == "display_status") {
+      Serial.println("🖥️ OLED Display Status:");
+      Serial.print("Display Working: ");
+      Serial.println(displayWorking ? "YES" : "NO");
+      if (displayWorking) {
+        Serial.println("✅ OLED is connected and functional");
+      } else {
+        Serial.println("❌ OLED is not working - check wiring");
+        Serial.println("Wiring: SDA->D21, SCL->D22, VCC->3.3V, GND->GND");
+      }
     } else if (command == "help") {
       Serial.println("=== Available Commands ===");
       Serial.println("status: Show system status");
@@ -574,7 +1047,92 @@ void handleSerialCommands() {
       Serial.println("lock_close: Manually close solenoid lock");
       Serial.println("lock_test: Test solenoid lock (2 seconds)");
       Serial.println("webstatus: Show web server status");
+      Serial.println("display_on: Turn on OLED display");
+      Serial.println("display_off: Turn off OLED display");
+      Serial.println("display_test: Test OLED display (3 sec)");
+      Serial.println("display_status: Check OLED display status");
+      Serial.println("rfid_test: Test RFID endpoint with sample data");
+      Serial.println("lock_status: Check current lock status");
       Serial.println("help: Show this help message");
+    } else if (command == "rfid_test") {
+      Serial.println("🧪 Testing RFID endpoint...");
+      Serial.println("Simulating RFID scan with sample data...");
+      
+      // Simulate RFID scan with sample data
+      String testRfidData = "123456789";
+      String testUser = "Test User";
+      String testUserType = "instructor";
+      bool testSessionActive = true;
+      
+      Serial.println("🔖 Simulating RFID scan:");
+      Serial.print("  RFID Data: ");
+      Serial.println(testRfidData);
+      Serial.print("  User: ");
+      Serial.println(testUser);
+      Serial.print("  User Type: ");
+      Serial.println(testUserType);
+      Serial.print("  Session Active: ");
+      Serial.println(testSessionActive ? "Yes" : "No");
+      
+      // Test the RFID scan logic
+      bool shouldOpenLock = false;
+      if (testUserType == "instructor") {
+        shouldOpenLock = true;
+      } else if (testUserType == "student" && testSessionActive) {
+        shouldOpenLock = true;
+      }
+      
+      Serial.print("🔓 Lock Action: ");
+      Serial.println(shouldOpenLock ? "OPEN" : "DENIED");
+      Serial.print("💡 Logic: ");
+      if (testUserType == "instructor") {
+        Serial.println("Instructor - Always allowed (simplified logic)");
+      } else if (testUserType == "student" && testSessionActive) {
+        Serial.println("Student with active session - Allowed (can go in/out)");
+      } else {
+        Serial.println("Student without active session - Denied");
+      }
+      
+      // Display on OLED
+      displayRfidScanResult(testUser, shouldOpenLock, testUserType);
+      
+      // Test lock if should open
+      if (shouldOpenLock) {
+        Serial.println("🔓 Opening lock for RFID test...");
+        openLock();
+      }
+      
+      delay(3000);
+      turnOffDisplay();
+      Serial.println("🧪 RFID test complete");
+    } else if (command == "lock_status") {
+      Serial.println("🔒 Lock Status:");
+      Serial.print("  Lock State: ");
+      Serial.println(lockIsOpen ? "OPEN" : "CLOSED");
+      Serial.print("  Relay Pin State: ");
+      Serial.println(digitalRead(RELAY_PIN) ? "HIGH (ON)" : "LOW (OFF)");
+      if (lockIsOpen) {
+        unsigned long timeRemaining = LOCK_DURATION - (millis() - lockOpenTime);
+        Serial.print("  Time Remaining: ");
+        Serial.print(timeRemaining / 1000);
+        Serial.println(" seconds");
+      }
+      Serial.print("  Lock Duration: ");
+      Serial.print(LOCK_DURATION / 1000);
+      Serial.println(" seconds");
+      
+      Serial.println("🖥️ Display Status:");
+      Serial.print("  Display State: ");
+      Serial.println(displayIsOn ? "ON" : "OFF");
+      if (displayIsOn) {
+        unsigned long timeRemaining = DISPLAY_DURATION - (millis() - displayOnTime);
+        Serial.print("  Time Remaining: ");
+        Serial.print(timeRemaining / 1000);
+        Serial.println(" seconds");
+      }
+      Serial.print("  Display Duration: ");
+      Serial.print(DISPLAY_DURATION / 1000);
+      Serial.println(" seconds");
     } else {
        // Handle lock control commands
        handleLockCommands(command);

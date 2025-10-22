@@ -17,6 +17,36 @@ class PDFParserService {
     }
 
     /**
+     * Infer undergraduate year from subject context
+     * - Prefer section like BSIT3-1 → 3
+     * - Else from subject code like BSIT-3101 → 3 (hundreds digit)
+     */
+    inferYearFromContext(subject) {
+        if (!subject) return null;
+        try {
+            const section = String(subject.section || '');
+            const code = String(subject.code || '');
+
+            // From section e.g., BSIT3-1, BLIS4-1
+            const secMatch = section.match(/([A-Z]{2,}\d)-?(\d+)/);
+            if (secMatch) {
+                const digits = section.match(/(\d)/);
+                const yr = digits ? parseInt(digits[1], 10) : null;
+                if (yr && yr >= 1 && yr <= 5) return yr;
+            }
+
+            // From subject code e.g., BSIT-3101, BLIS-4102
+            const codeNum = code.match(/-(\d{4})/);
+            if (codeNum) {
+                const n = codeNum[1];
+                const yr = parseInt(n[0], 10); // hundreds place indicates year
+                if (yr && yr >= 1 && yr <= 5) return yr;
+            }
+        } catch (_) { /* ignore */ }
+        return null;
+    }
+
+    /**
      * Parse PDF buffer and extract academic data
      * @param {Buffer} pdfBuffer - PDF file buffer
      * @returns {Object} Parsed academic data
@@ -158,12 +188,31 @@ class PDFParserService {
         console.log('📄 PDF text length:', text.length);
         console.log('📄 First 1000 chars:', text.substring(0, 1000));
         
-        // Split by the exact header pattern that appears at the start of each section
-        // Pattern: "LICEO DE CAGAYAN UNIVERSITY FINAL AND OFFICIAL LIST OF STUDENTS."
-        const headerPattern = /LICEO DE CAGAYAN UNIVERSITY\s+FINAL AND OFFICIAL LIST OF STUDENTS\./gi;
-        const sections = text.split(headerPattern);
+        // Try multiple header patterns to catch all sections
+        const headerPatterns = [
+            /LICEO DE CAGAYAN UNIVERSITY\s+FINAL AND OFFICIAL LIST OF STUDENTS\./gi,
+            /LICEO DE CAGAYAN UNIVERSITY/gi,
+            /FINAL AND OFFICIAL LIST OF STUDENTS/gi,
+            /First Term, SY \d{4} - \d{4}/gi,
+            /Subject Code:/gi
+        ];
         
-        console.log('📑 Split into', sections.length, 'sections using header pattern');
+        let sections = [text]; // Start with full text
+        
+        // Try each pattern until we get a good split
+        for (const pattern of headerPatterns) {
+            const testSections = text.split(pattern);
+            console.log(`📑 Testing pattern "${pattern}" - found ${testSections.length} sections`);
+            
+            // If we get a reasonable number of sections (more than 1, less than 1000), use it
+            if (testSections.length > 1 && testSections.length < 1000) {
+                sections = testSections;
+                console.log(`📑 Using pattern "${pattern}" - ${sections.length} sections`);
+                break;
+            }
+        }
+        
+        console.log('📑 Split into', sections.length, 'sections using best pattern');
         
         // Remove empty first element and filter sections
         const validSections = sections.slice(1).filter((section, index) => {
@@ -180,6 +229,8 @@ class PDFParserService {
             const hasPageInfo = trimmed.includes('Page #:');
             const hasFaculty = trimmed.includes('Faculty:');
             const hasTime = trimmed.includes('Time:');
+            const hasStudentId = /\d{7,12}/.test(trimmed); // Look for student ID patterns
+            const hasStudentName = /[A-Z][A-Z\s,.'-]+/.test(trimmed); // Look for name patterns
             
             console.log(`📑 Section ${index + 1} validation:`, {
                 hasSubjectCode,
@@ -187,11 +238,14 @@ class PDFParserService {
                 hasDatePrinted,
                 hasPageInfo,
                 hasFaculty,
-                hasTime
+                hasTime,
+                hasStudentId,
+                hasStudentName
             });
             
             // Accept section if it has at least one key identifier (no length requirement)
-            return hasSubjectCode || hasStudentList || hasDatePrinted || hasPageInfo || hasFaculty || hasTime;
+            // Be more flexible - accept sections with student data even without headers
+            return hasSubjectCode || hasStudentList || hasDatePrinted || hasPageInfo || hasFaculty || hasTime || hasStudentId || hasStudentName;
         });
         
         console.log('📑 Valid sections after filtering:', validSections.length);
@@ -256,6 +310,14 @@ class PDFParserService {
             const lines = sectionText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
             console.log('🔍 Section lines count:', lines.length);
             console.log('🔍 First 15 lines:', lines.slice(0, 15));
+            
+            // Check if this section contains the problematic student
+            const hasProblematicStudent = lines.some(line => line.includes('20255237912') || line.includes('RESOMADERO'));
+            if (hasProblematicStudent) {
+                console.log('🔍 FOUND PROBLEMATIC STUDENT SECTION!');
+                console.log('🔍 Section text (first 2000 chars):', sectionText.substring(0, 2000));
+                console.log('🔍 All lines in section:', lines);
+            }
             
             const sectionData = {
                 subject: null,
@@ -879,7 +941,7 @@ class PDFParserService {
 
         console.log('🎓 Looking for students in', lines.length, 'lines');
 
-        // First, find the student header
+        // First, find the student header - look for multiple patterns
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
 
@@ -892,6 +954,27 @@ class PDFParserService {
                 headerLineIndex = i;
                 break;
             }
+            
+            // Also look for just "Count" as a header indicator (more flexible)
+            if (line.trim() === 'Count' || line.includes('Count')) {
+                console.log('📝 Found "Count" header at line', i, ':', line);
+                // Check if the next few lines contain the other header fields
+                let hasAllFields = false;
+                for (let j = i; j < Math.min(i + 5, lines.length); j++) {
+                    const checkLine = lines[j];
+                    if (checkLine.includes('ID Number') || checkLine.includes('Name') || 
+                        checkLine.includes('Gender') || checkLine.includes('Course') || 
+                        checkLine.includes('Year')) {
+                        hasAllFields = true;
+                        break;
+                    }
+                }
+                if (hasAllFields) {
+                    isStudentSection = true;
+                    headerLineIndex = i;
+                    break;
+                }
+            }
         }
 
         if (!isStudentSection) {
@@ -900,38 +983,79 @@ class PDFParserService {
         }
 
         // Now parse student lines starting after the header
+        console.log(`🔍 Starting student parsing from line ${headerLineIndex + 1} to ${lines.length}`);
         for (let i = headerLineIndex + 1; i < lines.length; i++) {
             const line = lines[i].trim();
+            console.log(`🔍 Processing line ${i}: "${line}" (length: ${line.length})`);
 
-            // Stop if we hit another section or end of meaningful content
-            if (this.isFieldLabel(line) || /Date Printed:/i.test(line) || /Untitled Document/i.test(line) || /^https?:\/\//i.test(line)) {
+            // Stop only on real headers; skip PDF footers like "Untitled Document" and URLs
+            if (this.isFieldLabel(line) || /Date Printed:/i.test(line)) {
                 console.log('🛑 Stopping student parsing at line', i, ':', line);
                 break;
+            }
+            if (/Untitled Document/i.test(line) || /^https?:\/\//i.test(line)) {
+                console.log('↷ Skipping footer artifact at line', i, ':', line);
+                continue;
             }
 
             // Skip empty lines
             if (!line || line.length < 2) {
+                console.log(`↷ Skipping empty/short line ${i}: "${line}"`);
                 continue;
             }
 
+            // Check if this line looks like a student ID (7-12 digits)
+            if (/^\d{7,12}$/.test(line)) {
+                console.log('🔍 Found potential student ID line:', line);
+                // Try multi-line parsing without count line
+                const multiLineStudent = this.parseMultiLineStudentWithoutCount(lines, i);
+                if (multiLineStudent) {
+                    console.log('✅ Multi-line student parsed (no count):', multiLineStudent.full_name, multiLineStudent.student_id);
+                    students.push(multiLineStudent);
+                    i += 4; // Skip the next 4 lines (name, gender, course, year)
+                    continue;
+                } else {
+                    console.log('❌ Multi-line parsing failed for student ID:', line);
+                }
+            }
+
             // Handle multi-line student entries starting with count line like "1."
-            if (/^\d+\.$/.test(line)) {
+            console.log(`🔍 Checking line ${i} for multi-line pattern: "${line}" (length: ${line.length})`);
+            
+            // More flexible pattern to catch count lines
+            const isCountLine = /^\d+\.?\s*$/.test(line) || /^\d+\.$/.test(line);
+            console.log(`🔍 Testing count line pattern: "${line}" -> isCountLine: ${isCountLine}`);
+            if (isCountLine) {
+                console.log('🔍 Found multi-line student entry at line', i, ':', line);
                 const result = this.parseMultiLineStudentFlexible(lines, i);
                 if (result && result.student) {
                     students.push(result.student);
                     console.log('✅ Multi-line student parsed:', result.student.full_name, result.student.student_id);
                     i += (result.consumedLines - 1); // advance past consumed lines
                     continue;
+                } else {
+                    console.log('❌ Multi-line parsing failed, trying tabular fallback');
                 }
+            } else {
+                console.log(`🔍 Line ${i} does not match multi-line pattern: "${line}"`);
             }
 
-            console.log('👤 Parsing student line', i, ':', line);
+            // Try tabular parsing as fallback for single-line compressed format
+            console.log('👤 Attempting tabular parsing for line', i, ':', line);
             const student = this.parseTabularStudentLine(line);
             if (student) {
-                console.log('✅ Student parsed:', student.full_name, student.student_id);
+                console.log('✅ Tabular student parsed:', student.full_name, student.student_id);
                 students.push(student);
             } else {
-                console.log('❌ Failed to parse student line');
+                // Try multi-line parsing without count line
+                console.log('🔍 Attempting multi-line parsing without count line for line', i, ':', line);
+                const multiLineStudent = this.parseMultiLineStudentWithoutCount(lines, i);
+                if (multiLineStudent) {
+                    console.log('✅ Multi-line student parsed (no count):', multiLineStudent.full_name, multiLineStudent.student_id);
+                    students.push(multiLineStudent);
+                } else {
+                    console.log('❌ Failed to parse student line with any method');
+                }
             }
         }
 
@@ -1017,6 +1141,76 @@ class PDFParserService {
     }
 
     /**
+     * Parse multi-line student entry without count line
+     * @param {Array} lines - All lines
+     * @param {number} startIndex - Index of the student ID line
+     * @returns {Object|null} Student object or null if not valid
+     */
+    parseMultiLineStudentWithoutCount(lines, startIndex) {
+        // Check if we have enough lines for a complete student entry
+        if (startIndex + 4 >= lines.length) return null;
+
+        const idLine = lines[startIndex]?.trim();
+        const nameLine = lines[startIndex + 1]?.trim();
+        const genderLine = lines[startIndex + 2]?.trim();
+        const courseLine = lines[startIndex + 3]?.trim();
+        const yearLine = lines[startIndex + 4]?.trim();
+
+        console.log('🔍 Parsing multi-line student without count:');
+        console.log('  ID:', idLine);
+        console.log('  Name:', nameLine);
+        console.log('  Gender:', genderLine);
+        console.log('  Course:', courseLine);
+        console.log('  Year:', yearLine);
+
+        // Validate the entry format
+        if (!idLine?.match(/^\d{7,12}$/)) {
+            console.log('❌ Invalid ID format:', idLine);
+            return null;
+        }
+
+        if (!nameLine || nameLine.length < 3) {
+            console.log('❌ Invalid name:', nameLine);
+            return null;
+        }
+
+        if (!genderLine?.match(/^[MF]$/)) {
+            console.log('❌ Invalid gender:', genderLine);
+            return null;
+        }
+
+        if (!courseLine || courseLine.length < 2) {
+            console.log('❌ Invalid course:', courseLine);
+            return null;
+        }
+
+        if (!yearLine?.match(/^\d+$/)) {
+            console.log('❌ Invalid year:', yearLine);
+            return null;
+        }
+
+        // Parse the name
+        const parsedName = this.parseStudentName(nameLine);
+
+        const student = {
+            id: uuidv4(),
+            student_id: idLine,
+            first_name: parsedName.first_name,
+            last_name: parsedName.last_name,
+            middle_name: parsedName.middle_name,
+            full_name: nameLine,
+            gender: genderLine,
+            course: courseLine,
+            year_level: parseInt(yearLine),
+            email: this.generateStudentEmail(idLine, parsedName),
+            status: 'Active'
+        };
+
+        console.log('👤 Created multi-line student (no count):', student);
+        return student;
+    }
+
+    /**
      * Parse multi-line student entry with optional Year (more lenient)
      * @param {Array} lines - All lines
      * @param {number} startIndex - Index of the count line (e.g., "1.")
@@ -1031,23 +1225,61 @@ class PDFParserService {
         const possibleYearLine = lines[startIndex + 5]?.trim();
 
         console.log('🔍 Parsing flexible multi-line student starting at', startIndex);
+        console.log('🔍 Lines:', {
+            countLine,
+            idLine,
+            nameLine,
+            genderLine,
+            courseLine,
+            possibleYearLine
+        });
 
-        if (!/^\d+\.$/.test(countLine)) return null;
-        if (!/^\d{10,11}$/.test(idLine)) return null;
-        if (!nameLine || nameLine.length < 3) return null;
-        if (!/^[MF]$/.test(genderLine)) return null;
-        if (!courseLine || courseLine.length < 2) return null;
+        if (!/^\d+\.$/.test(countLine)) {
+            console.log('❌ Invalid count line:', countLine);
+            return null;
+        }
+        if (!/^\d{7,12}$/.test(idLine)) {
+            console.log('❌ Invalid ID format:', idLine, '(expected 7-12 digits)');
+            return null;
+        }
+        if (!nameLine || nameLine.length < 3) {
+            console.log('❌ Invalid name line:', nameLine);
+            return null;
+        }
+        if (!/^[MF]$/.test(genderLine)) {
+            console.log('❌ Invalid gender line:', genderLine);
+            return null;
+        }
+        if (!courseLine || courseLine.length < 2) {
+            console.log('❌ Invalid course line:', courseLine);
+            return null;
+        }
 
         let yearLevel = null;
         let consumed = 5 + 1; // default assume year exists
+        console.log(`🔍 Checking year line: "${possibleYearLine}"`);
         if (/^\d+$/.test(possibleYearLine)) {
             yearLevel = parseInt(possibleYearLine);
+            console.log(`✅ Parsed year level: ${yearLevel} for student: ${nameLine}`);
         } else {
             // No year line; treat as missing and set default, reduce consumed lines
+            console.log(`⚠️ No valid year found in line: "${possibleYearLine}" for student: ${nameLine}`);
+            console.log(`🔍 This line appears to be the next student's count (${possibleYearLine}), so no year field exists`);
             consumed = 5; 
         }
 
         const parsedName = this.parseStudentName(nameLine);
+        
+        let finalYearLevel = this.deriveYearLevel(courseLine, yearLevel);
+        
+        // If still null/undefined for undergraduate, try to infer from context
+        if ((finalYearLevel == null || finalYearLevel <= 0) && courseLine && !this.isGraduateCourse(courseLine)) {
+            // This is a placeholder - we'll infer from section context during consolidation
+            console.log(`🔍 Will attempt to infer year for undergraduate: ${nameLine} (${courseLine})`);
+        }
+        
+        console.log(`🎓 Final year level for ${nameLine}: ${finalYearLevel} (parsed: ${yearLevel}, course: ${courseLine})`);
+        
         const student = {
             id: uuidv4(),
             student_id: idLine,
@@ -1057,7 +1289,7 @@ class PDFParserService {
             full_name: nameLine,
             gender: genderLine,
             course: courseLine,
-            year_level: this.deriveYearLevel(courseLine, yearLevel),
+            year_level: finalYearLevel,
             email: this.generateStudentEmail(idLine, parsedName),
             status: 'Active'
         };
@@ -1071,9 +1303,59 @@ class PDFParserService {
      * - Otherwise default missing to 1
      */
     deriveYearLevel(course, parsedYear) {
-        if (Number.isFinite(parsedYear)) return parsedYear;
+        // If we have a valid parsed year, use it
+        if (Number.isFinite(parsedYear) && parsedYear > 0) {
+            console.log(`✅ Using parsed year level: ${parsedYear} for course: ${course}`);
+            return parsedYear;
+        }
+        
+        // For graduate programs, return null when year is missing
         const isGrad = this.isGraduateCourse(course || '');
-        return isGrad ? null : 1;
+        if (isGrad) {
+            console.log(`🎓 Graduate course detected (${course}), returning null for missing year`);
+            return null;
+        }
+        
+        // For undergraduate programs, try to infer year from course name
+        const inferredYear = this.inferYearFromCourse(course);
+        if (inferredYear) {
+            console.log(`🔍 Inferred year level ${inferredYear} from course: ${course}`);
+            return inferredYear;
+        }
+        
+        // If we can't infer, default to 1 for undergraduate
+        console.log(`⚠️ No year level found for undergraduate course: ${course}, defaulting to 1`);
+        return 1;
+    }
+    
+    /**
+     * Try to infer year level from course name patterns
+     */
+    inferYearFromCourse(course) {
+        if (!course) return null;
+        
+        const courseStr = String(course).toUpperCase();
+        
+        // Look for year patterns in course names
+        // Examples: BSIT1, BSIT2, BSIT3, BSIT4, BLIS1, BLIS2, etc.
+        const yearMatch = courseStr.match(/(\d+)$/);
+        if (yearMatch) {
+            const year = parseInt(yearMatch[1]);
+            if (year >= 1 && year <= 5) {
+                return year;
+            }
+        }
+        
+        // Look for section patterns like BSIT1-1, BSIT2-1, etc.
+        const sectionMatch = courseStr.match(/(\d+)-(\d+)$/);
+        if (sectionMatch) {
+            const year = parseInt(sectionMatch[1]);
+            if (year >= 1 && year <= 5) {
+                return year;
+            }
+        }
+        
+        return null;
     }
 
     /**
@@ -1081,7 +1363,8 @@ class PDFParserService {
      */
     isGraduateCourse(course) {
         const text = String(course).toUpperCase();
-        return /(MSIT|MM-ITM|MBA|MA|MSC|MMITM)/.test(text);
+        // Enhanced pattern to catch more graduate program variations
+        return /(MSIT|MM-ITM|MBA|MA|MSC|MMITM|MM-IT|GRADUATE|POSTGRAD)/.test(text);
     }
 
     /**
@@ -1099,6 +1382,8 @@ class PDFParserService {
             .replace(/\s+$/g, ''); // trailing whitespace
 
         console.log('🔍 Attempting to parse tabular line:', normalized);
+        console.log('🔍 Line length:', normalized.length);
+        console.log('🔍 Line characters:', normalized.split('').map(c => c.charCodeAt(0)).slice(0, 20));
         
         // Based on your example format:
         // "1. 20235390104 ABAS, GAIL ISABELLE A. F BSIT-CISCO 1"
@@ -1130,7 +1415,46 @@ class PDFParserService {
             /^(\d+)\.\s*(\d{7,12})\s+(.+?)\s+([MF])\s+(.+?)\s+(\d+)\s*$/,
             
             // More flexible format that handles various spacing
-            /^(\d+)\.\s*(\d{7,12})\s+(.+?)\s+([MF])\s+(.+?)\s+(\d+)\s*$/
+            /^(\d+)\.\s*(\d{7,12})\s+(.+?)\s+([MF])\s+(.+?)\s+(\d+)\s*$/,
+            
+            // Ultra-flexible pattern for complex course names with parentheses and spaces
+            // e.g. "2.20226078455ADIONG, SHAID MAHDI B.MMM-ITM (Plan B)"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?\.)\s*([MF])(.+)$/,
+            
+            // Pattern for names with commas and complex formatting
+            // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?\.)\s*([MF])([A-Z0-9\s\-().\/]+)$/,
+            
+            // More specific pattern for names with commas that might not end with period
+            // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)\s*([MF])([A-Z0-9\s\-().\/]+)$/,
+            
+            // Pattern specifically for names with commas where gender comes after name
+            // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)\s*([MF])([A-Z0-9\s\-().\/]+)$/,
+            
+            // Pattern for cases where gender might be missing or incorrectly parsed
+            // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)([A-Z0-9\s\-().\/]+)$/,
+            
+            // Very specific pattern for the problematic case where name has comma and no clear gender
+            // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)([A-Z0-9\s\-().\/]+)$/,
+            
+            // Pattern specifically for names with commas where gender might be missing
+            // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)([A-Z0-9\s\-().\/]+)$/,
+            
+            // Pattern for the specific problematic case where name has comma and gender is missing
+            // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)([A-Z0-9\s\-().\/]+)$/,
+            
+            // Even more flexible pattern for any remaining edge cases
+            // e.g. "1.20237527612ABREGANA, MARJUNE O.MMSIT" or any other format
+            /^(\d+)\.(\d{7,12})(.+?)([MF])(.+)$/,
+            
+            // Fallback pattern for any line that starts with number and has student ID
+            /^(\d+)\.(\d{7,12})(.+)$/
         ];
         
         // Try each pattern until one matches
@@ -1151,6 +1475,38 @@ class PDFParserService {
                     // No gender version
                     [, count, studentId, fullName, course] = match;
                     gender = null;
+                } else if (i === tabularPatterns.length - 4) {
+                    // Ultra-flexible pattern for complex course names
+                    [, count, studentId, fullName, gender, course] = match;
+                    year = null; // No year in this pattern
+                } else if (i === tabularPatterns.length - 3) {
+                    // Pattern for names with commas and complex formatting
+                    [, count, studentId, fullName, gender, course] = match;
+                    year = null; // No year in this pattern
+                } else if (i === tabularPatterns.length - 2) {
+                    // More specific pattern for names with commas that might not end with period
+                    [, count, studentId, fullName, gender, course] = match;
+                    year = null; // No year in this pattern
+                } else if (i === tabularPatterns.length - 1) {
+                    // Pattern for cases where gender might be missing or incorrectly parsed
+                    [, count, studentId, fullName, course] = match;
+                    gender = null; // No gender in this pattern
+                    year = null; // No year in this pattern
+                } else if (i === tabularPatterns.length) {
+                    // Fallback pattern - try to extract what we can
+                    [, count, studentId, rest] = match;
+                    // Try to parse the rest as best we can
+                    const parts = rest.trim().split(/\s+/);
+                    if (parts.length >= 2) {
+                        fullName = parts.slice(0, -1).join(' ');
+                        gender = parts[parts.length - 1];
+                        course = 'Unknown';
+                    } else {
+                        fullName = rest;
+                        gender = 'M'; // Default
+                        course = 'Unknown';
+                    }
+                    year = null;
                 } else {
                     [, count, studentId, fullName, gender, course, year] = match;
                 }
@@ -1179,7 +1535,12 @@ class PDFParserService {
 
                 // Default year when missing (e.g., graduate programs not using year)
                 const yearLevel = parseInt(year, 10);
-                const finalYear = Number.isFinite(yearLevel) ? yearLevel : this.deriveYearLevel(course, null);
+                let finalYear = Number.isFinite(yearLevel) ? yearLevel : this.deriveYearLevel(course, null);
+                
+                // If still null/undefined for undergraduate, will try to infer from context during consolidation
+                if ((finalYear == null || finalYear <= 0) && course && !this.isGraduateCourse(course)) {
+                    console.log(`🔍 Will attempt to infer year for undergraduate: ${cleanName} (${course})`);
+                }
 
                 const student = {
                     id: uuidv4(),
@@ -1208,7 +1569,8 @@ class PDFParserService {
 
         // Ultra-fallback: very lenient compressed line matcher
         // Format: COUNT.IDNAME,GIVEN M./FCOURSE[optional YEAR]
-        const ultra = normalized.match(/^(\d+)\.(\d{7,12})(.+)([MF])([A-Z0-9].*)$/);
+        // Use a more specific pattern to avoid consuming course letters as gender
+        const ultra = normalized.match(/^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?\.)\s*([MF])([A-Z0-9\s\-().\/]+)$/);
         if (ultra) {
             let [, count, studentId, fullName, gender, courseAndMaybeYear] = ultra;
             fullName = fullName.trim();
@@ -1225,7 +1587,12 @@ class PDFParserService {
             if (!['M', 'F'].includes(gender)) return null;
 
             const yearLevel = parseInt(year, 10);
-            const finalYear = Number.isFinite(yearLevel) ? yearLevel : this.deriveYearLevel(course, null);
+            let finalYear = Number.isFinite(yearLevel) ? yearLevel : this.deriveYearLevel(course, null);
+            
+            // If still null/undefined for undergraduate, will try to infer from context during consolidation
+            if ((finalYear == null || finalYear <= 0) && course && !this.isGraduateCourse(course)) {
+                console.log(`🔍 Will attempt to infer year for undergraduate: ${cleanName} (${course})`);
+            }
 
             const student = {
                 id: uuidv4(),
@@ -1265,21 +1632,33 @@ class PDFParserService {
      * @returns {Object} Parsed name components
      */
     parseStudentName(fullName) {
-        // Format: "LASTNAME, FIRSTNAME MIDDLE I."
+        // Format: "LASTNAME, FIRSTNAME MIDDLE I." or "LASTNAME,, FIRSTNAME MIDDLE I." (with double comma)
         const parts = fullName.split(',');
         if (parts.length >= 2) {
             const lastName = parts[0].trim();
-            const firstPart = parts[1].trim(); // This includes first name + middle name + initial
             
-            // Keep the complete first part as first_name (includes middle name and initial)
-            return {
-                first_name: firstPart, // "JUN BRIAN P"
-                last_name: lastName,   // "TUBONGBANUA"
-                middle_name: ''        // Not used anymore
-            };
+            // Handle double comma case: "RESOMADERO,, JAMIMA CHLOE R."
+            // parts[1] will be empty, so we need to get the first non-empty part after the last name
+            let firstPart = '';
+            for (let i = 1; i < parts.length; i++) {
+                const trimmed = parts[i].trim();
+                if (trimmed) {
+                    firstPart = trimmed;
+                    break;
+                }
+            }
+            
+            // If we found a non-empty first part, use it
+            if (firstPart) {
+                return {
+                    first_name: firstPart, // "JAMIMA CHLOE R"
+                    last_name: lastName,   // "RESOMADERO"
+                    middle_name: ''        // Not used anymore
+                };
+            }
         }
 
-        // If no comma, assume it's all first name
+        // If no comma or no valid first name found, assume it's all first name
         return {
             first_name: fullName,
             last_name: '',
@@ -1382,13 +1761,69 @@ class PDFParserService {
             }
         }
 
-        // Add students
+        // Add students (merge year levels intelligently across sections)
+        console.log(`📚 Processing ${sectionData.students.length} students from section: ${sectionData.subject?.code} (${sectionData.subject?.name})`);
         for (const student of sectionData.students) {
-            if (!parsedData.students.has(student.student_id)) {
+            console.log(`👤 Processing student: ${student.full_name} (${student.student_id}) - Year: ${student.year_level} from section: ${sectionData.subject?.code}`);
+            // Infer missing undergraduate year level from section/subject code when possible
+            if ((student.year_level == null || student.year_level <= 0) && student.course && !this.isGraduateCourse(student.course)) {
+                const inferred = this.inferYearFromContext(sectionData.subject);
+                if (Number.isFinite(inferred)) {
+                    console.log(`  🧠 Inferred year ${inferred} from context for ${student.full_name}`);
+                    student.year_level = inferred;
+                }
+            }
+            const existing = parsedData.students.get(student.student_id);
+            if (!existing) {
+                console.log(`  ➕ New student, adding to global list`);
                 parsedData.students.set(student.student_id, {
                     ...student,
                     user_type: 'student',
                     department: this.extractDepartmentFromCourse(student.course)
+                });
+            } else {
+                // Prefer defined year over undefined/null, and prefer higher numeric year
+                const existingYear = typeof existing.year_level === 'number' ? existing.year_level : null;
+                const incomingYear = typeof student.year_level === 'number' ? student.year_level : null;
+
+                console.log(`🔄 Consolidating student ${student.student_id} (${student.full_name}):`);
+                console.log(`  Existing year: ${existingYear}, Incoming year: ${incomingYear}`);
+
+                let mergedYear = existingYear;
+                // Smart consolidation: prefer higher year levels, but only if both are valid
+                if (incomingYear != null && incomingYear > 0) {
+                    if (existingYear == null || existingYear <= 0) {
+                        // No existing year or invalid existing year, use incoming
+                        mergedYear = incomingYear;
+                        console.log(`  ✅ Using incoming year: ${incomingYear} (no valid existing year)`);
+                    } else if (incomingYear > existingYear) {
+                        // Incoming year is higher, use it
+                        mergedYear = incomingYear;
+                        console.log(`  ✅ Using incoming year: ${incomingYear} (higher than existing: ${existingYear})`);
+                    } else {
+                        // Keep existing year (it's higher or equal)
+                        console.log(`  ✅ Keeping existing year: ${existingYear} (higher than incoming: ${incomingYear})`);
+                    }
+                } else {
+                    console.log(`  ✅ Keeping existing year: ${existingYear} (incoming invalid: ${incomingYear})`);
+                }
+
+                // Merge keeping other best-known fields
+                parsedData.students.set(student.student_id, {
+                    ...existing,
+                    // keep first/last names from latest parsed (they should be consistent)
+                    first_name: student.first_name || existing.first_name,
+                    last_name: student.last_name || existing.last_name,
+                    middle_name: student.middle_name ?? existing.middle_name,
+                    full_name: student.full_name || existing.full_name,
+                    gender: student.gender || existing.gender,
+                    course: student.course || existing.course,
+                    year_level: mergedYear,
+                    // Prefer department derived from course if missing
+                    department: existing.department || this.extractDepartmentFromCourse(student.course),
+                    status: existing.status || student.status,
+                    email: existing.email ?? student.email,
+                    user_type: 'student'
                 });
             }
         }

@@ -9,6 +9,7 @@ using Futronic.SDKHelper;
 using FutronicAttendanceSystem.Database;
 using FutronicAttendanceSystem.Database.Models;
 using FutronicAttendanceSystem.Utils;
+using FutronicAttendanceSystem.UI;
 using System.Net.Http;
 using System.Threading.Tasks;
 using System.Text.Json;
@@ -32,6 +33,16 @@ namespace FutronicAttendanceSystem
         private Object m_OperationObj; // For enrollment operations
         private List<UserRecord> m_IdentificationUsers; // For identification operations
         private bool m_bInitializationSuccess = false;
+        
+        // DUAL SENSOR MODE: New fields for dual sensor support
+        private bool isDualSensorMode = false;
+        private DeviceConfiguration deviceConfig;
+        private FutronicIdentification m_InsideSensorOperation;
+        private FutronicIdentification m_OutsideSensorOperation;
+        private bool m_InsideSensorEnabled = true;
+        private bool m_OutsideSensorEnabled = true;
+        private DualSensorPanel dualSensorPanel;
+        private TabPage dualSensorTab;
         
         // Operation state tracking
         private bool m_bEnrollmentInProgress = false;
@@ -478,6 +489,83 @@ namespace FutronicAttendanceSystem
             }
         }
 
+        // DUAL SENSOR MODE: New constructor for dual sensor support
+        public MainForm(DatabaseManager db, DeviceConfiguration deviceConfiguration)
+        {
+            Console.WriteLine("=== MainForm Dual Sensor Mode Constructor ===");
+            
+            // Set dual sensor mode
+            isDualSensorMode = true;
+            deviceConfig = deviceConfiguration;
+            dbManager = db;
+            
+            // CRITICAL FIX: Set the database manager's current room ID from device configuration
+            // This is needed for schedule validation to work correctly
+            if (dbManager != null && !string.IsNullOrEmpty(deviceConfig.RoomId))
+            {
+                dbManager.CurrentRoomId = deviceConfig.RoomId;
+                Console.WriteLine($"  ✅ Set DatabaseManager.CurrentRoomId = {deviceConfig.RoomId}");
+            }
+            else
+            {
+                Console.WriteLine($"  ⚠️ Warning: Could not set CurrentRoomId (dbManager={dbManager != null}, RoomId={deviceConfig?.RoomId})");
+            }
+            
+            Console.WriteLine($"Dual Sensor Mode Enabled:");
+            Console.WriteLine($"  Room: {deviceConfig.RoomName} (ID: {deviceConfig.RoomId})");
+            Console.WriteLine($"  Inside Sensor: {deviceConfig.InsideSensor?.DeviceId}");
+            Console.WriteLine($"  Outside Sensor: {deviceConfig.OutsideSensor?.DeviceId}");
+            Console.WriteLine($"  Test Mode: {deviceConfig.TestMode}");
+            
+            InitializeComponent();
+            
+            // Reduce flicker
+            try
+            {
+                this.SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+                this.UpdateStyles();
+            }
+            catch { }
+            
+            try
+            {
+                // Load configuration
+                config = ConfigManager.Instance;
+                
+                // Configure HttpClient
+                try
+                {
+                    http.DefaultRequestHeaders.Remove("x-device-api-key");
+                    http.DefaultRequestHeaders.Add("x-device-api-key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                }
+                catch { }
+                
+                // Load users from database
+                Console.WriteLine("Loading users for dual sensor mode...");
+                m_bInitializationSuccess = true;
+                RefreshUserList();
+                
+                // Initialize dual sensor tab
+                InitializeDualSensorTab();
+                InitializeDeviceConfigTab();  // Add config tab to main tab control
+                
+                // Start dual sensor operations
+                StartDualSensorOperations();
+                
+                // Initialize background timers for device heartbeat
+                StartBackgroundTasks();
+                
+                Console.WriteLine("✅ Dual Sensor Mode initialized successfully!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Dual Sensor Initialization failed: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                MessageBox.Show($"Dual Sensor initialization failed:\n\n{ex.Message}", "Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         private void InitializeDatabase()
         {
             try
@@ -680,7 +768,8 @@ namespace FutronicAttendanceSystem
         private void InitializeComponent()
         {
             this.Text = "Futronic Attendance System";
-            this.Size = new Size(1000, 700);
+            this.Size = new Size(1200, 750); // Increased width by 20% for better layout
+            this.MinimumSize = new Size(1000, 600); // Prevent form from becoming too small
             this.WindowState = FormWindowState.Maximized; // Set window to fullscreen/maximized by default
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormClosing += MainForm_FormClosing;
@@ -1333,25 +1422,29 @@ namespace FutronicAttendanceSystem
             // Live clock display
             var clockPanel = new Panel();
             clockPanel.Location = new Point(20, 80);
-            clockPanel.Size = new Size(300, 60); // taller timer box
+            clockPanel.Size = new Size(300, 80); // Increased height to prevent text cutoff
             clockPanel.BackColor = Color.FromArgb(240, 248, 255);
             clockPanel.BorderStyle = BorderStyle.FixedSingle;
             attendanceTab.Controls.Add(clockPanel);
             
             lblLiveTime = new Label();
-            lblLiveTime.Location = new Point(10, 5);
-            lblLiveTime.Size = new Size(280, 20);
+            lblLiveTime.Location = new Point(10, 10);
+            lblLiveTime.Size = new Size(280, 25);
             lblLiveTime.Font = new Font("Segoe UI", 12, FontStyle.Bold);
             lblLiveTime.ForeColor = Color.FromArgb(30, 60, 120);
             lblLiveTime.Text = "Time: Loading...";
+            lblLiveTime.AutoSize = true;
+            lblLiveTime.AutoEllipsis = true;
             clockPanel.Controls.Add(lblLiveTime);
             
             lblLiveDay = new Label();
-            lblLiveDay.Location = new Point(10, 25);
-            lblLiveDay.Size = new Size(280, 15);
+            lblLiveDay.Location = new Point(10, 40);
+            lblLiveDay.Size = new Size(280, 25);
             lblLiveDay.Font = new Font("Segoe UI", 9, FontStyle.Regular);
             lblLiveDay.ForeColor = Color.FromArgb(60, 90, 140);
             lblLiveDay.Text = "Day: Loading...";
+            lblLiveDay.AutoSize = true;
+            lblLiveDay.AutoEllipsis = true;
             clockPanel.Controls.Add(lblLiveDay);
             
             // Initialize clock timer
@@ -1360,15 +1453,17 @@ namespace FutronicAttendanceSystem
             clockTimer.Tick += ClockTimer_Tick;
             clockTimer.Start();
 
-            // Status text - keep compact to avoid overlapping session state
+            // Status text - improved layout with better sizing
             txtStatus = new TextBox();
-            // Place to the right of the timer box
+            // Place to the right of the timer box with better positioning
             txtStatus.Location = new Point(330, 80);
-            txtStatus.Size = new Size(600, 60);
+            txtStatus.Size = new Size(650, 100); // Increased height to match clock panel
             txtStatus.Multiline = true;
             txtStatus.ReadOnly = true;
             txtStatus.BackColor = Color.White;
             txtStatus.ScrollBars = ScrollBars.Vertical;
+            txtStatus.WordWrap = true;
+            txtStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             txtStatus.Text = "Always-on attendance system ready. Scan your fingerprint twice to confirm attendance.";
             attendanceTab.Controls.Add(txtStatus);
 
@@ -1599,102 +1694,233 @@ namespace FutronicAttendanceSystem
 
         private void InitializeRfidLocationRoomControls()
         {
-            // Current room label for RFID
+            // Create a TableLayoutPanel for better layout management (RFID version)
+            var rfidHeaderPanel = new TableLayoutPanel();
+            rfidHeaderPanel.Location = new Point(320, 20);
+            rfidHeaderPanel.Size = new Size(650, 80);
+            rfidHeaderPanel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            rfidHeaderPanel.ColumnCount = 5;
+            rfidHeaderPanel.RowCount = 2;
+            rfidHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // Location label
+            rfidHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110F)); // Location dropdown
+            rfidHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // Room label
+            rfidHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); // Room dropdown takes remaining space
+            rfidHeaderPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90F)); // Change button (fixed)
+            rfidHeaderPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 25F)); // Current Room row
+            rfidHeaderPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F)); // Location/Room row
+            rfidHeaderPanel.Padding = new Padding(5);
+            rfidAttendanceTab.Controls.Add(rfidHeaderPanel);
+
+            // Current room label for RFID - spans full width
             lblRfidCurrentRoom = new Label();
-            lblRfidCurrentRoom.Location = new Point(320, 25);
-            lblRfidCurrentRoom.Size = new Size(300, 20);
+            lblRfidCurrentRoom.AutoSize = true;
+            lblRfidCurrentRoom.AutoEllipsis = true;
             lblRfidCurrentRoom.Text = "Current Room: Loading...";
             lblRfidCurrentRoom.ForeColor = Color.DarkBlue;
             lblRfidCurrentRoom.Font = new Font(lblRfidCurrentRoom.Font, FontStyle.Bold);
-            rfidAttendanceTab.Controls.Add(lblRfidCurrentRoom);
+            lblRfidCurrentRoom.Dock = DockStyle.Fill;
+            rfidHeaderPanel.Controls.Add(lblRfidCurrentRoom, 0, 0);
+            rfidHeaderPanel.SetColumnSpan(lblRfidCurrentRoom, 5);
+
+            // Add tooltip for current room
+            var rfidToolTip = new ToolTip();
+            rfidToolTip.SetToolTip(lblRfidCurrentRoom, "Current room assignment");
 
             // Location selection for RFID
             var lblRfidLocation = new Label();
-            lblRfidLocation.Location = new Point(320, 50);
-            lblRfidLocation.Size = new Size(60, 20);
+            lblRfidLocation.AutoSize = true;
             lblRfidLocation.Text = "Location:";
-            rfidAttendanceTab.Controls.Add(lblRfidLocation);
+            lblRfidLocation.TextAlign = ContentAlignment.MiddleLeft;
+            lblRfidLocation.Dock = DockStyle.None;
+            lblRfidLocation.Anchor = AnchorStyles.Left;
+            lblRfidLocation.Margin = new Padding(0, 0, 6, 0);
+            rfidHeaderPanel.Controls.Add(lblRfidLocation, 0, 1);
 
             cmbRfidLocation = new ComboBox();
-            cmbRfidLocation.Location = new Point(385, 48);
-            cmbRfidLocation.Size = new Size(100, 25);
             cmbRfidLocation.DropDownStyle = ComboBoxStyle.DropDownList;
             cmbRfidLocation.Items.AddRange(new object[] { "inside", "outside" });
             cmbRfidLocation.SelectedIndex = 0;
             cmbRfidLocation.SelectedIndexChanged += CmbRfidLocation_SelectedIndexChanged;
-            rfidAttendanceTab.Controls.Add(cmbRfidLocation);
+            cmbRfidLocation.Dock = DockStyle.Fill;
+            cmbRfidLocation.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            rfidHeaderPanel.Controls.Add(cmbRfidLocation, 1, 1);
 
             // Room selection for RFID
             var lblRfidRoom = new Label();
-            lblRfidRoom.Location = new Point(500, 50);
-            lblRfidRoom.Size = new Size(40, 20);
+            lblRfidRoom.AutoSize = true;
             lblRfidRoom.Text = "Room:";
-            rfidAttendanceTab.Controls.Add(lblRfidRoom);
+            lblRfidRoom.TextAlign = ContentAlignment.MiddleLeft;
+            lblRfidRoom.Dock = DockStyle.None;
+            lblRfidRoom.Anchor = AnchorStyles.Left;
+            lblRfidRoom.Margin = new Padding(0, 0, 6, 0);
+            rfidHeaderPanel.Controls.Add(lblRfidRoom, 2, 1);
 
             cmbRfidRoom = new ComboBox();
-            cmbRfidRoom.Location = new Point(545, 48);
-            cmbRfidRoom.Size = new Size(200, 25);
             cmbRfidRoom.DropDownStyle = ComboBoxStyle.DropDownList;
-            rfidAttendanceTab.Controls.Add(cmbRfidRoom);
+            cmbRfidRoom.Dock = DockStyle.Fill;
+            cmbRfidRoom.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            cmbRfidRoom.MaximumSize = new Size(420, 0);
+            rfidHeaderPanel.Controls.Add(cmbRfidRoom, 3, 1);
 
             // Change room button for RFID
             btnRfidChangeRoom = new Button();
-            btnRfidChangeRoom.Location = new Point(755, 47);
-            btnRfidChangeRoom.Size = new Size(80, 27);
-            btnRfidChangeRoom.Text = "Change Room";
+            btnRfidChangeRoom.Text = "Change";
             btnRfidChangeRoom.BackColor = Color.LightCyan;
             btnRfidChangeRoom.Click += BtnRfidChangeRoom_Click;
-            rfidAttendanceTab.Controls.Add(btnRfidChangeRoom);
+            btnRfidChangeRoom.Dock = DockStyle.None;
+            btnRfidChangeRoom.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+            btnRfidChangeRoom.AutoSize = false;
+            btnRfidChangeRoom.Width = 90; // keep width fixed
+            btnRfidChangeRoom.Margin = new Padding(0);
+            rfidHeaderPanel.Controls.Add(btnRfidChangeRoom, 4, 1);
+
+            // Set dropdown widths after controls are added
+            SetRfidComboBoxDropDownWidths();
         }
 
         private void InitializeLocationRoomControls()
         {
-            // Current room label
+            // Create a TableLayoutPanel for better layout management
+            var headerPanel = new TableLayoutPanel();
+            headerPanel.Location = new Point(320, 20);
+            headerPanel.Size = new Size(650, 110);
+            headerPanel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            headerPanel.ColumnCount = 4;
+            headerPanel.RowCount = 3;
+            headerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // Location label
+            headerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110F)); // Location dropdown
+            headerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); // Room label
+            headerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); // Room dropdown takes remaining space
+            headerPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 25F)); // Current Room row
+            headerPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F)); // Location/Room row
+            headerPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F)); // Change button row
+            headerPanel.Padding = new Padding(5);
+            attendanceTab.Controls.Add(headerPanel);
+
+            // Current room label - spans full width
             lblCurrentRoom = new Label();
-            lblCurrentRoom.Location = new Point(320, 25);
-            lblCurrentRoom.Size = new Size(300, 20);
+            lblCurrentRoom.AutoSize = true;
+            lblCurrentRoom.AutoEllipsis = true;
             lblCurrentRoom.Text = "Current Room: Loading...";
             lblCurrentRoom.ForeColor = Color.DarkBlue;
             lblCurrentRoom.Font = new Font(lblCurrentRoom.Font, FontStyle.Bold);
-            attendanceTab.Controls.Add(lblCurrentRoom);
+            lblCurrentRoom.Dock = DockStyle.Fill;
+            headerPanel.Controls.Add(lblCurrentRoom, 0, 0);
+            headerPanel.SetColumnSpan(lblCurrentRoom, 5);
+
+            // Add tooltip for current room
+            var toolTip = new ToolTip();
+            toolTip.SetToolTip(lblCurrentRoom, "Current room assignment");
 
             // Location selection
             var lblLocation = new Label();
-            lblLocation.Location = new Point(320, 50);
-            lblLocation.Size = new Size(60, 20);
+            lblLocation.AutoSize = true;
             lblLocation.Text = "Location:";
-            attendanceTab.Controls.Add(lblLocation);
+            lblLocation.TextAlign = ContentAlignment.MiddleLeft;
+            lblLocation.Dock = DockStyle.None;
+            lblLocation.Anchor = AnchorStyles.Left;
+            lblLocation.Margin = new Padding(0, 0, 6, 0);
+            headerPanel.Controls.Add(lblLocation, 0, 1);
 
             cmbLocation = new ComboBox();
-            cmbLocation.Location = new Point(385, 48);
-            cmbLocation.Size = new Size(100, 25);
             cmbLocation.DropDownStyle = ComboBoxStyle.DropDownList;
             cmbLocation.Items.AddRange(new object[] { "inside", "outside" });
             cmbLocation.SelectedIndex = 0;
             cmbLocation.SelectedIndexChanged += CmbLocation_SelectedIndexChanged;
-            attendanceTab.Controls.Add(cmbLocation);
+            cmbLocation.Dock = DockStyle.Fill; // width controlled by absolute column width
+            cmbLocation.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            cmbLocation.Margin = new Padding(0, 0, 12, 0);
+            headerPanel.Controls.Add(cmbLocation, 1, 1);
 
             // Room selection
             var lblRoom = new Label();
-            lblRoom.Location = new Point(500, 50);
-            lblRoom.Size = new Size(40, 20);
+            lblRoom.AutoSize = true;
             lblRoom.Text = "Room:";
-            attendanceTab.Controls.Add(lblRoom);
+            lblRoom.TextAlign = ContentAlignment.MiddleLeft;
+            lblRoom.Dock = DockStyle.None;
+            lblRoom.Anchor = AnchorStyles.Left;
+            lblRoom.Margin = new Padding(0, 0, 6, 0);
+            headerPanel.Controls.Add(lblRoom, 2, 1);
 
             cmbRoom = new ComboBox();
-            cmbRoom.Location = new Point(545, 48);
-            cmbRoom.Size = new Size(200, 25);
             cmbRoom.DropDownStyle = ComboBoxStyle.DropDownList;
-            attendanceTab.Controls.Add(cmbRoom);
+            cmbRoom.Dock = DockStyle.Fill; // fixed-width column keeps it reasonable
+            cmbRoom.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            cmbRoom.Margin = new Padding(0, 0, 12, 0);
+            cmbRoom.MaximumSize = new Size(420, 0); // cap visual width to column width
+            headerPanel.Controls.Add(cmbRoom, 3, 1);
 
             // Change room button
             btnChangeRoom = new Button();
-            btnChangeRoom.Location = new Point(755, 47);
-            btnChangeRoom.Size = new Size(80, 27);
-            btnChangeRoom.Text = "Change Room";
+            btnChangeRoom.Text = "Change";
             btnChangeRoom.BackColor = Color.LightCyan;
             btnChangeRoom.Click += BtnChangeRoom_Click;
-            attendanceTab.Controls.Add(btnChangeRoom);
+            btnChangeRoom.Dock = DockStyle.None;
+            btnChangeRoom.Anchor = AnchorStyles.Left | AnchorStyles.Top;
+            btnChangeRoom.AutoSize = false;
+            btnChangeRoom.Width = 60; // smaller width as requested
+            btnChangeRoom.Height = 25; // ensure proper height
+            btnChangeRoom.Margin = new Padding(0);
+            headerPanel.Controls.Add(btnChangeRoom, 1, 2);
+
+            // Set dropdown widths after controls are added
+            SetComboBoxDropDownWidths();
+            
+            // DUAL SENSOR MODE: Disable location/room controls (managed by Device Configuration)
+            if (isDualSensorMode)
+            {
+                if (cmbLocation != null)
+                {
+                    cmbLocation.Enabled = false;
+                    cmbLocation.Items.Clear();
+                    cmbLocation.Items.Add("Dual Sensor (Auto)");
+                    cmbLocation.SelectedIndex = 0;
+                }
+                
+                if (btnChangeRoom != null)
+                {
+                    btnChangeRoom.Enabled = false;
+                    btnChangeRoom.Visible = false;
+                }
+            }
+        }
+
+        private void SetComboBoxDropDownWidths()
+        {
+            if (cmbLocation != null)
+            {
+                cmbLocation.DropDownWidth = MeasureDropDownWidth(cmbLocation);
+            }
+            if (cmbRoom != null)
+            {
+                cmbRoom.DropDownWidth = MeasureDropDownWidth(cmbRoom);
+            }
+        }
+
+        private int MeasureDropDownWidth(ComboBox combo)
+        {
+            int maxWidth = combo.Width;
+            using (var g = combo.CreateGraphics())
+            {
+                foreach (var item in combo.Items)
+                {
+                    var size = g.MeasureString(item.ToString(), combo.Font);
+                    maxWidth = Math.Max(maxWidth, (int)size.Width + SystemInformation.VerticalScrollBarWidth + 16);
+                }
+            }
+            return maxWidth;
+        }
+
+        private void SetRfidComboBoxDropDownWidths()
+        {
+            if (cmbRfidLocation != null)
+            {
+                cmbRfidLocation.DropDownWidth = MeasureDropDownWidth(cmbRfidLocation);
+            }
+            if (cmbRfidRoom != null)
+            {
+                cmbRfidRoom.DropDownWidth = MeasureDropDownWidth(cmbRfidRoom);
+            }
         }
 
         private void InitializeDeviceManagementTab()
@@ -3044,10 +3270,13 @@ These settings allow you to customize the attendance system behavior for differe
                             Console.WriteLine($"✅ SESSION STARTED - Students can now sign in for {validationResult.SubjectName}");
                         
                         // Record instructor's sign-in attendance (session start = instructor sign-in)
-                        System.Threading.Tasks.Task.Run(() => {
+                        System.Threading.Tasks.Task.Run(async () => {
                             try
                             {
                                 RecordAttendance(userName, "Instructor Sign-In (Session Start)");
+                                
+                                // Request lock control for instructor
+                                await RequestLockControl(userGuid, "Instructor Sign-In (Session Start)");
                             }
                             catch (Exception ex)
                             {
@@ -3107,10 +3336,13 @@ These settings allow you to customize the attendance system behavior for differe
                         Console.WriteLine($"🔚 SESSION CLOSED - Instructor signed out, all students cleared");
                         
                         // Record instructor's sign-out attendance (session end = instructor sign-out)
-                        System.Threading.Tasks.Task.Run(() => {
+                        System.Threading.Tasks.Task.Run(async () => {
                             try
                             {
                                 RecordAttendance(userName, "Instructor Sign-Out (Session End)");
+                                
+                                // Request lock control for instructor
+                                await RequestLockControl(userGuid, "Instructor Sign-Out (Session End)");
                             }
                             catch (Exception ex)
                             {
@@ -3181,13 +3413,26 @@ These settings allow you to customize the attendance system behavior for differe
                                 // NOW check if already signed in (after verification)
                                 if (signedInStudentGuids.Contains(userGuid))
                                 {
-                                    SetStatusText($"⚠️ Student {userName} already signed in.");
-                                    Console.WriteLine($"⚠️ STUDENT {userName} ALREADY SIGNED IN");
+                                    SetStatusText($"⚠️ Student {userName} already signed in - allowing door access.");
+                                    Console.WriteLine($"⚠️ STUDENT {userName} ALREADY SIGNED IN - ALLOWING DOOR ACCESS");
                                     
                                     System.Threading.Tasks.Task.Run(() => {
                                         try
                                         {
-                                            RecordAttendance(userName, "Student Already Signed In", false);
+                                            RecordAttendance(userName, "Student Already Signed In - Door Access", false);
+                                            
+                                            // STILL SEND LOCK CONTROL REQUEST for already signed in students
+                                            // This allows them to go in and out during the session
+                                            System.Threading.Tasks.Task.Run(async () => {
+                                                try
+                                                {
+                                                    await RequestLockControl(userGuid, "Student Already Signed In - Door Access");
+                                                }
+                                                catch (Exception lockEx)
+                                                {
+                                                    Console.WriteLine($"Lock control request failed for already signed in student: {lockEx.Message}");
+                                                }
+                                            });
                                         }
                                         catch (Exception ex)
                                         {
@@ -3219,14 +3464,27 @@ These settings allow you to customize the attendance system behavior for differe
                             // CHECK: Is student already signed in? (before starting verification)
                             if (signedInStudentGuids.Contains(userGuid))
                             {
-                                // Already signed in - no need to verify
-                                SetStatusText($"⚠️ Student {userName} already signed in.");
-                                Console.WriteLine($"⚠️ STUDENT {userName} ALREADY SIGNED IN");
+                                // Already signed in - no need to verify but still allow door access
+                                SetStatusText($"⚠️ Student {userName} already signed in - allowing door access.");
+                                Console.WriteLine($"⚠️ STUDENT {userName} ALREADY SIGNED IN - ALLOWING DOOR ACCESS");
                                 
                                 System.Threading.Tasks.Task.Run(() => {
                                     try
                                     {
-                                        RecordAttendance(userName, "Student Already Signed In", false);
+                                        RecordAttendance(userName, "Student Already Signed In - Door Access", false);
+                                        
+                                        // STILL SEND LOCK CONTROL REQUEST for already signed in students
+                                        // This allows them to go in and out during the session
+                                        System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControl(userGuid, "Student Already Signed In - Door Access");
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control request failed for already signed in student: {lockEx.Message}");
+                                            }
+                                        });
                                     }
                                     catch (Exception ex)
                                     {
@@ -3252,12 +3510,27 @@ These settings allow you to customize the attendance system behavior for differe
                         
                     case AttendanceSessionState.ActiveForSignOut:
                         // Student signing out (no verification needed for sign-out)
-                        // If already signed out in this session, show message
+                        // If already signed out in this session, show message but still allow door access
                         if (signedOutStudentGuids.Contains(userGuid))
                         {
-                            SetStatusText($"⚠️ Student {userName} already signed out.");
+                            SetStatusText($"⚠️ Student {userName} already signed out - allowing door access.");
                             System.Threading.Tasks.Task.Run(() => {
-                                try { RecordAttendance(userName, "Student Already Signed Out", false); } catch {}
+                                try { 
+                                    RecordAttendance(userName, "Student Already Signed Out - Door Access", false);
+                                    
+                                    // STILL SEND LOCK CONTROL REQUEST for already signed out students
+                                    // This allows them to go in and out during the session
+                                    System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestLockControl(userGuid, "Student Already Signed Out - Door Access");
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control request failed for already signed out student: {lockEx.Message}");
+                                        }
+                                    });
+                                } catch {}
                             });
                             ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                             break;
@@ -3292,6 +3565,18 @@ These settings allow you to customize the attendance system behavior for differe
                                         };
                                         attendanceRecords.Add(local);
                                         UpdateAttendanceDisplay(local);
+                                        
+                                        // Request lock control for successful student sign-out
+                                        System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControl(userGuid, "Student Sign-Out");
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control request failed: {lockEx.Message}");
+                                            }
+                                        });
                                     }
                                     else
                                     {
@@ -3395,6 +3680,18 @@ These settings allow you to customize the attendance system behavior for differe
                                 };
                                 attendanceRecords.Add(local);
                                 UpdateAttendanceDisplay(local);
+                                
+                                // Request lock control for successful student sign-in
+                                System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestLockControl(user.EmployeeId, "Student Sign-In");
+                                    }
+                                    catch (Exception lockEx)
+                                    {
+                                        Console.WriteLine($"Lock control request failed: {lockEx.Message}");
+                                    }
+                                });
                             }
                             else
                             {
@@ -4364,7 +4661,24 @@ These settings allow you to customize the attendance system behavior for differe
         private static Dictionary<string, string> discoveredESP32Devices = new Dictionary<string, string>();
         private static DateTime lastDiscoveryTime = DateTime.MinValue;
 
-        // Request lock control - Auto-discover and send command to ESP32
+        // Helper method to determine if lock should open for user
+        private bool ShouldOpenLockForUser(User user)
+        {
+            if (user.UserType?.ToLower() == "instructor")
+                return true;
+            
+            if (user.UserType?.ToLower() == "student")
+            {
+                // Students can open door during active session (including already signed in students)
+                return currentSessionState == AttendanceSessionState.ActiveForStudents ||
+                       currentSessionState == AttendanceSessionState.ActiveForSignOut ||
+                       currentSessionState == AttendanceSessionState.WaitingForInstructorSignOut;
+            }
+            
+            return false;
+        }
+
+        // Request lock control for fingerprint scans - Auto-discover and send command to ESP32
         private async Task RequestLockControl(string userGuid, string action)
         {
             try
@@ -4387,17 +4701,22 @@ These settings allow you to customize the attendance system behavior for differe
                 }
 
                 Console.WriteLine($"User: {user.FirstName} {user.LastName} - Type: {user.UserType}");
+                Console.WriteLine($"Current Session State: {currentSessionState}");
 
-                // Only instructors can control the lock
-                if (user.UserType?.ToLower() != "instructor")
+                // Check if user should be allowed to open lock
+                if (!ShouldOpenLockForUser(user))
                 {
-                    Console.WriteLine("⚠️ User is not an instructor - skipping lock control");
+                    Console.WriteLine($"⚠️ User {user.FirstName} {user.LastName} ({user.UserType}) - access denied");
+                    Console.WriteLine($"⚠️ Session State: {currentSessionState} - Not allowed for this user type");
                     return;
                 }
+                
+                Console.WriteLine($"✅ User {user.FirstName} {user.LastName} ({user.UserType}) - access granted");
 
-                // Determine lock action
-                string lockAction = action.Contains("Check In") || action.Contains("Sign-In") ? "open" : "close";
-                Console.WriteLine($"Lock Action: {lockAction}");
+                // Determine lock action - both sign-in and sign-out should OPEN the door
+                // Students need door access for both entering (sign-in) and leaving (sign-out)
+                string lockAction = "open"; // Always open door for valid authentication
+                Console.WriteLine($"Lock Action: {lockAction} (Always open for valid authentication)");
 
                 // Auto-discover ESP32 on the network
                 string esp32Ip = await DiscoverESP32();
@@ -4418,7 +4737,10 @@ These settings allow you to customize the attendance system behavior for differe
                 var payload = new
                 {
                     action = lockAction,
-                    user = $"{user.FirstName} {user.LastName}"
+                    user = $"{user.FirstName} {user.LastName}",
+                    userType = user.UserType?.ToLower(),
+                    sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                   currentSessionState == AttendanceSessionState.ActiveForSignOut
                 };
 
                 var json = JsonSerializer.Serialize(payload);
@@ -4479,6 +4801,123 @@ These settings allow you to customize the attendance system behavior for differe
                 
                 this.Invoke(new Action(() => {
                     SetStatusText($"❌ Lock error: {ex.Message}");
+                }));
+            }
+        }
+
+        // Request lock control for RFID scans - Auto-discover and send command to ESP32 RFID endpoint
+        private async Task RequestRfidLockControl(string userGuid, string action, string rfidData)
+        {
+            try
+            {
+                Console.WriteLine("=== RFID LOCK CONTROL REQUEST START ===");
+                Console.WriteLine($"User GUID: {userGuid}");
+                Console.WriteLine($"Action: {action}");
+                Console.WriteLine($"RFID Data: {rfidData}");
+
+                // Get user info to check if instructor
+                User user = null;
+                if (userLookupByGuid != null)
+                {
+                    userLookupByGuid.TryGetValue(userGuid, out user);
+                }
+
+                if (user == null)
+                {
+                    Console.WriteLine("❌ User not found");
+                    return;
+                }
+
+                Console.WriteLine($"User: {user.FirstName} {user.LastName} - Type: {user.UserType}");
+                Console.WriteLine($"Current Session State: {currentSessionState}");
+
+                // Check if user should be allowed to open lock
+                if (!ShouldOpenLockForUser(user))
+                {
+                    Console.WriteLine($"⚠️ User {user.FirstName} {user.LastName} ({user.UserType}) - access denied");
+                    Console.WriteLine($"⚠️ Session State: {currentSessionState} - Not allowed for this user type");
+                    return;
+                }
+                
+                Console.WriteLine($"✅ User {user.FirstName} {user.LastName} ({user.UserType}) - access granted");
+
+                // For RFID scans, always open door for valid authentication
+                // Students need door access for both entering (sign-in) and leaving (sign-out)
+                Console.WriteLine($"RFID Lock Action: open (Always open for valid RFID authentication)");
+
+                // Auto-discover ESP32 on the network
+                string esp32Ip = await DiscoverESP32();
+                
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network");
+                    this.Invoke(new Action(() => {
+                        SetRfidStatusText("❌ No lock controller found");
+                    }));
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}/api/rfid-scan";
+                Console.WriteLine($"Sending RFID scan to ESP32: {esp32Url}");
+
+                // Create payload for ESP32 RFID endpoint
+                var payload = new
+                {
+                    rfid_data = rfidData,
+                    user = $"{user.FirstName} {user.LastName}",
+                    userType = user.UserType?.ToLower(),
+                    sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                   currentSessionState == AttendanceSessionState.ActiveForSignOut
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"RFID Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    
+                    // Add API key to request header for security
+                    string apiKey = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Must match ESP32 API key
+                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+                    Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
+                    
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    Console.WriteLine($"ESP32 RFID Response Status: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"ESP32 RFID Response: {responseContent}");
+                        
+                        Console.WriteLine("🔓 Door unlocked for RFID scan");
+                        this.Invoke(new Action(() => {
+                            SetRfidStatusText("🔓 Door unlocked");
+                        }));
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"❌ ESP32 RFID request failed: {response.StatusCode}");
+                        Console.WriteLine($"Error: {errorContent}");
+                        
+                        this.Invoke(new Action(() => {
+                            SetRfidStatusText($"❌ RFID lock control failed: {response.StatusCode}");
+                        }));
+                    }
+                }
+                
+                Console.WriteLine("=== RFID LOCK CONTROL REQUEST END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error requesting RFID lock control: {ex.Message}");
+                
+                this.Invoke(new Action(() => {
+                    SetRfidStatusText($"❌ RFID lock error: {ex.Message}");
                 }));
             }
         }
@@ -4662,7 +5101,22 @@ These settings allow you to customize the attendance system behavior for differe
                 {
                     // Only update UI controls if they exist
                     if (txtStatus != null)
-                        txtStatus.Text = $"{DateTime.Now:HH:mm:ss} - {text}";
+                    {
+                        // Append new message to create a log-like behavior
+                        string newMessage = $"{DateTime.Now:HH:mm:ss} - {text}";
+                        if (string.IsNullOrEmpty(txtStatus.Text))
+                        {
+                            txtStatus.Text = newMessage;
+                        }
+                        else
+                        {
+                            txtStatus.Text += Environment.NewLine + newMessage;
+                        }
+                        
+                        // Auto-scroll to bottom to show latest message
+                        txtStatus.SelectionStart = txtStatus.Text.Length;
+                        txtStatus.ScrollToCaret();
+                    }
                     // Don't call this.Update() - it forces synchronous repaint which can freeze the UI
                 }
                 catch (Exception ex)
@@ -5112,22 +5566,59 @@ These settings allow you to customize the attendance system behavior for differe
         {
             if (cmbRoom != null && availableRooms != null)
             {
-                cmbRoom.Items.Clear();
-                cmbRoom.DisplayMember = "DisplayName";
-                cmbRoom.ValueMember = "RoomId";
-                
-                foreach (var room in availableRooms)
+                // DUAL SENSOR MODE: Set room from device configuration
+                if (isDualSensorMode && deviceConfig != null)
                 {
-                    cmbRoom.Items.Add(room);
-                }
-                
-                // Select current room if available
-                if (!string.IsNullOrEmpty(dbManager?.CurrentRoomId))
-                {
-                    var currentRoom = availableRooms.FirstOrDefault(r => r.RoomId == dbManager.CurrentRoomId);
-                    if (currentRoom != null)
+                    // In dual sensor mode, room is set via Device Configuration page
+                    // Make combo box read-only and display configured room
+                    cmbRoom.Enabled = false;
+                    cmbRoom.Items.Clear();
+                    
+                    // Find the room in available rooms list
+                    var configuredRoom = availableRooms.FirstOrDefault(r => r.RoomId == deviceConfig.RoomId);
+                    if (configuredRoom != null)
                     {
-                        cmbRoom.SelectedItem = currentRoom;
+                        cmbRoom.DisplayMember = "DisplayName";
+                        cmbRoom.ValueMember = "RoomId";
+                        cmbRoom.Items.Add(configuredRoom);
+                        cmbRoom.SelectedItem = configuredRoom;
+                    }
+                    else
+                    {
+                        // Room not found in database, create a display-only entry
+                        var displayRoom = new Database.Models.Room
+                        {
+                            RoomId = deviceConfig.RoomId ?? "unknown",
+                            RoomName = deviceConfig.RoomName ?? "Unknown Room",
+                            Building = deviceConfig.Building ?? "Unknown Building"
+                        };
+                        cmbRoom.Items.Add(displayRoom);
+                        cmbRoom.DisplayMember = "DisplayName";
+                        cmbRoom.ValueMember = "RoomId";
+                        cmbRoom.SelectedIndex = 0;
+                    }
+                }
+                // REGULAR MODE: Allow room selection
+                else
+                {
+                    cmbRoom.Enabled = true;
+                    cmbRoom.Items.Clear();
+                    cmbRoom.DisplayMember = "DisplayName";
+                    cmbRoom.ValueMember = "RoomId";
+                    
+                    foreach (var room in availableRooms)
+                    {
+                        cmbRoom.Items.Add(room);
+                    }
+                    
+                    // Select current room if available
+                    if (!string.IsNullOrEmpty(dbManager?.CurrentRoomId))
+                    {
+                        var currentRoom = availableRooms.FirstOrDefault(r => r.RoomId == dbManager.CurrentRoomId);
+                        if (currentRoom != null)
+                        {
+                            cmbRoom.SelectedItem = currentRoom;
+                        }
                     }
                 }
             }
@@ -5150,14 +5641,24 @@ These settings allow you to customize the attendance system behavior for differe
         {
             try
             {
-                if (lblCurrentRoom != null && dbManager?.CurrentDevice?.Room != null)
+                if (lblCurrentRoom != null)
                 {
-                    var room = dbManager.CurrentDevice.Room;
-                    lblCurrentRoom.Text = $"Current Room: {room.FullDisplayName}";
-                }
-                else if (lblCurrentRoom != null)
-                {
-                    lblCurrentRoom.Text = "Current Room: Not Set";
+                    // DUAL SENSOR MODE: Use device configuration if available
+                    if (isDualSensorMode && deviceConfig != null)
+                    {
+                        string building = !string.IsNullOrEmpty(deviceConfig.Building) ? deviceConfig.Building : "Unknown Building";
+                        lblCurrentRoom.Text = $"Current Room: {building} - {deviceConfig.RoomName}";
+                    }
+                    // REGULAR MODE: Use database device room
+                    else if (dbManager?.CurrentDevice?.Room != null)
+                    {
+                        var room = dbManager.CurrentDevice.Room;
+                        lblCurrentRoom.Text = $"Current Room: {room.FullDisplayName}";
+                    }
+                    else
+                    {
+                        lblCurrentRoom.Text = "Current Room: Not Set";
+                    }
                 }
             }
             catch (Exception ex)
@@ -5797,14 +6298,21 @@ These settings allow you to customize the attendance system behavior for differe
                 SetRfidStatusText($"RFID Card Scanned: {rfidData}");
                 AddRfidAttendanceRecord("RFID Scanner", $"Card Scanned: {rfidData}", "Processing...");
 
+                Console.WriteLine($"====== RFID LOOKUP ======");
+                Console.WriteLine($"RFID Data: {rfidData}");
+                
                 // Get user information first to determine role-based routing
                 var userInfo = GetUserInfoFromRfid(rfidData);
                 if (userInfo == null)
                 {
-                    SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
-                    AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    Console.WriteLine($"❌ RFID {rfidData} NOT FOUND in USERS table");
+                    Console.WriteLine($"   Check if this RFID is registered: SELECT * FROM USERS WHERE RFIDTAG = '{rfidData}'");
+                    SetRfidStatusText($"❌ RFID {rfidData} not registered in database. Please register this card first.");
+                    AddRfidAttendanceRecord("System", $"RFID {rfidData} Not Registered", "Error");
                     return;
                 }
+                
+                Console.WriteLine($"✅ RFID found: {userInfo.Username} ({userInfo.UserType})");
                 
                 string userType = userInfo.UserType?.ToLower();
                 
@@ -5817,12 +6325,12 @@ These settings allow you to customize the attendance system behavior for differe
                         case AttendanceSessionState.Inactive:
                         case AttendanceSessionState.WaitingForInstructor:
                             // Instructor starting session
-                            await HandleRfidInstructorStart(rfidData);
+                            HandleRfidInstructorStart(rfidData);
                             break;
                             
                         case AttendanceSessionState.ActiveForStudents:
                             // Instructor opening sign-out phase
-                            await HandleRfidInstructorSignOut(rfidData);
+                            HandleRfidInstructorSignOut(rfidData);
                             break;
                             
                         case AttendanceSessionState.ActiveForSignOut:
@@ -5838,22 +6346,35 @@ These settings allow you to customize the attendance system behavior for differe
                 }
                 else if (userType == "student")
                 {
-                    // Student actions based on session state
-                    switch (currentRfidSessionState)
+                    Console.WriteLine($"====== RFID STUDENT SCAN ======");
+                    Console.WriteLine($"Student: {userInfo.Username}");
+                    Console.WriteLine($"Current RFID Session State: {currentRfidSessionState}");
+                    Console.WriteLine($"Current Fingerprint Session State: {currentSessionState}");
+                    
+                    // RFID attendance should work with ANY active session (fingerprint or RFID)
+                    // Check both RFID and fingerprint session states
+                    if (currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                        currentRfidSessionState == AttendanceSessionState.ActiveForStudents)
                     {
-                        case AttendanceSessionState.ActiveForStudents:
-                            // Student sign-in
-                            await HandleRfidStudentSignIn(rfidData);
-                            break;
-                            
-                        case AttendanceSessionState.ActiveForSignOut:
-                            // Student sign-out
-                            await HandleRfidStudentSignOut(rfidData);
-                            break;
-                            
-                        default:
-                            SetRfidStatusText("RFID session not active for students. Please wait for instructor to start session.");
-                            break;
+                        // Student sign-in (session active via fingerprint OR RFID)
+                        Console.WriteLine("✅ Session is active (fingerprint or RFID), processing student sign-in...");
+                        HandleRfidStudentSignIn(rfidData);
+                    }
+                    else if (currentSessionState == AttendanceSessionState.ActiveForSignOut || 
+                             currentRfidSessionState == AttendanceSessionState.ActiveForSignOut)
+                    {
+                        // Student sign-out
+                        Console.WriteLine("✅ Session in sign-out phase, processing student sign-out...");
+                        HandleRfidStudentSignOut(rfidData);
+                    }
+                    else
+                    {
+                        Console.WriteLine($"❌ No active session found");
+                        Console.WriteLine($"   RFID State: {currentRfidSessionState}");
+                        Console.WriteLine($"   Fingerprint State: {currentSessionState}");
+                        Console.WriteLine("   Instructor must start a session first (fingerprint or RFID)!");
+                        SetRfidStatusText($"❌ No active session. Instructor must start attendance session first.");
+                        AddRfidAttendanceRecord(userInfo.Username, "Session Not Active", $"RFID:{currentRfidSessionState}, FP:{currentSessionState}");
                     }
                 }
                 else
@@ -5868,7 +6389,7 @@ These settings allow you to customize the attendance system behavior for differe
             }
         }
 
-        private async Task HandleRfidInstructorStart(string rfidData)
+        private void HandleRfidInstructorStart(string rfidData)
         {
             try
             {
@@ -5920,7 +6441,7 @@ These settings allow you to customize the attendance system behavior for differe
                             RecordAttendance(userName, "Instructor Sign-In (RFID Session Start)");
                             
                             // Request lock control for instructor
-                            await RequestLockControl(userGuid, "Instructor Sign-In (RFID Session Start)");
+                            await RequestRfidLockControl(userGuid, "Instructor Sign-In (RFID Session Start)", rfidData);
                         }
                         catch (Exception ex)
                         {
@@ -5952,7 +6473,7 @@ These settings allow you to customize the attendance system behavior for differe
             }
         }
 
-        private async Task HandleRfidStudentSignIn(string rfidData)
+        private void HandleRfidStudentSignIn(string rfidData)
         {
             try
             {
@@ -5982,25 +6503,67 @@ These settings allow you to customize the attendance system behavior for differe
                 // Check if student is already signed in
                 if (signedInStudentGuids.Contains(userGuid))
                 {
-                    SetRfidStatusText($"⚠️ Student {userName} already signed in.");
-                    AddRfidAttendanceRecord(userName, "Already Signed In", "Duplicate");
+                    SetRfidStatusText($"⚠️ Student {userName} already signed in - allowing door access.");
+                    AddRfidAttendanceRecord(userName, "Already Signed In - Door Access", "Duplicate");
+                    
+                                        // STILL SEND RFID LOCK CONTROL REQUEST for already signed in students
+                                        // This allows them to go in and out during the session
+                                        System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControl(userGuid, "RFID Student Already Signed In - Door Access", rfidData);
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"RFID lock control request failed for already signed in student: {lockEx.Message}");
+                                            }
+                                        });
                     return;
                 }
                 
                 // Record student sign-in
+                Console.WriteLine($"====== RECORDING RFID STUDENT ATTENDANCE ======");
+                Console.WriteLine($"Student: {userName}");
+                Console.WriteLine($"UserGUID: {userGuid}");
+                Console.WriteLine($"Action: Student Sign-In (RFID)");
+                
                 signedInStudentGuids.Add(userGuid);
                 SetRfidStatusText($"✅ Student {userName} signed in successfully.");
                 AddRfidAttendanceRecord(userName, "Student Sign-In", "Success");
                 
-                // Record attendance in database
+                // Record attendance in database using GUID directly
                 System.Threading.Tasks.Task.Run(() => {
                     try
                     {
-                        RecordAttendance(userName, "Student Sign-In (RFID)");
+                        Console.WriteLine($"Calling TryRecordAttendanceByGuid for RFID student...");
+                        var attempt = dbManager?.TryRecordAttendanceByGuid(userGuid, "Student Sign-In (RFID)");
+                        if (attempt != null && attempt.Success)
+                        {
+                            Console.WriteLine($"✅ RFID attendance recorded successfully to database");
+                            Console.WriteLine($"   ScheduleID: {attempt.ScheduleId}");
+                            Console.WriteLine($"   Subject: {attempt.SubjectName}");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"❌ Failed to record RFID attendance: {attempt?.Reason ?? "dbManager is null"}");
+                        }
+                        
+                        // Request RFID lock control for successful student sign-in
+                        System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestRfidLockControl(userGuid, "Student Sign-In (RFID)", rfidData);
+                            }
+                            catch (Exception lockEx)
+                            {
+                                Console.WriteLine($"RFID lock control request failed for student sign-in: {lockEx.Message}");
+                            }
+                        });
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Warning: Could not record student sign-in: {ex.Message}");
+                        Console.WriteLine($"❌ ERROR recording student sign-in: {ex.Message}");
+                        Console.WriteLine($"   Stack trace: {ex.StackTrace}");
                     }
                 });
             }
@@ -6011,7 +6574,7 @@ These settings allow you to customize the attendance system behavior for differe
             }
         }
 
-        private async Task HandleRfidInstructorSignOut(string rfidData)
+        private void HandleRfidInstructorSignOut(string rfidData)
         {
             try
             {
@@ -6050,7 +6613,7 @@ These settings allow you to customize the attendance system behavior for differe
             }
         }
 
-        private async Task HandleRfidStudentSignOut(string rfidData)
+        private void HandleRfidStudentSignOut(string rfidData)
         {
             try
             {
@@ -6080,8 +6643,21 @@ These settings allow you to customize the attendance system behavior for differe
                 // Check if student is already signed out
                 if (signedOutStudentGuids.Contains(userGuid))
                 {
-                    SetRfidStatusText($"⚠️ Student {userName} already signed out.");
-                    AddRfidAttendanceRecord(userName, "Already Signed Out", "Duplicate");
+                    SetRfidStatusText($"⚠️ Student {userName} already signed out - allowing door access.");
+                    AddRfidAttendanceRecord(userName, "Already Signed Out - Door Access", "Duplicate");
+                    
+                    // STILL SEND RFID LOCK CONTROL REQUEST for already signed out students
+                    // This allows them to go in and out during the session
+                    System.Threading.Tasks.Task.Run(async () => {
+                        try
+                        {
+                            await RequestRfidLockControl(userGuid, "RFID Student Already Signed Out - Door Access", rfidData);
+                        }
+                        catch (Exception lockEx)
+                        {
+                            Console.WriteLine($"RFID lock control request failed for already signed out student: {lockEx.Message}");
+                        }
+                    });
                     return;
                 }
                 
@@ -6123,6 +6699,18 @@ These settings allow you to customize the attendance system behavior for differe
                                 };
                                 attendanceRecords.Add(local);
                                 UpdateAttendanceDisplay(local);
+                                
+                                // Request RFID lock control for successful student sign-out
+                                System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestRfidLockControl(userGuid, "Student Sign-Out (RFID)", rfidData);
+                                    }
+                                    catch (Exception lockEx)
+                                    {
+                                        Console.WriteLine($"RFID lock control request failed for student sign-out: {lockEx.Message}");
+                                    }
+                                });
                             }
                             else
                             {
@@ -6226,13 +6814,13 @@ These settings allow you to customize the attendance system behavior for differe
                 AddRfidAttendanceRecord(userName, "Session Closed", "Inactive");
                 
                 // Record instructor's sign-out attendance
-                System.Threading.Tasks.Task.Run(async () => {
+                _ = System.Threading.Tasks.Task.Run(async () => {
                     try
                     {
                         RecordAttendance(userName, "Instructor Sign-Out (RFID Session End)");
                         
                         // Request lock control for instructor sign-out
-                        await RequestLockControl(userGuid, "Instructor Sign-Out (RFID Session End)");
+                        await RequestRfidLockControl(userGuid, "Instructor Sign-Out (RFID Session End)", rfidData);
                     }
                     catch (Exception ex)
                     {
@@ -6381,6 +6969,1253 @@ These settings allow you to customize the attendance system behavior for differe
                 throw new Exception($"Failed to export RFID data: {ex.Message}");
             }
         }
+
+        // ==================== DUAL SENSOR MODE METHODS ====================
+
+        private void InitializeDualSensorTab()
+        {
+            Console.WriteLine("Initializing Dual Sensor Tab...");
+            
+            // Create dual sensor tab
+            dualSensorTab = new TabPage("🎯 Dual Sensor System");
+            dualSensorTab.Padding = new Padding(0);
+            
+            // Create and configure dual sensor panel
+            dualSensorPanel = new DualSensorPanel();
+            dualSensorPanel.Dock = DockStyle.Fill;
+            
+            // Set room info
+            dualSensorPanel.UpdateRoomInfo(deviceConfig.RoomName, deviceConfig.Building ?? "");
+            dualSensorPanel.UpdateInsideDeviceInfo(
+                deviceConfig.InsideSensor?.DeviceId ?? "Not configured (None)");
+            dualSensorPanel.UpdateOutsideDeviceInfo(
+                deviceConfig.OutsideSensor?.DeviceId ?? "Not configured (None)");
+            
+            // Update UI for None sensors
+            if (deviceConfig.InsideSensor == null)
+            {
+                dualSensorPanel.SetInsideSensorEnabled(false);
+                dualSensorPanel.UpdateInsideStatus("Not configured (None)");
+            }
+            
+            if (deviceConfig.OutsideSensor == null)
+            {
+                dualSensorPanel.SetOutsideSensorEnabled(false);
+                dualSensorPanel.UpdateOutsideStatus("Not configured (None)");
+            }
+            
+            // Wire up events
+            dualSensorPanel.InsideSensorEnabledChanged += (s, enabled) =>
+            {
+                m_InsideSensorEnabled = enabled;
+                DeviceConfigManager.Instance.UpdateSensorEnabledState("inside", enabled);
+                Console.WriteLine($"Inside sensor {(enabled ? "enabled" : "disabled")}");
+                
+                if (enabled)
+                {
+                    StartInsideSensorOperation();
+                }
+                else
+                {
+                    StopInsideSensorOperation();
+                }
+            };
+            
+            dualSensorPanel.OutsideSensorEnabledChanged += (s, enabled) =>
+            {
+                m_OutsideSensorEnabled = enabled;
+                DeviceConfigManager.Instance.UpdateSensorEnabledState("outside", enabled);
+                Console.WriteLine($"Outside sensor {(enabled ? "enabled" : "disabled")}");
+                
+                if (enabled)
+                {
+                    StartOutsideSensorOperation();
+                }
+                else
+                {
+                    StopOutsideSensorOperation();
+                }
+            };
+            
+            dualSensorPanel.ChangeConfigurationRequested += (s, e) =>
+            {
+                var result = MessageBox.Show(
+                    "Changing room configuration will restart the application.\n\nContinue?",
+                    "Change Room Configuration",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+                    
+                if (result == DialogResult.Yes)
+                {
+                    DeviceConfigManager.Instance.DeleteConfiguration();
+                    Application.Restart();
+                }
+            };
+            
+            dualSensorPanel.SensorReassignmentRequested += (s, sensorIndices) =>
+            {
+                try
+                {
+                    // Stop current operations
+                    StopInsideSensorOperation();
+                    StopOutsideSensorOperation();
+                    
+                    // Update device configuration
+                    deviceConfig.InsideSensor.SensorIndex = sensorIndices.insideIndex;
+                    deviceConfig.OutsideSensor.SensorIndex = sensorIndices.outsideIndex;
+                    
+                    // Save updated configuration
+                    DeviceConfigManager.Instance.SaveConfiguration(deviceConfig);
+                    
+                    // Restart sensor operations with new indices
+                    StartInsideSensorOperation();
+                    StartOutsideSensorOperation();
+                    
+                    MessageBox.Show(
+                        "Sensor configuration updated successfully!\n\nSensors have been reassigned and restarted.",
+                        "Configuration Applied",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        $"Error applying sensor configuration:\n{ex.Message}",
+                        "Configuration Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    Console.WriteLine($"❌ Sensor reassignment error: {ex.Message}");
+                }
+            };
+            
+            dualSensorPanel.TestInsideSensorRequested += (s, e) =>
+            {
+                TestSensorScan("inside");
+            };
+            
+            dualSensorPanel.TestOutsideSensorRequested += (s, e) =>
+            {
+                TestSensorScan("outside");
+            };
+            
+            dualSensorTab.Controls.Add(dualSensorPanel);
+            
+            // Add tab as first tab
+            if (tabControl != null)
+            {
+                tabControl.TabPages.Insert(0, dualSensorTab);
+                tabControl.SelectedTab = dualSensorTab;
+            }
+            
+            // Initialize device list for easy testing
+            dualSensorPanel.InitializeDeviceList();
+            
+            Console.WriteLine("✅ Dual Sensor Tab initialized");
+        }
+
+        private void InitializeDeviceConfigTab()
+        {
+            // Create device config tab
+            var configTab = new TabPage("⚙️ Device Configuration");
+            configTab.Padding = new Padding(0);
+            configTab.BackColor = Color.FromArgb(245, 247, 250);
+            
+            // Create main panel with better layout
+            var mainPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                AutoScroll = true,
+                BackColor = Color.FromArgb(245, 247, 250),
+                Padding = new Padding(30)
+            };
+            
+            // Header section with gradient-like effect
+            var headerPanel = new Panel
+            {
+                Location = new Point(30, 20),
+                Size = new Size(800, 100),
+                BackColor = Color.White,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            
+            headerPanel.Paint += (s, e) =>
+            {
+                // Add subtle shadow/border
+                ControlPaint.DrawBorder(e.Graphics, headerPanel.ClientRectangle,
+                    Color.FromArgb(220, 223, 230), ButtonBorderStyle.Solid);
+            };
+            
+            var lblTitle = new Label
+            {
+                Text = "⚙️ Device Configuration",
+                Location = new Point(20, 15),
+                Size = new Size(400, 35),
+                Font = new Font("Segoe UI", 18, FontStyle.Bold),
+                ForeColor = Color.FromArgb(33, 37, 41)
+            };
+            headerPanel.Controls.Add(lblTitle);
+            
+            var lblSubtitle = new Label
+            {
+                Text = $"Managing room: {deviceConfig?.RoomName ?? "Not configured"}",
+                Location = new Point(20, 55),
+                Size = new Size(700, 25),
+                Font = new Font("Segoe UI", 11),
+                ForeColor = Color.FromArgb(108, 117, 125)
+            };
+            headerPanel.Controls.Add(lblSubtitle);
+            
+            mainPanel.Controls.Add(headerPanel);
+            
+            // Sensor configuration cards
+            int cardY = 140;
+            
+            // Inside Sensor Card
+            var insideCard = CreateSensorCard(
+                "Inside Door Sensor", 
+                deviceConfig?.InsideSensor?.DeviceId ?? "None",
+                deviceConfig?.InsideSensor != null ? "✓ Configured" : "○ Not Configured",
+                deviceConfig?.InsideSensor != null,
+                Color.FromArgb(40, 167, 69),
+                30, cardY);
+            mainPanel.Controls.Add(insideCard);
+            
+            // Outside Sensor Card
+            var outsideCard = CreateSensorCard(
+                "Outside Door Sensor",
+                deviceConfig?.OutsideSensor?.DeviceId ?? "None",
+                deviceConfig?.OutsideSensor != null ? "✓ Configured" : "○ Not Configured",
+                deviceConfig?.OutsideSensor != null,
+                Color.FromArgb(220, 53, 69),
+                insideCard.Right + 20, cardY);
+            mainPanel.Controls.Add(outsideCard);
+            
+            // Action buttons section
+            var actionPanel = new Panel
+            {
+                Location = new Point(30, cardY + 220),
+                Size = new Size(800, 80),
+                BackColor = Color.FromArgb(255, 248, 225),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            
+            actionPanel.Paint += (s, e) =>
+            {
+                ControlPaint.DrawBorder(e.Graphics, actionPanel.ClientRectangle,
+                    Color.FromArgb(255, 193, 7), ButtonBorderStyle.Solid);
+            };
+            
+            var lblActionTitle = new Label
+            {
+                Text = "⚡ Quick Actions",
+                Location = new Point(15, 10),
+                Size = new Size(300, 25),
+                Font = new Font("Segoe UI", 11, FontStyle.Bold),
+                ForeColor = Color.FromArgb(33, 37, 41)
+            };
+            actionPanel.Controls.Add(lblActionTitle);
+            
+            var btnReconfigure = new Button
+            {
+                Text = "🔄 Reconfigure Sensors",
+                Location = new Point(15, 40),
+                Size = new Size(180, 35),
+                BackColor = Color.FromArgb(0, 123, 255),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnReconfigure.FlatAppearance.BorderSize = 0;
+            btnReconfigure.Click += BtnReconfigure_Click;
+            actionPanel.Controls.Add(btnReconfigure);
+            
+            var btnChangeRoom = new Button
+            {
+                Text = "🏫 Change Room",
+                Location = new Point(205, 40),
+                Size = new Size(150, 35),
+                BackColor = Color.FromArgb(108, 117, 125),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnChangeRoom.FlatAppearance.BorderSize = 0;
+            btnChangeRoom.Click += (s, e) =>
+            {
+                var result = MessageBox.Show(
+                    "Changing the room will restart the configuration.\n\nContinue?",
+                    "Change Room",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+                
+                if (result == DialogResult.Yes)
+                {
+                    DeviceConfigManager.Instance.DeleteConfiguration();
+                    Application.Restart();
+                }
+            };
+            actionPanel.Controls.Add(btnChangeRoom);
+            
+            // Fix Room Assignment button
+            var btnFixRoomAssignment = new Button
+            {
+                Text = "🔧 Fix Room Assignment",
+                Location = new Point(365, 40),
+                Size = new Size(180, 35),
+                BackColor = Color.FromArgb(220, 53, 69),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnFixRoomAssignment.FlatAppearance.BorderSize = 0;
+            btnFixRoomAssignment.Click += BtnFixRoomAssignment_Click;
+            actionPanel.Controls.Add(btnFixRoomAssignment);
+            
+            mainPanel.Controls.Add(actionPanel);
+            
+            // Help section
+            var helpPanel = new Panel
+            {
+                Location = new Point(30, actionPanel.Bottom + 20),
+                Size = new Size(800, 120),
+                BackColor = Color.FromArgb(230, 244, 255),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+            
+            helpPanel.Paint += (s, e) =>
+            {
+                ControlPaint.DrawBorder(e.Graphics, helpPanel.ClientRectangle,
+                    Color.FromArgb(0, 123, 255), ButtonBorderStyle.Solid);
+            };
+            
+            var lblHelpTitle = new Label
+            {
+                Text = "ℹ️ How to Reconfigure",
+                Location = new Point(15, 10),
+                Size = new Size(300, 25),
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(33, 37, 41)
+            };
+            helpPanel.Controls.Add(lblHelpTitle);
+            
+            var lblHelpText = new Label
+            {
+                Text = "• Click 'Reconfigure Sensors' to reassign fingerprint devices\n" +
+                       "• Sensors can be set to 'None' if you only need one scanner\n" +
+                       "• Changes take effect immediately without restarting the application\n" +
+                       "• Use 'Change Room' if you need to select a different room",
+                Location = new Point(15, 40),
+                Size = new Size(760, 70),
+                Font = new Font("Segoe UI", 9),
+                ForeColor = Color.FromArgb(52, 58, 64)
+            };
+            helpPanel.Controls.Add(lblHelpText);
+            
+            mainPanel.Controls.Add(helpPanel);
+            
+            configTab.Controls.Add(mainPanel);
+            
+            // Add to tab control
+            if (tabControl != null)
+            {
+                tabControl.TabPages.Add(configTab);
+            }
+            
+            Console.WriteLine("✅ Device Configuration Tab initialized");
+        }
+        
+        private Panel CreateSensorCard(string title, string deviceName, string status, bool isConfigured, Color accentColor, int x, int y)
+        {
+            var card = new Panel
+            {
+                Location = new Point(x, y),
+                Size = new Size(380, 200),
+                BackColor = Color.White
+            };
+            
+            card.Paint += (s, e) =>
+            {
+                // Draw border
+                ControlPaint.DrawBorder(e.Graphics, card.ClientRectangle,
+                    Color.FromArgb(220, 223, 230), ButtonBorderStyle.Solid);
+                    
+                // Draw colored top bar
+                using (var brush = new SolidBrush(accentColor))
+                {
+                    e.Graphics.FillRectangle(brush, 0, 0, card.Width, 5);
+                }
+            };
+            
+            var lblTitle = new Label
+            {
+                Text = title,
+                Location = new Point(20, 20),
+                Size = new Size(340, 30),
+                Font = new Font("Segoe UI", 13, FontStyle.Bold),
+                ForeColor = Color.FromArgb(33, 37, 41)
+            };
+            card.Controls.Add(lblTitle);
+            
+            var lblDevice = new Label
+            {
+                Text = "Device:",
+                Location = new Point(20, 65),
+                Size = new Size(80, 20),
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                ForeColor = Color.FromArgb(108, 117, 125)
+            };
+            card.Controls.Add(lblDevice);
+            
+            var lblDeviceName = new Label
+            {
+                Text = deviceName,
+                Location = new Point(20, 85),
+                Size = new Size(340, 40),
+                Font = new Font("Segoe UI", 10),
+                ForeColor = Color.FromArgb(52, 58, 64)
+            };
+            card.Controls.Add(lblDeviceName);
+            
+            var lblStatus = new Label
+            {
+                Text = status,
+                Location = new Point(20, 140),
+                Size = new Size(340, 25),
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = isConfigured ? Color.FromArgb(40, 167, 69) : Color.FromArgb(108, 117, 125)
+            };
+            card.Controls.Add(lblStatus);
+            
+            // Status indicator circle
+            var statusCircle = new Panel
+            {
+                Location = new Point(20, 170),
+                Size = new Size(15, 15),
+                BackColor = isConfigured ? Color.FromArgb(40, 167, 69) : Color.FromArgb(220, 223, 230)
+            };
+            statusCircle.Paint += (s, e) =>
+            {
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var brush = new SolidBrush(statusCircle.BackColor))
+                {
+                    e.Graphics.FillEllipse(brush, 0, 0, statusCircle.Width - 1, statusCircle.Height - 1);
+                }
+            };
+            card.Controls.Add(statusCircle);
+            
+            var lblStatusText = new Label
+            {
+                Text = isConfigured ? "Active" : "Inactive",
+                Location = new Point(40, 168),
+                Size = new Size(100, 20),
+                Font = new Font("Segoe UI", 9),
+                ForeColor = Color.FromArgb(108, 117, 125)
+            };
+            card.Controls.Add(lblStatusText);
+            
+            return card;
+        }
+        
+        private void BtnFixRoomAssignment_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                // Check if there's a room mismatch
+                if (dbManager?.CurrentRoomId != null && deviceConfig?.RoomId != null)
+                {
+                    if (dbManager.CurrentRoomId != deviceConfig.RoomId)
+                    {
+                        var result = MessageBox.Show(
+                            $"Room mismatch detected!\n\n" +
+                            $"Database Room ID: {dbManager.CurrentRoomId}\n" +
+                            $"Config Room ID: {deviceConfig.RoomId}\n\n" +
+                            $"This could cause schedule validation issues.\n\n" +
+                            $"Fix by updating the configuration to match the database?",
+                            "Room Mismatch Detected",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning);
+                        
+                        if (result == DialogResult.Yes)
+                        {
+                            // Update the device configuration
+                            deviceConfig.RoomId = dbManager.CurrentRoomId;
+                            
+                            // Get room details from database
+                            var room = dbManager.GetCurrentRoom();
+                            if (room != null)
+                            {
+                                deviceConfig.RoomName = room.DisplayName;
+                                deviceConfig.Building = room.Building;
+                            }
+                            
+                            // Save the updated configuration
+                            DeviceConfigManager.Instance.SaveConfiguration(deviceConfig);
+                            
+                            MessageBox.Show(
+                                $"Room assignment fixed!\n\n" +
+                                $"Updated configuration:\n" +
+                                $"Room: {deviceConfig.RoomName}\n" +
+                                $"Room ID: {deviceConfig.RoomId}\n\n" +
+                                $"Please restart the application for changes to take effect.",
+                                "Room Assignment Fixed",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information);
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show(
+                            "No room mismatch detected.\n\n" +
+                            $"Current room assignment is correct:\n" +
+                            $"Room: {deviceConfig.RoomName}\n" +
+                            $"Room ID: {deviceConfig.RoomId}",
+                            "Room Assignment OK",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Information);
+                    }
+                }
+                else
+                {
+                    MessageBox.Show(
+                        "Unable to check room assignment.\n\n" +
+                        "Database manager or device configuration not available.",
+                        "Check Failed",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error fixing room assignment: {ex.Message}", "Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        
+        private void BtnReconfigure_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                Console.WriteLine("🔄 Starting reconfiguration process...");
+                
+                // Stop current sensor operations
+                StopInsideSensorOperation();
+                StopOutsideSensorOperation();
+                
+                // Wait a bit to ensure threads are fully stopped
+                Console.WriteLine("⏳ Waiting for sensor operations to stop completely...");
+                System.Threading.Thread.Sleep(500);
+                Application.DoEvents();
+                
+                // Show configuration dialog
+                var dialog = new StartupConfigDialog(dbManager);
+                var result = dialog.ShowDialog();
+                
+                if (result == DialogResult.OK && dialog.SelectedConfiguration != null)
+                {
+                    Console.WriteLine("✅ New configuration selected");
+                    
+                    // Update device configuration
+                    deviceConfig = dialog.SelectedConfiguration;
+                    
+                    // Save configuration
+                    DeviceConfigManager.Instance.SaveConfiguration(deviceConfig);
+                    
+                    // Update UI
+                    UpdateDualSensorPanelConfiguration();
+                    
+                    // Restart sensor operations with new configuration
+                    Console.WriteLine("🚀 Restarting sensor operations with new configuration...");
+                    StartDualSensorOperations();
+                    
+                    MessageBox.Show(
+                        "Configuration updated successfully!\n\nSensors have been reconfigured.",
+                        "Configuration Updated",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    
+                    // Refresh the config tab to show new values
+                    RefreshDeviceConfigTab();
+                    
+                    Console.WriteLine("✅ Reconfiguration complete!");
+                }
+                else
+                {
+                    Console.WriteLine("⚠️ Reconfiguration cancelled - restarting previous configuration");
+                    // User cancelled - restart with existing config
+                    StartDualSensorOperations();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"Error reconfiguring sensors:\n{ex.Message}",
+                    "Configuration Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                Console.WriteLine($"❌ Reconfiguration error: {ex.Message}");
+                
+                // Try to restart with existing config
+                try
+                {
+                    Console.WriteLine("🔄 Attempting to restart with previous configuration...");
+                    StartDualSensorOperations();
+                }
+                catch (Exception restartEx)
+                {
+                    Console.WriteLine($"❌ Failed to restart sensors: {restartEx.Message}");
+                }
+            }
+        }
+        
+        private void UpdateDualSensorPanelConfiguration()
+        {
+            if (dualSensorPanel == null) return;
+            
+            dualSensorPanel.UpdateRoomInfo(deviceConfig.RoomName, deviceConfig.Building ?? "");
+            dualSensorPanel.UpdateInsideDeviceInfo(
+                deviceConfig.InsideSensor?.DeviceId ?? "Not configured (None)");
+            dualSensorPanel.UpdateOutsideDeviceInfo(
+                deviceConfig.OutsideSensor?.DeviceId ?? "Not configured (None)");
+            
+            // Update UI for None sensors
+            if (deviceConfig.InsideSensor == null)
+            {
+                dualSensorPanel.SetInsideSensorEnabled(false);
+                dualSensorPanel.UpdateInsideStatus("Not configured (None)");
+            }
+            else
+            {
+                dualSensorPanel.SetInsideSensorEnabled(true);
+            }
+            
+            if (deviceConfig.OutsideSensor == null)
+            {
+                dualSensorPanel.SetOutsideSensorEnabled(false);
+                dualSensorPanel.UpdateOutsideStatus("Not configured (None)");
+            }
+            else
+            {
+                dualSensorPanel.SetOutsideSensorEnabled(true);
+            }
+        }
+        
+        private void RefreshDeviceConfigTab()
+        {
+            // Find and refresh the config tab
+            if (tabControl != null)
+            {
+                foreach (TabPage tab in tabControl.TabPages)
+                {
+                    if (tab.Text == "⚙️ Device Configuration")
+                    {
+                        // Remove and recreate the tab
+                        tabControl.TabPages.Remove(tab);
+                        InitializeDeviceConfigTab();
+                        break;
+                    }
+                }
+            }
+        }
+
+        private void StartDualSensorOperations()
+        {
+            Console.WriteLine("Starting dual sensor operations...");
+            
+            try
+            {
+                // Load users ONCE for both sensors (fixes database reader conflict)
+                var sharedUserRecords = LoadUserRecordsForIdentification();
+                m_IdentificationUsers = sharedUserRecords;
+                Console.WriteLine($"✅ Loaded {sharedUserRecords.Count} user records for identification");
+                
+                // Validate against actual hardware
+                var availableDevices = UsbDeviceHelper.EnumerateFingerprintDevices();
+                Console.WriteLine($"✅ Detected {availableDevices.Count} physical fingerprint scanner(s)");
+                
+                int maxDeviceIndex = availableDevices.Count - 1;
+                
+                // Check if configuration is invalid (references devices that don't exist)
+                bool invalidConfig = false;
+                if (deviceConfig?.InsideSensor?.SensorIndex > maxDeviceIndex ||
+                    deviceConfig?.OutsideSensor?.SensorIndex > maxDeviceIndex)
+                {
+                    invalidConfig = true;
+                }
+                
+                bool sameDevice = (deviceConfig?.InsideSensor?.SensorIndex ?? -1) == 
+                                  (deviceConfig?.OutsideSensor?.SensorIndex ?? -2);
+                
+                if (invalidConfig || (sameDevice && deviceConfig?.InsideSensor?.SensorIndex >= 0))
+                {
+                    Console.WriteLine("⚠️ WARNING: Configuration mismatch detected!");
+                    Console.WriteLine($"   Config expects: Inside={deviceConfig?.InsideSensor?.SensorIndex}, Outside={deviceConfig?.OutsideSensor?.SensorIndex}");
+                    Console.WriteLine($"   Available devices: {availableDevices.Count}");
+                    Console.WriteLine("⚠️ Only the INSIDE sensor will be started.");
+                    
+                    // Only start inside sensor
+                    if (m_InsideSensorEnabled)
+                    {
+                        StartInsideSensorOperation();
+                    }
+                    
+                    // Disable outside sensor to prevent conflicts
+                    m_OutsideSensorEnabled = false;
+                    
+                    // Schedule the warning dialog to show after form is fully loaded
+                    if (this.IsHandleCreated)
+                    {
+                        this.BeginInvoke(new Action(() =>
+                        {
+                            dualSensorPanel?.SetOutsideSensorEnabled(false);
+                            dualSensorPanel?.UpdateOutsideStatus("⚠️ Configuration Mismatch - Disabled");
+                            
+                            var result = MessageBox.Show(
+                                "⚠️ Configuration Mismatch Detected!\n\n" +
+                                $"Your configuration expects:\n" +
+                                $"  • Inside sensor at index {deviceConfig?.InsideSensor?.SensorIndex}\n" +
+                                $"  • Outside sensor at index {deviceConfig?.OutsideSensor?.SensorIndex}\n\n" +
+                                $"But only {availableDevices.Count} fingerprint scanner(s) detected.\n\n" +
+                                "Would you like to reconfigure now?\n\n" +
+                                "Click YES to open configuration dialog\n" +
+                                "Click NO to run with Inside sensor only",
+                                "Configuration Mismatch",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Warning);
+                            
+                            if (result == DialogResult.Yes)
+                            {
+                                DeviceConfigManager.Instance.DeleteConfiguration();
+                                Application.Restart();
+                            }
+                        }));
+                    }
+                    else
+                    {
+                        // If handle not created yet, schedule for later
+                        this.Load += (s, e) =>
+                        {
+                            dualSensorPanel?.SetOutsideSensorEnabled(false);
+                            dualSensorPanel?.UpdateOutsideStatus("⚠️ Configuration Mismatch - Disabled");
+                            
+                            var result = MessageBox.Show(
+                                "⚠️ Configuration Mismatch Detected!\n\n" +
+                                $"Your configuration expects:\n" +
+                                $"  • Inside sensor at index {deviceConfig?.InsideSensor?.SensorIndex}\n" +
+                                $"  • Outside sensor at index {deviceConfig?.OutsideSensor?.SensorIndex}\n\n" +
+                                $"But only {availableDevices.Count} fingerprint scanner(s) detected.\n\n" +
+                                "Would you like to reconfigure now?\n\n" +
+                                "Click YES to open configuration dialog\n" +
+                                "Click NO to run with Inside sensor only",
+                                "Configuration Mismatch",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Warning);
+                            
+                            if (result == DialogResult.Yes)
+                            {
+                                DeviceConfigManager.Instance.DeleteConfiguration();
+                                Application.Restart();
+                            }
+                        };
+                    }
+                }
+                else
+                {
+                    // Different devices or properly configured - start both
+                    Console.WriteLine($"✅ Inside sensor using device index: {deviceConfig?.InsideSensor?.SensorIndex}");
+                    Console.WriteLine($"✅ Outside sensor using device index: {deviceConfig?.OutsideSensor?.SensorIndex}");
+                    
+                    // Only start sensors that are actually configured (not None)
+                    if (m_InsideSensorEnabled && deviceConfig?.InsideSensor != null)
+                    {
+                        StartInsideSensorOperation();
+                    }
+                    else if (deviceConfig?.InsideSensor == null)
+                    {
+                        Console.WriteLine("⚠️ Inside sensor not configured (set to None)");
+                        m_InsideSensorEnabled = false;
+                    }
+                    
+                    if (m_OutsideSensorEnabled && deviceConfig?.OutsideSensor != null)
+                    {
+                        StartOutsideSensorOperation();
+                    }
+                    else if (deviceConfig?.OutsideSensor == null)
+                    {
+                        Console.WriteLine("⚠️ Outside sensor not configured (set to None)");
+                        m_OutsideSensorEnabled = false;
+                    }
+                }
+                
+                Console.WriteLine("✅ Dual sensor operations started");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error starting dual sensor operations: {ex.Message}");
+                MessageBox.Show($"Error starting sensors:\n\n{ex.Message}", "Sensor Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void StartInsideSensorOperation()
+        {
+            if (!m_InsideSensorEnabled) return;
+            
+            Console.WriteLine("Starting inside sensor operation...");
+            
+            Task.Run(() =>
+            {
+                try
+                {
+                    // Create identification operation for inside sensor
+                    m_InsideSensorOperation = new FutronicIdentification();
+                    m_InsideSensorOperation.FakeDetection = false;
+                    m_InsideSensorOperation.FFDControl = false;
+                    m_InsideSensorOperation.FastMode = true;
+                    m_InsideSensorOperation.FARN = 100;
+                    m_InsideSensorOperation.Version = VersionCompatible.ftr_version_compatible;
+                    
+                    // Note: Futronic SDK device selection is handled internally
+                    // The first available device will be used for inside sensor
+                    Console.WriteLine($"Inside sensor configured (device index: {deviceConfig?.InsideSensor?.SensorIndex ?? 0})");
+                    
+                    // Wire up events
+                    m_InsideSensorOperation.OnPutOn += (progress) =>
+                    {
+                        this.Invoke(new Action(() =>
+                        {
+                            dualSensorPanel?.UpdateInsideStatus("Scanning...");
+                        }));
+                    };
+                    
+                    m_InsideSensorOperation.UpdateScreenImage += (bitmap) =>
+                    {
+                        this.Invoke(new Action(() =>
+                        {
+                            dualSensorPanel?.UpdateInsideFingerprintImage(bitmap);
+                        }));
+                    };
+                    
+                    // Use pre-loaded shared user records
+                    if (m_IdentificationUsers == null || m_IdentificationUsers.Count == 0)
+                    {
+                        Console.WriteLine("❌ No user records loaded for identification!");
+                        return;
+                    }
+                    
+                    Console.WriteLine($"✅ Inside sensor operation configured with {m_IdentificationUsers.Count} users");
+                    this.Invoke(new Action(() =>
+                    {
+                        dualSensorPanel?.UpdateInsideStatus("Active");
+                    }));
+                    
+                    // Start continuous identification
+                    while (!m_bExit && m_InsideSensorEnabled)
+                    {
+                        int matchIndex = -1;
+                        try
+                        {
+                            // Check if operation is still valid
+                            if (m_InsideSensorOperation == null)
+                            {
+                                Console.WriteLine("❌ Inside sensor operation is null, stopping...");
+                                break;
+                            }
+                            
+                            // Convert UserRecord list to FtrIdentifyRecord array
+                            var records = new FtrIdentifyRecord[m_IdentificationUsers.Count];
+                            for (int i = 0; i < m_IdentificationUsers.Count; i++)
+                            {
+                                records[i] = m_IdentificationUsers[i].GetRecord();
+                            }
+                            
+                            var result = m_InsideSensorOperation.Identification(records, ref matchIndex);
+                            if (result == FutronicSdkBase.RETCODE_OK)
+                            {
+                                this.Invoke(new Action(() =>
+                                {
+                                    HandleSensorScan(true, matchIndex, "inside");
+                                }));
+                            }
+                            else
+                            {
+                                // Log non-OK results but don't spam
+                                Console.WriteLine($"Inside sensor result: {result}");
+                            }
+                        }
+                        catch (InvalidOperationException ex)
+                        {
+                            Console.WriteLine($"❌ Inside sensor operation invalid: {ex.Message}");
+                            Console.WriteLine("Stopping inside sensor due to invalid operation state...");
+                            break; // Exit the loop to prevent infinite error spam
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Inside sensor identification error: {ex.Message}");
+                            
+                            // If we get repeated errors, increase delay to reduce spam
+                            System.Threading.Thread.Sleep(2000);
+                            continue;
+                        }
+                        System.Threading.Thread.Sleep(500); // Small delay between scans
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Inside sensor error: {ex.Message}");
+                    this.Invoke(new Action(() =>
+                    {
+                        dualSensorPanel?.UpdateInsideStatus($"Error: {ex.Message}");
+                    }));
+                }
+            });
+        }
+
+        private void StartOutsideSensorOperation()
+        {
+            if (!m_OutsideSensorEnabled) return;
+            
+            Console.WriteLine("Starting outside sensor operation...");
+            
+            Task.Run(() =>
+            {
+                try
+                {
+                    // Create identification operation for outside sensor
+                    m_OutsideSensorOperation = new FutronicIdentification();
+                    m_OutsideSensorOperation.FakeDetection = false;
+                    m_OutsideSensorOperation.FFDControl = false;
+                    m_OutsideSensorOperation.FastMode = true;
+                    m_OutsideSensorOperation.FARN = 100;
+                    m_OutsideSensorOperation.Version = VersionCompatible.ftr_version_compatible;
+                    
+                    // Note: Futronic SDK device selection is handled internally  
+                    // When multiple devices are present, SDK manages device access
+                    Console.WriteLine($"Outside sensor configured (device index: {deviceConfig?.OutsideSensor?.SensorIndex ?? 1})");
+                    
+                    // Wire up events
+                    m_OutsideSensorOperation.OnPutOn += (progress) =>
+                    {
+                        this.Invoke(new Action(() =>
+                        {
+                            dualSensorPanel?.UpdateOutsideStatus("Scanning...");
+                        }));
+                    };
+                    
+                    m_OutsideSensorOperation.UpdateScreenImage += (bitmap) =>
+                    {
+                        this.Invoke(new Action(() =>
+                        {
+                            dualSensorPanel?.UpdateOutsideFingerprintImage(bitmap);
+                        }));
+                    };
+                    
+                    // Use pre-loaded shared user records
+                    if (m_IdentificationUsers == null || m_IdentificationUsers.Count == 0)
+                    {
+                        Console.WriteLine("❌ No user records loaded for identification!");
+                        return;
+                    }
+                    
+                    Console.WriteLine($"✅ Outside sensor operation configured with {m_IdentificationUsers.Count} users");
+                    this.Invoke(new Action(() =>
+                    {
+                        dualSensorPanel?.UpdateOutsideStatus("Active");
+                    }));
+                    
+                    // Start continuous identification
+                    while (!m_bExit && m_OutsideSensorEnabled)
+                    {
+                        int matchIndex = -1;
+                        try
+                        {
+                            // Check if operation is still valid
+                            if (m_OutsideSensorOperation == null)
+                            {
+                                Console.WriteLine("❌ Outside sensor operation is null, stopping...");
+                                break;
+                            }
+                            
+                            // Convert UserRecord list to FtrIdentifyRecord array
+                            var records = new FtrIdentifyRecord[m_IdentificationUsers.Count];
+                            for (int i = 0; i < m_IdentificationUsers.Count; i++)
+                            {
+                                records[i] = m_IdentificationUsers[i].GetRecord();
+                            }
+                            
+                            var result = m_OutsideSensorOperation.Identification(records, ref matchIndex);
+                            if (result == FutronicSdkBase.RETCODE_OK)
+                            {
+                                this.Invoke(new Action(() =>
+                                {
+                                    HandleSensorScan(true, matchIndex, "outside");
+                                }));
+                            }
+                            else
+                            {
+                                // Log non-OK results but don't spam
+                                Console.WriteLine($"Outside sensor result: {result}");
+                            }
+                        }
+                        catch (InvalidOperationException ex)
+                        {
+                            Console.WriteLine($"❌ Outside sensor operation invalid: {ex.Message}");
+                            Console.WriteLine("Stopping outside sensor due to invalid operation state...");
+                            break; // Exit the loop to prevent infinite error spam
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Outside sensor identification error: {ex.Message}");
+                            
+                            // If we get repeated errors, increase delay to reduce spam
+                            System.Threading.Thread.Sleep(2000);
+                            continue;
+                        }
+                        System.Threading.Thread.Sleep(500); // Small delay between scans
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Outside sensor error: {ex.Message}");
+                    this.Invoke(new Action(() =>
+                    {
+                        dualSensorPanel?.UpdateOutsideStatus($"Error: {ex.Message}");
+                    }));
+                }
+            });
+        }
+
+        private void StopInsideSensorOperation()
+        {
+            Console.WriteLine("Stopping inside sensor operation...");
+            
+            try
+            {
+                if (m_InsideSensorOperation != null)
+                {
+                    m_InsideSensorOperation.OnCalcel();
+                    
+                    // Wait for thread to actually stop (max 2 seconds)
+                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                    while (m_InsideSensorOperation != null && stopwatch.ElapsedMilliseconds < 2000)
+                    {
+                        System.Threading.Thread.Sleep(100);
+                        Application.DoEvents(); // Process UI events
+                    }
+                    
+                    m_InsideSensorOperation = null;
+                    Console.WriteLine("✅ Inside sensor operation stopped");
+                }
+                dualSensorPanel?.UpdateInsideStatus("Disabled");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error stopping inside sensor: {ex.Message}");
+            }
+        }
+
+        private void StopOutsideSensorOperation()
+        {
+            Console.WriteLine("Stopping outside sensor operation...");
+            
+            try
+            {
+                if (m_OutsideSensorOperation != null)
+                {
+                    m_OutsideSensorOperation.OnCalcel();
+                    
+                    // Wait for thread to actually stop (max 2 seconds)
+                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                    while (m_OutsideSensorOperation != null && stopwatch.ElapsedMilliseconds < 2000)
+                    {
+                        System.Threading.Thread.Sleep(100);
+                        Application.DoEvents(); // Process UI events
+                    }
+                    
+                    m_OutsideSensorOperation = null;
+                    Console.WriteLine("✅ Outside sensor operation stopped");
+                }
+                dualSensorPanel?.UpdateOutsideStatus("Disabled");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error stopping outside sensor: {ex.Message}");
+            }
+        }
+
+        private void HandleSensorScan(bool success, int matchIndex, string location)
+        {
+            try
+            {
+                if (success && matchIndex >= 0)
+                {
+                    // Match found
+                    var users = LoadUserRecordsForIdentification();
+                    if (matchIndex < users.Count)
+                    {
+                        var matchedUser = users[matchIndex];
+                        string userName = matchedUser.UserName ?? "Unknown User";
+                        
+                        Console.WriteLine($"✅ Match found on {location} sensor: {userName}");
+                        
+                        // Get the user GUID from database
+                        var dbUser = dbManager.LoadAllUsers().FirstOrDefault(u => 
+                            u.Username.Equals(userName, StringComparison.OrdinalIgnoreCase));
+                        
+                        if (dbUser != null)
+                        {
+                            // Record attendance
+                            string deviceId = location == "inside" ? 
+                                deviceConfig.InsideSensor.DeviceId : 
+                                deviceConfig.OutsideSensor.DeviceId;
+                            
+                            var attendanceResult = dbManager.RecordAttendanceWithDeviceId(
+                                dbUser.EmployeeId,
+                                deviceId,
+                                location,
+                                null);
+                            
+                            // Update UI
+                            string action = location == "inside" ? "Time In" : "Time Out";
+                            string statusMsg = attendanceResult.Success ? 
+                                $"{action} recorded" : 
+                                $"Failed: {attendanceResult.Reason}";
+                            
+                            if (location == "inside")
+                            {
+                                dualSensorPanel?.UpdateInsideLastScan(userName, statusMsg, attendanceResult.Success);
+                                dualSensorPanel?.UpdateInsideStatus("Active");
+                            }
+                            else
+                            {
+                                dualSensorPanel?.UpdateOutsideLastScan(userName, statusMsg, attendanceResult.Success);
+                                dualSensorPanel?.UpdateOutsideStatus("Active");
+                            }
+                            
+                            // Add to activity feed
+                            dualSensorPanel?.AddActivityItem(new ActivityItem
+                            {
+                                Timestamp = DateTime.Now,
+                                UserName = userName,
+                                Action = action,
+                                Location = location,
+                                Success = attendanceResult.Success,
+                                StatusMessage = statusMsg
+                            });
+                            
+                            // Update heartbeat
+                            dbManager.UpdateDeviceHeartbeat(deviceConfig.RoomName, location);
+                            
+                            // Request lock control for successful authentication
+                            System.Threading.Tasks.Task.Run(async () => {
+                                try
+                                {
+                                    await RequestLockControl(dbUser.EmployeeId, action);
+                                }
+                                catch (Exception lockEx)
+                                {
+                                    Console.WriteLine($"Lock control request failed: {lockEx.Message}");
+                                }
+                            });
+                        }
+                        else
+                        {
+                            Console.WriteLine($"⚠ User {userName} not found in database");
+                            if (location == "inside")
+                            {
+                                dualSensorPanel?.UpdateInsideLastScan(userName, "User not in database", false);
+                            }
+                            else
+                            {
+                                dualSensorPanel?.UpdateOutsideLastScan(userName, "User not in database", false);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // No match or error
+                    Console.WriteLine($"⚠ No match on {location} sensor (success: {success}, matchIndex: {matchIndex})");
+                    
+                    if (location == "inside")
+                    {
+                        dualSensorPanel?.UpdateInsideLastScan("Unknown", "No match found", false);
+                        dualSensorPanel?.UpdateInsideStatus("Active");
+                    }
+                    else
+                    {
+                        dualSensorPanel?.UpdateOutsideLastScan("Unknown", "No match found", false);
+                        dualSensorPanel?.UpdateOutsideStatus("Active");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error handling sensor scan: {ex.Message}");
+            }
+        }
+
+        private void TestSensorScan(string location)
+        {
+            // Test mode simulation
+            string testUser = "Test User";
+            bool success = true;
+            string status = "Test scan successful";
+            
+            if (location == "inside")
+            {
+                dualSensorPanel?.UpdateInsideLastScan(testUser, status, success);
+            }
+            else
+            {
+                dualSensorPanel?.UpdateOutsideLastScan(testUser, status, success);
+            }
+            
+            dualSensorPanel?.AddActivityItem(new ActivityItem
+            {
+                Timestamp = DateTime.Now,
+                UserName = testUser,
+                Action = location == "inside" ? "Time In (Test)" : "Time Out (Test)",
+                Location = location,
+                Success = success,
+                StatusMessage = status
+            });
+            
+            MessageBox.Show($"Test scan on {location} sensor completed!", "Test Mode", 
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private List<UserRecord> LoadUserRecordsForIdentification()
+        {
+            try
+            {
+                var users = dbManager.LoadAllUsers();
+                var userRecords = new List<UserRecord>();
+                
+                foreach (var user in users)
+                {
+                    if (user.FingerprintTemplate != null && user.FingerprintTemplate.Length > 0)
+                    {
+                        userRecords.Add(new UserRecord
+                        {
+                            UserName = user.Username,
+                            Template = user.FingerprintTemplate
+                        });
+                    }
+                }
+                
+                return userRecords;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading users for identification: {ex.Message}");
+                return new List<UserRecord>();
+            }
+        }
+
+        // ==================== END DUAL SENSOR MODE METHODS ====================
     }
 
     // Data classes
