@@ -19,8 +19,8 @@
 #include <Adafruit_SSD1306.h>
 
 // WiFi credentials - 2.4GHz Network (ESP32 Compatible)
-const char* ssid = "WIFi2.4";         // 2.4GHz network
-const char* password = "fOrtnite901_"; // Same password
+const char* ssid = "RedmiTurbo";         // Your current WiFi network
+const char* password = "OneTwo11"; // Your WiFi password
 
 // Security - API Key for authentication
 const char* API_KEY = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Change this to your own secret key
@@ -33,7 +33,7 @@ String discoveredServerIP = "";
 bool ipDiscovered = false;
 
 // Manual IP override (uncomment and set if auto-discovery fails)
-const char* manualServerIP = "192.168.1.11"; // Your computer's IP
+const char* manualServerIP = "192.168.111.24"; // Your computer's current IP (matches your ipconfig)
 
 // Alternative: Use localhost if on same machine
 // const char* manualServerIP = "localhost"; // Alternative for testing
