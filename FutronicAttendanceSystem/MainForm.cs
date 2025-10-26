@@ -381,12 +381,8 @@ namespace FutronicAttendanceSystem
                 }
                 
             // Configure HttpClient header for device heartbeat authentication
-            try
-            {
-                http.DefaultRequestHeaders.Remove("x-device-api-key");
-                http.DefaultRequestHeaders.Add("x-device-api-key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
-            }
-            catch { }
+            // API key is now added per-request in SendApiHeartbeatAsync
+            // Removed global API key setting to avoid duplication
 
                 Console.WriteLine("Initializing database connection...");
                 // Initialize database connection
@@ -542,12 +538,8 @@ namespace FutronicAttendanceSystem
                 config = ConfigManager.Instance;
                 
                 // Configure HttpClient
-                try
-                {
-                    http.DefaultRequestHeaders.Remove("x-device-api-key");
-                    http.DefaultRequestHeaders.Add("x-device-api-key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
-                }
-                catch { }
+                // API key is now added per-request in SendApiHeartbeatAsync
+                // Removed global API key setting to avoid duplication
                 
                 // Load users from database
                 Console.WriteLine("Loading users for dual sensor mode...");
@@ -616,20 +608,24 @@ namespace FutronicAttendanceSystem
             // Heartbeat timer
             heartbeatTimer = new System.Windows.Forms.Timer();
             heartbeatTimer.Interval = config.Application.HeartbeatInterval;
+            Console.WriteLine($"⏰ Starting heartbeat timer with interval: {config.Application.HeartbeatInterval}ms");
             heartbeatTimer.Tick += (s, e) => 
             {
                 try
                 {
+                    Console.WriteLine("⏰ Heartbeat timer triggered");
                     dbManager?.UpdateHeartbeat();
                     // Also send heartbeat to web backend for dashboard device presence
                     _ = SendApiHeartbeatAsync();
                 }
                 catch (Exception ex)
                 {
+                    Console.WriteLine($"❌ Heartbeat timer error: {ex.Message}");
                     System.Diagnostics.Debug.WriteLine($"Heartbeat failed: {ex.Message}");
                 }
             };
             heartbeatTimer.Start();
+            Console.WriteLine("✅ Heartbeat timer started");
 
             // Sync timer
             syncTimer = new System.Windows.Forms.Timer();
@@ -642,12 +638,31 @@ namespace FutronicAttendanceSystem
         {
             try
             {
+                Console.WriteLine("🔄 Sending heartbeat to backend...");
+                
+                // Get room information from device configuration
+                string roomNumber = null;
+                string roomId = null;
+                if (deviceConfig != null)
+                {
+                    roomNumber = deviceConfig.RoomName;
+                    roomId = deviceConfig.RoomId;
+                    Console.WriteLine($"📍 Using device config - Room: {roomNumber}, ID: {roomId}");
+                }
+                else
+                {
+                    // Fallback to ComboBox method for non-dual sensor mode
+                    roomNumber = GetCurrentRoomNumberSafe();
+                    Console.WriteLine($"📍 Using ComboBox fallback - Room: {roomNumber}");
+                }
+
                 var payload = new
                 {
                     deviceType = "Fingerprint_Scanner",
                     deviceId = config?.Device?.DeviceId ?? Environment.MachineName,
                     location = config?.Device?.Location ?? null,
-                    roomNumber = GetCurrentRoomNumberSafe(),
+                    roomId = roomId,
+                    roomNumber = roomNumber,
                     hostname = Environment.MachineName,
                     ipAddress = GetLocalIPv4Safe(),
                     appVersion = Application.ProductVersion,
@@ -655,11 +670,24 @@ namespace FutronicAttendanceSystem
                 };
 
                 var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"📤 Heartbeat payload: {json}");
+                
                 using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
                 {
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567".Trim();
+                    content.Headers.Add("x-device-api-key", apiKey);
+                    Console.WriteLine($"🔑 API Key being sent: '{apiKey}' (length: {apiKey.Length})");
                     var url = $"{backendBaseUrl}/api/devices/heartbeat";
+                    Console.WriteLine($"🌐 Sending to: {url}");
+                    
                     using (var response = await http.PostAsync(url, content))
                     {
+                        Console.WriteLine($"✅ Heartbeat sent - Status: {response.StatusCode}");
+                        if (response.StatusCode != System.Net.HttpStatusCode.Created)
+                        {
+                            var responseContent = await response.Content.ReadAsStringAsync();
+                            Console.WriteLine($"❌ Response content: {responseContent}");
+                        }
                         // No throw; best-effort
                         _ = response.StatusCode;
                     }
@@ -667,6 +695,7 @@ namespace FutronicAttendanceSystem
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"❌ SendApiHeartbeatAsync error: {ex.Message}");
                 System.Diagnostics.Debug.WriteLine($"SendApiHeartbeatAsync error: {ex.Message}");
             }
         }
@@ -2526,14 +2555,20 @@ namespace FutronicAttendanceSystem
             txtDescriptions.ReadOnly = true;
             txtDescriptions.ScrollBars = ScrollBars.Vertical;
             txtDescriptions.BackColor = Color.White;
-            txtDescriptions.Text = @"1. Instructor Early Window: How early an instructor can start a session before scheduled time
-2. Student Grace Period: How late a student can arrive and still be marked 'Present'
-3. Instructor Late Tolerance: How late an instructor can be and still start a session (marked as 'Unscheduled')
-4. Auto Close Delay: How long after scheduled end time the system will auto-close an active session
-5. Student Early Arrival Window: How early students can scan and be marked as 'Early Arrival'
-6. Instructor End Tolerance: How early/late an instructor can end a session relative to scheduled end time
-
-These settings allow you to customize the attendance system behavior for different academic policies and requirements.";
+            txtDescriptions.Text = "1. Instructor Early Window\r\n" +
+"   How early an instructor can start a session before scheduled time.\r\n\r\n" +
+"2. Student Grace Period\r\n" +
+"   How late a student can arrive and still be marked as 'Present'.\r\n\r\n" +
+"3. Instructor Late Tolerance\r\n" +
+"   How late an instructor can be and still start a session (marked as 'Unscheduled').\r\n\r\n" +
+"4. Auto Close Delay\r\n" +
+"   How long after scheduled end time the system will auto-close an active session.\r\n\r\n" +
+"5. Student Early Arrival Window\r\n" +
+"   How early students can scan and be marked as 'Early Arrival'.\r\n\r\n" +
+"6. Instructor End Tolerance\r\n" +
+"   How early/late an instructor can end a session relative to scheduled end time.\r\n\r\n" +
+"\r\n" +
+"These settings allow you to customize the attendance system behavior for different academic policies and requirements.";
             descriptionPanel.Controls.Add(txtDescriptions);
 
             // Load current settings
@@ -5671,7 +5706,7 @@ These settings allow you to customize the attendance system behavior for differe
                     client.Timeout = TimeSpan.FromSeconds(5);
                     
                     // Add API key to request header for security
-                    string apiKey = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Must match ESP32 API key
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
                     client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
                     Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
                     
@@ -5870,7 +5905,7 @@ These settings allow you to customize the attendance system behavior for differe
                     client.Timeout = TimeSpan.FromSeconds(5);
                     
                     // Add API key to request header for security
-                    string apiKey = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Must match ESP32 API key
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
                     client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
                     Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
                     

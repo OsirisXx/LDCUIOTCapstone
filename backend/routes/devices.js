@@ -187,6 +187,9 @@ router.post('/heartbeat', [
 ], async (req, res) => {
     try {
         const apiKey = req.header('x-device-api-key');
+        console.log('🔑 Backend API Key from .env:', process.env.DEVICE_API_KEY);
+        console.log('🔑 API Key from request:', apiKey);
+        console.log('🔑 Keys match:', apiKey === process.env.DEVICE_API_KEY);
         if (!process.env.DEVICE_API_KEY || apiKey !== process.env.DEVICE_API_KEY) {
             return res.status(401).json({ message: 'Unauthorized device' });
         }

@@ -19,8 +19,8 @@
 #include <Adafruit_SSD1306.h>
 
 // WiFi credentials - 2.4GHz Network (ESP32 Compatible)
-const char* ssid = "RedmiTurbo";         // Your current WiFi network
-const char* password = "OneTwo11"; // Your WiFi password
+const char* ssid = "WIFi2.4";         // Your current WiFi network
+const char* password = "fOrtnite901_"; // Your WiFi password
 
 // Security - API Key for authentication
 const char* API_KEY = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Change this to your own secret key
@@ -488,6 +488,12 @@ void displayFingerprintMatch(String userName, bool lockOpened, String userType =
     if (userType == "instructor") {
       display.println("Door unlocked");
       display.println("(Instructor)");
+    } else if (userType == "custodian") {
+      display.println("Door unlocked");
+      display.println("(Custodian)");
+    } else if (userType == "dean") {
+      display.println("Door unlocked");
+      display.println("(Dean)");
     } else {
       display.println("Door unlocked");
       display.println("(Student)");
@@ -530,6 +536,12 @@ void displayRfidScanResult(String userName, bool lockOpened, String userType = "
     if (userType == "instructor") {
       display.println("Door unlocked");
       display.println("(Instructor)");
+    } else if (userType == "custodian") {
+      display.println("Door unlocked");
+      display.println("(Custodian)");
+    } else if (userType == "dean") {
+      display.println("Door unlocked");
+      display.println("(Dean)");
     } else {
       display.println("Door unlocked");
       display.println("(Student)");
@@ -701,8 +713,8 @@ void handleLockControl() {
     
     // Determine if lock should open based on user type and session state
     bool shouldOpenLock = false;
-    if (userType == "instructor") {
-      // Instructors can always open the door (simplified logic to avoid state confusion)
+    if (userType == "instructor" || userType == "custodian" || userType == "dean") {
+      // Instructors, custodians, and deans can always open the door
       shouldOpenLock = true;
     } else if (userType == "student" && sessionActive) {
       // Students can open door during active session (even if already signed in)
@@ -725,6 +737,10 @@ void handleLockControl() {
     Serial.print("💡 Logic: ");
     if (userType == "instructor") {
       Serial.println("Instructor - Always allowed (simplified logic)");
+    } else if (userType == "custodian") {
+      Serial.println("Custodian - Always allowed (door access only)");
+    } else if (userType == "dean") {
+      Serial.println("Dean - Always allowed (can start sessions)");
     } else if (userType == "student" && sessionActive) {
       Serial.println("Student with active session - Allowed (can go in/out)");
     } else {
@@ -793,8 +809,8 @@ void handleLockControl() {
      
      // Determine if lock should open based on user type and session state
      bool shouldOpenLock = false;
-     if (userType == "instructor") {
-       // Instructors can always open the door (simplified logic to avoid state confusion)
+     if (userType == "instructor" || userType == "custodian" || userType == "dean") {
+       // Instructors, custodians, and deans can always open the door
        shouldOpenLock = true;
      } else if (userType == "student" && sessionActive) {
        // Students can open door during active session (even if already signed in)
@@ -819,6 +835,10 @@ void handleLockControl() {
      Serial.print("💡 Logic: ");
      if (userType == "instructor") {
        Serial.println("Instructor - Always allowed (simplified logic)");
+     } else if (userType == "custodian") {
+       Serial.println("Custodian - Always allowed (door access only)");
+     } else if (userType == "dean") {
+       Serial.println("Dean - Always allowed (can start sessions)");
      } else if (userType == "student" && sessionActive) {
        Serial.println("Student with active session - Allowed (can go in/out)");
      } else {
