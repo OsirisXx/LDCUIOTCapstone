@@ -56,7 +56,7 @@ router.get('/', async (req, res) => {
                 u.FACULTYID
             FROM SUBJECTS s
             LEFT JOIN USERS u ON s.INSTRUCTORID = u.USERID
-            WHERE 1=1`;
+            WHERE 1=1 AND s.ARCHIVED_AT IS NULL`;
 
         // Add filtering conditions
         if (ACADEMICYEAR) {
@@ -88,7 +88,7 @@ router.get('/', async (req, res) => {
         }
 
         // Get total count
-        let countQuery = 'SELECT COUNT(*) as total FROM SUBJECTS s WHERE 1=1';
+        let countQuery = 'SELECT COUNT(*) as total FROM SUBJECTS s WHERE 1=1 AND s.ARCHIVED_AT IS NULL';
 
         if (ACADEMICYEAR) {
             countQuery += ` AND s.ACADEMICYEAR = '${ACADEMICYEAR}'`;

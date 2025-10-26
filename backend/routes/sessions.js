@@ -46,7 +46,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
             LEFT JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
             LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
             LEFT JOIN ROOMS r ON s.ROOMID = r.ROOMID
-            WHERE 1=1
+            WHERE 1=1 AND s.ARCHIVED_AT IS NULL
         `;
         const params = [];
 
@@ -94,7 +94,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
         const sessions = await executeQuery(query, params);
 
         // Get total count
-        let countQuery = 'SELECT COUNT(*) as total FROM SESSIONS s WHERE 1=1';
+        let countQuery = 'SELECT COUNT(*) as total FROM SESSIONS s WHERE 1=1 AND s.ARCHIVED_AT IS NULL';
         const countParams = [];
 
         if (status) {
@@ -231,7 +231,7 @@ router.get('/active', authenticateToken, requireInstructor, async (req, res) => 
                 GROUP BY ar.SCHEDULEID
             ) attendance_count ON cs.SCHEDULEID = attendance_count.SCHEDULEID
             WHERE cs.DAYOFWEEK = ?
-            AND cs.ACADEMICYEAR = '2024-2025'
+            AND cs.ACADEMICYEAR = '2025-2026'
             AND cs.SEMESTER = 'First Semester'
             AND (
                 TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME OR

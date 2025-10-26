@@ -26,7 +26,7 @@ router.get('/overview', authenticateToken, requireInstructor, async (req, res) =
         const activeSessions = await executeQuery(`
             SELECT COUNT(*) as count
             FROM SESSIONS
-            WHERE status = 'active' AND session_date = CURDATE()
+            WHERE status = 'active' AND session_date = CURDATE() AND ARCHIVED_AT IS NULL
         `);
 
         // Total attendance today
@@ -46,7 +46,7 @@ router.get('/overview', authenticateToken, requireInstructor, async (req, res) =
                 door_status,
                 COUNT(*) as count
             FROM ROOMS
-            WHERE is_active = TRUE
+            WHERE is_active = TRUE AND ARCHIVED_AT IS NULL
             GROUP BY door_status
         `);
 
@@ -84,7 +84,7 @@ router.get('/overview', authenticateToken, requireInstructor, async (req, res) =
                 status,
                 COUNT(*) as count
             FROM USERS
-            WHERE 1=1 ${whereClause}
+            WHERE 1=1 AND ARCHIVED_AT IS NULL ${whereClause}
             GROUP BY role, status
         `, params);
 
@@ -382,38 +382,82 @@ router.get('/stats', authenticateToken, async (req, res) => {
     try {
         // Get total users
         const totalUsersResult = await getSingleResult(
-            'SELECT COUNT(*) as count FROM USERS WHERE STATUS = "active"'
+            'SELECT COUNT(*) as count FROM USERS WHERE STATUS = "Active" AND ARCHIVED_AT IS NULL'
         );
         const totalUsers = totalUsersResult?.count || 0;
 
         // Get total attendance records today
         const today = new Date().toISOString().split('T')[0];
         const todayAttendanceResult = await getSingleResult(
-            'SELECT COUNT(*) as count FROM ATTENDANCERECORDS WHERE DATE = ?',
+            'SELECT COUNT(*) as count FROM ATTENDANCERECORDS WHERE DATE(SCANDATETIME) = ?',
             [today]
         );
         const todayAttendance = todayAttendanceResult?.count || 0;
 
-        // Get total attendance records this month
-        const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
-        const monthlyAttendanceResult = await getSingleResult(
-            'SELECT COUNT(*) as count FROM ATTENDANCERECORDS WHERE DATE LIKE ?',
-            [`${currentMonth}%`]
+        // Get total rooms
+        const totalRoomsResult = await getSingleResult(
+            'SELECT COUNT(*) as count FROM ROOMS WHERE STATUS = "Available" AND ARCHIVED_AT IS NULL'
         );
-        const monthlyAttendance = monthlyAttendanceResult?.count || 0;
+        const totalRooms = totalRoomsResult?.count || 0;
 
-        // Get active sessions today
-        const activeSessionsResult = await getSingleResult(
-            'SELECT COUNT(*) as count FROM SESSIONS WHERE SESSIONDATE = ? AND STATUS = "active"',
-            [today]
-        );
+        // Get current day and time for active sessions calculation
+        const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+        const currentTime = new Date().toTimeString().slice(0, 8);
+        
+        // Count active sessions based on current time and schedules
+        const activeSessionsResult = await getSingleResult(`
+            SELECT COUNT(*) as count 
+            FROM CLASSSCHEDULES cs
+            WHERE cs.DAYOFWEEK = ?
+            AND cs.ACADEMICYEAR = '2025-2026'
+            AND cs.SEMESTER = 'First Semester'
+            AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+            AND cs.ARCHIVED_AT IS NULL
+        `, [currentDay]);
         const activeSessions = activeSessionsResult?.count || 0;
+
+        // Get today's sessions from schedules (both active sessions from SESSIONS table and scheduled classes)
+        const todaySessions = await executeQuery(`
+            SELECT 
+                cs.SCHEDULEID,
+                sub.SUBJECTCODE,
+                sub.SUBJECTNAME,
+                r.ROOMNUMBER,
+                r.ROOMNAME,
+                cs.STARTTIME,
+                cs.ENDTIME,
+                CASE 
+                    WHEN TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME THEN 'active'
+                    WHEN TIME(NOW()) < cs.STARTTIME THEN 'scheduled'
+                    ELSE 'ended'
+                END as STATUS,
+                CONCAT(u.FIRSTNAME, ' ', u.LASTNAME) as instructor_name
+            FROM CLASSSCHEDULES cs
+            JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+            JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+            JOIN USERS u ON sub.INSTRUCTORID = u.USERID
+            WHERE cs.DAYOFWEEK = ?
+            AND cs.ACADEMICYEAR = '2025-2026'
+            AND cs.SEMESTER = 'First Semester'
+            AND cs.ARCHIVED_AT IS NULL
+            AND sub.ARCHIVED_AT IS NULL
+            AND r.ARCHIVED_AT IS NULL
+            ORDER BY cs.STARTTIME
+        `, [currentDay]);
 
         res.json({
             totalUsers,
             todayAttendance,
-            monthlyAttendance,
-            activeSessions
+            totalRooms,
+            activeSessions,
+            todaySessions: todaySessions.map(session => ({
+                subject_name: session.SUBJECTNAME,
+                room_number: session.ROOMNUMBER,
+                start_time: session.STARTTIME,
+                end_time: session.ENDTIME,
+                status: session.STATUS,
+                instructor_name: session.instructor_name
+            }))
         });
 
     } catch (error) {
@@ -430,27 +474,52 @@ router.get('/recent-activity', authenticateToken, async (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 10;
 
-        // Get recent attendance records
+        // Get recent attendance records with subject information
         const recentAttendance = await executeQuery(`
             SELECT
                 ar.ATTENDANCEID,
                 ar.SCANDATETIME,
+                ar.SCANTYPE,
                 ar.STATUS,
                 ar.AUTHMETHOD,
                 ar.LOCATION,
                 u.FIRSTNAME,
                 u.LASTNAME,
                 u.STUDENTID,
-                u.USERTYPE
+                u.USERTYPE,
+                sub.SUBJECTNAME,
+                sub.SUBJECTCODE,
+                r.ROOMNUMBER
             FROM ATTENDANCERECORDS ar
             JOIN USERS u ON ar.USERID = u.USERID
+            JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID
+            JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+            JOIN ROOMS r ON cs.ROOMID = r.ROOMID
             ORDER BY ar.SCANDATETIME DESC
-            LIMIT 10
-        `);
+            LIMIT ?
+        `, [limit.toString()]);
 
-        res.json({
-            recentAttendance: recentAttendance || []
+        // Format the data for frontend consumption
+        const formattedActivity = recentAttendance.map(record => {
+            const scanTime = new Date(record.SCANDATETIME);
+            const timeStr = scanTime.toLocaleTimeString('en-US', { 
+                hour: '2-digit', 
+                minute: '2-digit',
+                hour12: true 
+            });
+            
+            const action = record.SCANTYPE === 'time_in' ? 'checked in' : 'checked out';
+            const statusText = record.STATUS === 'Present' ? 'on time' : 
+                             record.STATUS === 'Late' ? 'late' : 
+                             record.STATUS === 'Absent' ? 'absent' : record.STATUS;
+            
+            return {
+                description: `${record.FIRSTNAME} ${record.LASTNAME} ${action} for ${record.SUBJECTCODE} (${statusText})`,
+                time: timeStr
+            };
         });
+
+        res.json(formattedActivity);
 
     } catch (error) {
         console.error('Recent activity error:', error);

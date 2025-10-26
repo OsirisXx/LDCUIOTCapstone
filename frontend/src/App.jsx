@@ -12,6 +12,8 @@ import Subjects from './pages/Subjects'; // Changed from Subjects to Subjects
 import Schedules from './pages/Schedules';
 import UnifiedManagement from './pages/UnifiedManagement';
 import Reports from './pages/Reports';
+import Archive from './pages/Archive';
+import Backup from './pages/Backup';
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -59,6 +61,8 @@ function AppRoutes() {
           <Route path="sessions" element={<Sessions />} />
           <Route path="attendance-logs" element={<AttendanceLogs />} />
           <Route path="reports" element={<Reports />} />
+          <Route path="archive" element={<Archive />} />
+          <Route path="backup" element={<Backup />} />
         </Route>
       </Routes>
     </Router>

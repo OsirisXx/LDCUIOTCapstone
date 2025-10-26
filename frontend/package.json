@@ -19,7 +19,7 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "dev": "concurrently --names \"FRONTEND,BACKEND\" --prefix-colors \"cyan,yellow\" \"npm run frontend\" \"npm run backend\"",
+    "dev": "react-scripts start",
     "frontend": "react-scripts start",
     "backend": "npm --prefix ../backend start",
     "build": "react-scripts build",

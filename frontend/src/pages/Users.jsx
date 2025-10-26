@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   PlusIcon, 
   PencilIcon, 
@@ -8,10 +9,7 @@ import {
   AcademicCapIcon,
   UserGroupIcon,
   XMarkIcon,
-  FingerPrintIcon,
-  CpuChipIcon,
   DocumentArrowUpIcon,
-  CreditCardIcon,
   CheckIcon,
   ExclamationTriangleIcon,
   EllipsisVerticalIcon,
@@ -28,6 +26,7 @@ function Users() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [modalAnimation, setModalAnimation] = useState('hidden');
   const [editingUser, setEditingUser] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState('all');
@@ -36,27 +35,18 @@ function Users() {
   const [totalPages, setTotalPages] = useState(1);
 
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [uploadModalAnimation, setUploadModalAnimation] = useState('hidden');
   const [uploadFile, setUploadFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadResults, setUploadResults] = useState(null);
   const [previewData, setPreviewData] = useState(null);
   const [showPreview, setShowPreview] = useState(false);
-  const [showFingerprintModal, setShowFingerprintModal] = useState(false);
-  const [selectedUser, setSelectedUser] = useState(null);
-  const [availableFingerprintIds, setAvailableFingerprintIds] = useState([]);
-  const [selectedFingerprintId, setSelectedFingerprintId] = useState('');
-  const [assigningFingerprint, setAssigningFingerprint] = useState(false);
-  const [showRfidModal, setShowRfidModal] = useState(false);
-  const [rfidScanMode, setRfidScanMode] = useState(false);
-  const [scannedRfidData, setScannedRfidData] = useState('');
-  const [manualRfidInput, setManualRfidInput] = useState('');
-  const [assigningRfid, setAssigningRfid] = useState(false);
   
   // Delete confirmation modal states
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteItem, setDeleteItem] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [modalAnimation, setModalAnimation] = useState('hidden');
+  const [deleteModalAnimation, setDeleteModalAnimation] = useState('hidden');
   
   // Bulk delete states
   const [selectedUsers, setSelectedUsers] = useState(new Set());
@@ -82,8 +72,6 @@ function Users() {
   const [formData, setFormData] = useState({
     first_name: '',
     last_name: '',
-    email: '',
-    password: '',
     user_type: 'student',
     student_id: '',
     faculty_id: '',
@@ -186,9 +174,12 @@ function Users() {
         toast.success('User created successfully');
       }
       
-      setShowModal(false);
-      setEditingUser(null);
-      resetForm();
+      setModalAnimation('hidden');
+      setTimeout(() => {
+        setShowModal(false);
+        setEditingUser(null);
+        resetForm();
+      }, 300);
       fetchUsers();
     } catch (error) {
       console.error('Error saving user:', error);
@@ -212,8 +203,6 @@ function Users() {
     setFormData({
       first_name: user.FIRSTNAME || '',
       last_name: user.LASTNAME || '',
-      email: user.EMAIL || '',
-      password: '',
       user_type: user.USERTYPE || 'student',
       student_id: user.STUDENTID || '',
       faculty_id: user.FACULTYID || '',
@@ -222,6 +211,7 @@ function Users() {
       status: user.STATUS || 'active'
     });
     setShowModal(true);
+    setTimeout(() => setModalAnimation('visible'), 10);
   };
 
   const handleDelete = (user) => {
@@ -236,7 +226,7 @@ function Users() {
       confirmText
     });
     setShowDeleteModal(true);
-    setTimeout(() => setModalAnimation('visible'), 10);
+    setTimeout(() => setDeleteModalAnimation('visible'), 10);
   };
 
   const confirmDelete = async () => {
@@ -282,7 +272,7 @@ function Users() {
       }
     } finally {
       setIsDeleting(false);
-      setModalAnimation('hidden');
+      setDeleteModalAnimation('hidden');
       setTimeout(() => {
         setShowDeleteModal(false);
         setDeleteItem(null);
@@ -294,8 +284,6 @@ function Users() {
     setFormData({
       first_name: '',
       last_name: '',
-      email: '',
-      password: '',
       user_type: 'student',
       student_id: '',
       faculty_id: '',
@@ -341,7 +329,7 @@ function Users() {
   const handleBulkDelete = () => {
     if (selectedUsers.size === 0) return;
     setShowBulkDeleteModal(true);
-    setTimeout(() => setModalAnimation('visible'), 10);
+    setTimeout(() => setDeleteModalAnimation('visible'), 10);
   };
 
   const confirmBulkDelete = async () => {
@@ -376,7 +364,7 @@ function Users() {
       toast.error(errorMessage);
     } finally {
       setIsBulkDeleting(false);
-      setModalAnimation('hidden');
+      setDeleteModalAnimation('hidden');
       setTimeout(() => {
         setShowBulkDeleteModal(false);
       }, 300);
@@ -388,7 +376,7 @@ function Users() {
     setDeleteAllType(type);
     setShowSecondConfirmation(false);
     setShowDeleteAllModal(true);
-    setTimeout(() => setModalAnimation('visible'), 10);
+    setTimeout(() => setDeleteModalAnimation('visible'), 10);
   };
 
   const confirmDeleteAllFirst = () => {
@@ -442,7 +430,7 @@ function Users() {
       toast.error(errorMessage);
     } finally {
       setIsDeletingAll(false);
-      setModalAnimation('hidden');
+      setDeleteModalAnimation('hidden');
       setTimeout(() => {
         setShowDeleteAllModal(false);
         setShowSecondConfirmation(false);
@@ -452,7 +440,7 @@ function Users() {
   };
 
   const cancelDeleteAll = () => {
-    setModalAnimation('hidden');
+    setDeleteModalAnimation('hidden');
     setTimeout(() => {
       setShowDeleteAllModal(false);
       setShowSecondConfirmation(false);
@@ -559,147 +547,18 @@ function Users() {
     }
   };
 
-  const fetchAvailableFingerprintIds = async () => {
-    try {
-      const response = await axios.get('http://localhost:5000/api/users/fingerprint-ids/available', {
-        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-      });
-      setAvailableFingerprintIds(response.data.all_ids); // Use all_ids instead of available_ids
-    } catch (error) {
-      console.error('Error fetching available fingerprint IDs:', error);
-      toast.error('Failed to load available fingerprint IDs');
-    }
-  };
 
-  const handleAssignFingerprint = async (user) => {
-    setSelectedUser(user);
-    setSelectedFingerprintId('');
-    await fetchAvailableFingerprintIds();
-    setShowFingerprintModal(true);
-  };
-
-  const handleFingerprintAssignment = async () => {
-    if (!selectedFingerprintId) {
-      toast.error('Please select a fingerprint ID');
-      return;
-    }
-
-    try {
-      setAssigningFingerprint(true);
-
-      const response = await axios.post(
-        `http://localhost:5000/api/users/${selectedUser.USERID}/assign-fingerprint`,
-        { fingerprint_id: parseInt(selectedFingerprintId) },
-        {
-          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
-        }
-      );
-
-      toast.success(
-        <div>
-          <div className="font-medium">✅ Fingerprint Assigned!</div>
-          <div className="text-sm mt-1">
-            <div><strong>{response.data.user.name}</strong></div>
-            <div>Fingerprint ID: {response.data.user.fingerprint_id}</div>
-            <div>Student ID: {response.data.user.student_id}</div>
-          </div>
-        </div>,
-        { duration: 4000 }
-      );
-
-      setShowFingerprintModal(false);
-      setSelectedUser(null);
-      setSelectedFingerprintId('');
-      fetchUsers(); // Refresh the users list
-
-    } catch (error) {
-      console.error('Error assigning fingerprint:', error);
-      toast.error(error.response?.data?.message || 'Failed to assign fingerprint');
-    } finally {
-      setAssigningFingerprint(false);
-    }
-  };
-
-  // RFID Assignment Functions
-  const handleOpenRfidModal = (userData) => {
-    setSelectedUser(userData);
-    setShowRfidModal(true);
-    setRfidScanMode(false);
-    setScannedRfidData('');
-    setManualRfidInput(userData.RFIDTAG || '');
-  };
-
-  const handleStartRfidScan = () => {
-    setRfidScanMode(true);
-    setScannedRfidData('');
-    toast.success('Scan mode activated! Scan an RFID card now...');
-
-    // Focus on a hidden input to capture RFID data
-    const hiddenInput = document.getElementById('rfid-scan-input');
-    if (hiddenInput) {
-      hiddenInput.focus();
-    }
-  };
-
-  const handleRfidScanInput = (e) => {
-    if (e.key === 'Enter' && rfidScanMode) {
-      const rfidData = e.target.value.trim();
-      if (rfidData.length > 0) {
-        setScannedRfidData(rfidData);
-        setManualRfidInput(rfidData);
-        setRfidScanMode(false);
-        toast.success(`RFID captured: ${rfidData}`);
-        e.target.value = '';
-      }
-    }
-  };
-
-  const handleAssignRfid = async () => {
-    const rfidToAssign = scannedRfidData || manualRfidInput;
-
-    if (!selectedUser || !rfidToAssign.trim()) {
-      toast.error('Please provide an RFID code');
-      return;
-    }
-
-    try {
-      setAssigningRfid(true);
-
-      const response = await axios.put(
-        `http://localhost:5000/api/users/${selectedUser.USERID}/assign-rfid`,
-        { rfid_tag: rfidToAssign.trim() },
-        { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }
-      );
-
-      if (response.status === 200) {
-        toast.success('RFID assigned successfully!');
-        setShowRfidModal(false);
-        setSelectedUser(null);
-        setScannedRfidData('');
-        setManualRfidInput('');
-        fetchUsers(); // Refresh the users list
-      }
-    } catch (error) {
-      console.error('Error assigning RFID:', error);
-      if (error.response?.status === 400) {
-        toast.error(error.response.data.message || 'Invalid RFID data');
-      } else if (error.response?.status === 409) {
-        toast.error(error.response.data.message || 'RFID tag already assigned to another user');
-      } else {
-        toast.error('Failed to assign RFID');
-      }
-    } finally {
-      setAssigningRfid(false);
-    }
-  };
 
   const resetUploadModal = () => {
-    setShowUploadModal(false);
-    setUploadFile(null);
-    setUploadResults(null);
-    setPreviewData(null);
-    setShowPreview(false);
-    setUploading(false);
+    setUploadModalAnimation('hidden');
+    setTimeout(() => {
+      setShowUploadModal(false);
+      setUploadFile(null);
+      setUploadResults(null);
+      setPreviewData(null);
+      setShowPreview(false);
+      setUploading(false);
+    }, 300);
   };
 
   const getUserTypeIcon = (type) => {
@@ -710,6 +569,10 @@ function Users() {
         return <AcademicCapIcon className="h-5 w-5 text-blue-600" />;
       case 'student':
         return <UserGroupIcon className="h-5 w-5 text-green-600" />;
+      case 'custodian':
+        return <UserIcon className="h-5 w-5 text-orange-600" />;
+      case 'dean':
+        return <AcademicCapIcon className="h-5 w-5 text-purple-600" />;
       default:
         return <UserIcon className="h-5 w-5 text-gray-600" />;
     }
@@ -723,6 +586,10 @@ function Users() {
         return 'bg-blue-100 text-blue-800';
       case 'student':
         return 'bg-green-100 text-green-800';
+      case 'custodian':
+        return 'bg-orange-100 text-orange-800';
+      case 'dean':
+        return 'bg-purple-100 text-purple-800';
       default:
         return 'bg-gray-100 text-gray-800';
     }
@@ -753,14 +620,20 @@ function Users() {
         {user?.role === 'admin' && (
           <div className="flex space-x-3">
             <button
-              onClick={() => setShowUploadModal(true)}
+              onClick={() => {
+                setShowUploadModal(true);
+                setTimeout(() => setUploadModalAnimation('visible'), 10);
+              }}
               className="btn btn-secondary flex items-center space-x-2"
             >
               <DocumentArrowUpIcon className="h-5 w-5" />
               <span>Upload CSV/Excel</span>
             </button>
             <button
-              onClick={() => setShowModal(true)}
+              onClick={() => {
+                setShowModal(true);
+                setTimeout(() => setModalAnimation('visible'), 10);
+              }}
               className="btn btn-primary flex items-center space-x-2"
             >
               <PlusIcon className="h-5 w-5" />
@@ -879,6 +752,8 @@ function Users() {
               <option value="student">Students</option>
               <option value="instructor">Instructors</option>
               <option value="admin">Administrators</option>
+              <option value="custodian">Custodians</option>
+              <option value="dean">Deans</option>
             </select>
           </div>
 
@@ -1009,12 +884,6 @@ function Users() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     ID
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    RFID
-                  </th>
-                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Fingerprint
-                  </th>
                   {user?.role === 'admin' && (
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Actions
@@ -1065,51 +934,9 @@ function Users() {
                         )}
                       </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      <div>
-                        {userData.RFIDTAG ? (
-                          <div className="text-blue-600 font-medium">
-                            {userData.RFIDTAG}
-                          </div>
-                        ) : (
-                          <span className="text-gray-400">-</span>
-                        )}
-                      </div>
-                    </td>
-                    
-                    {/* Fingerprint Status */}
-                    <td className="px-6 py-4 whitespace-nowrap text-center">
-                      {userData.FINGERPRINT_ID ? (
-                        <div className="flex items-center justify-center">
-                          <CheckIcon className="h-5 w-5 text-green-500" />
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-center">
-                          <span className="text-gray-400">-</span>
-                        </div>
-                      )}
-                    </td>
                     {user?.role === 'admin' && (
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                         <div className="flex items-center justify-end space-x-2">
-                          {(userData.USERTYPE === 'student' || userData.USERTYPE === 'instructor' || userData.USERTYPE === 'admin') && (
-                            <>
-                              <button
-                                onClick={() => handleAssignFingerprint(userData)}
-                                className="text-purple-600 hover:text-purple-900 transition-colors duration-200"
-                                title="Assign Fingerprint"
-                              >
-                                <FingerPrintIcon className="h-4 w-4" />
-                              </button>
-                              <button
-                                onClick={() => handleOpenRfidModal(userData)}
-                                className="text-green-600 hover:text-green-900 transition-colors duration-200"
-                                title="Assign RFID"
-                              >
-                                <CreditCardIcon className="h-4 w-4" />
-                              </button>
-                            </>
-                          )}
                           <button
                             onClick={() => handleEdit(userData)}
                             className="text-blue-600 hover:text-blue-900 transition-colors duration-200"
@@ -1163,18 +990,38 @@ function Users() {
       </div>
 
       {/* Add/Edit Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+      {showModal && createPortal(
+        <div 
+          className={`fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60] transition-opacity duration-300 ease-in-out ${
+            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: '100vw',
+            height: '100vh',
+            zIndex: 60
+          }}
+        >
+          <div className={`relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white transition-all duration-300 ease-out ${
+            modalAnimation === 'visible' 
+              ? 'scale-100 opacity-100 translate-y-0' 
+              : 'scale-95 opacity-0 translate-y-4'
+          }`}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">
                 {editingUser ? 'Edit User' : 'Add New User'}
               </h3>
               <button
                 onClick={() => {
-                  setShowModal(false);
-                  setEditingUser(null);
-                  resetForm();
+                  setModalAnimation('hidden');
+                  setTimeout(() => {
+                    setShowModal(false);
+                    setEditingUser(null);
+                    resetForm();
+                  }, 300);
                 }}
                 className="text-gray-400 hover:text-gray-600"
               >
@@ -1210,34 +1057,6 @@ function Users() {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Email *
-                </label>
-                <input
-                  type="email"
-                  required
-                  value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
-
-              {!editingUser && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Password *
-                  </label>
-                  <input
-                    type="password"
-                    required={!editingUser}
-                    value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              )}
-
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1252,6 +1071,8 @@ function Users() {
                     <option value="student">Student</option>
                     <option value="instructor">Instructor</option>
                     <option value="admin">Administrator</option>
+                    <option value="custodian">Custodian</option>
+                    <option value="dean">Dean</option>
                   </select>
                 </div>
                 <div>
@@ -1331,9 +1152,12 @@ function Users() {
                 <button
                   type="button"
                   onClick={() => {
-                    setShowModal(false);
-                    setEditingUser(null);
-                    resetForm();
+                    setModalAnimation('hidden');
+                    setTimeout(() => {
+                      setShowModal(false);
+                      setEditingUser(null);
+                      resetForm();
+                    }, 300);
                   }}
                   className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
                 >
@@ -1348,13 +1172,31 @@ function Users() {
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Upload Excel/CSV Modal */}
-      {showUploadModal && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-full max-w-2xl shadow-lg rounded-md bg-white">
+      {showUploadModal && createPortal(
+        <div 
+          className={`fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60] transition-opacity duration-300 ease-in-out ${
+            uploadModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: '100vw',
+            height: '100vh',
+            zIndex: 60
+          }}
+        >
+          <div className={`relative top-20 mx-auto p-5 border w-full max-w-2xl shadow-lg rounded-md bg-white transition-all duration-300 ease-out ${
+            uploadModalAnimation === 'visible' 
+              ? 'scale-100 opacity-100 translate-y-0' 
+              : 'scale-95 opacity-0 translate-y-4'
+          }`}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">
                 Upload Excel/CSV File
@@ -1593,276 +1435,22 @@ function Users() {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
-      {/* Fingerprint Assignment Modal */}
-      {showFingerprintModal && selectedUser && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-full max-w-md shadow-lg rounded-md bg-white">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">
-                Assign Fingerprint
-              </h3>
-              <button
-                onClick={() => {
-                  setShowFingerprintModal(false);
-                  setSelectedUser(null);
-                  setSelectedFingerprintId('');
-                }}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                <XMarkIcon className="h-6 w-6" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              {/* User Info */}
-              <div className="bg-gray-50 border border-gray-200 rounded-md p-4">
-                <h4 className="font-medium text-gray-800 mb-2">
-                  {selectedUser.USERTYPE === 'instructor' ? 'Instructor' : selectedUser.USERTYPE === 'admin' ? 'Admin' : 'Student'} Information
-                </h4>
-                <div className="text-sm text-gray-700 space-y-1">
-                  <p><strong>Name:</strong> {selectedUser.FIRSTNAME} {selectedUser.LASTNAME}</p>
-                  <p><strong>{selectedUser.USERTYPE === 'instructor' || selectedUser.USERTYPE === 'admin' ? 'Faculty ID:' : 'Student ID:'}</strong> {selectedUser.FACULTYID || selectedUser.STUDENTID}</p>
-                  <p><strong>Email:</strong> {selectedUser.EMAIL}</p>
-                  <p><strong>Department:</strong> {selectedUser.DEPARTMENT}</p>
-                  <p><strong>Role:</strong> {selectedUser.USERTYPE}</p>
-                </div>
-              </div>
-
-              {/* Fingerprint ID Selection */}
-              <div>
-                <label htmlFor="fingerprint-id" className="block text-sm font-medium text-gray-700 mb-2">
-                  Select Fingerprint ID (1-127)
-                </label>
-                <select
-                  id="fingerprint-id"
-                  value={selectedFingerprintId}
-                  onChange={(e) => setSelectedFingerprintId(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  disabled={assigningFingerprint}
-                >
-                  <option value="">Select a fingerprint ID...</option>
-                  {availableFingerprintIds.map(item => (
-                    <option key={item.id} value={item.id}>
-                      Fingerprint ID #{item.id} {item.assigned ? `(Currently: ${item.assignedTo.name} - ${item.assignedTo.id})` : '(Available)'}
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-xs text-gray-500">
-                  {availableFingerprintIds.filter(item => !item.assigned).length} available, {availableFingerprintIds.filter(item => item.assigned).length} assigned out of 127 total slots
-                </p>
-              </div>
-
-              {/* Instructions */}
-              <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
-                <h4 className="font-medium text-blue-800 mb-2">Instructions:</h4>
-                <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
-                  <li>Select an available fingerprint ID from the dropdown</li>
-                  <li>Click "Assign Fingerprint" to save the assignment</li>
-                  <li>Use the Arduino Serial Monitor to enroll the fingerprint:</li>
-                  <li className="ml-4 text-xs font-mono bg-blue-100 p-1 rounded">
-                    enroll {selectedFingerprintId || '[ID]'}
-                  </li>
-                  <li>Follow the prompts to scan the finger twice</li>
-                  {(selectedUser.USERTYPE === 'instructor' || selectedUser.USERTYPE === 'admin') && (
-                    <li className="text-green-700 font-medium">✅ Instructors and Admins get automatic lock access when scanning</li>
-                  )}
-                </ol>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="flex justify-end space-x-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowFingerprintModal(false);
-                    setSelectedUser(null);
-                    setSelectedFingerprintId('');
-                  }}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
-                  disabled={assigningFingerprint}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleFingerprintAssignment}
-                  disabled={!selectedFingerprintId || assigningFingerprint}
-                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {assigningFingerprint ? (
-                    <div className="flex items-center">
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                      Assigning...
-                    </div>
-                  ) : (
-                    <>
-                      <FingerPrintIcon className="h-4 w-4 mr-2" />
-                      Assign Fingerprint
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* RFID Assignment Modal */}
-      {showRfidModal && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-gray-900">
-                  Assign RFID Card
-                </h3>
-                <button
-                  onClick={() => setShowRfidModal(false)}
-                  className="text-gray-400 hover:text-gray-600"
-                >
-                  <XMarkIcon className="h-6 w-6" />
-                </button>
-              </div>
-
-              {selectedUser && (
-                <div className="mb-4 p-3 bg-gray-50 rounded-lg">
-                  <div className="text-sm font-medium text-gray-900">
-                    {selectedUser.FIRSTNAME} {selectedUser.LASTNAME}
-                  </div>
-                  <div className="text-sm text-gray-500">
-                    {selectedUser.USERTYPE === 'instructor' || selectedUser.USERTYPE === 'admin' 
-                      ? (selectedUser.FACULTYID || 'No Faculty ID') 
-                      : (selectedUser.STUDENTID || 'No Student ID')
-                    } • {selectedUser.EMAIL}
-                  </div>
-                  <div className="text-sm text-gray-500">
-                    Role: {selectedUser.USERTYPE}
-                  </div>
-                  {selectedUser.RFIDTAG && (
-                    <div className="text-sm text-blue-600 mt-1">
-                      Current RFID: {selectedUser.RFIDTAG}
-                    </div>
-                  )}
-                  {(selectedUser.USERTYPE === 'instructor' || selectedUser.USERTYPE === 'admin') && (
-                    <div className="text-sm text-green-600 mt-1">
-                      ✅ RFID access will control solenoid lock
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="space-y-4">
-                {/* Scan Mode */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Scan RFID Card
-                  </label>
-                  <div className="flex space-x-2">
-                    <button
-                      onClick={handleStartRfidScan}
-                      disabled={rfidScanMode}
-                      className={`flex-1 px-4 py-2 text-sm font-medium rounded-md transition-colors duration-200 ${
-                        rfidScanMode
-                          ? 'bg-green-100 text-green-800 cursor-not-allowed'
-                          : 'bg-blue-600 text-white hover:bg-blue-700'
-                      }`}
-                    >
-                      {rfidScanMode ? (
-                        <div className="flex items-center justify-center">
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-600 mr-2"></div>
-                          Scanning...
-                        </div>
-                      ) : (
-                        <>
-                          <CreditCardIcon className="h-4 w-4 mr-2 inline" />
-                          Start Scan
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  {rfidScanMode && (
-                    <div className="mt-2 text-sm text-green-600">
-                      🔍 Scan mode active - scan your RFID card now!
-                    </div>
-                  )}
-                  {scannedRfidData && (
-                    <div className="mt-2 text-sm text-green-600">
-                      ✅ Captured: {scannedRfidData}
-                    </div>
-                  )}
-                </div>
-
-                {/* Manual Input */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Or Enter Manually
-                  </label>
-                  <input
-                    type="text"
-                    value={manualRfidInput}
-                    onChange={(e) => setManualRfidInput(e.target.value)}
-                    placeholder="Enter RFID code manually"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div className="flex justify-end space-x-3 mt-6">
-                <button
-                  onClick={() => setShowRfidModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors duration-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAssignRfid}
-                  disabled={assigningRfid || (!scannedRfidData && !manualRfidInput.trim())}
-                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
-                >
-                  {assigningRfid ? (
-                    <div className="flex items-center">
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                      Assigning...
-                    </div>
-                  ) : (
-                    <>
-                      <CreditCardIcon className="h-4 w-4 mr-2 inline" />
-                      Assign RFID
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Hidden input for RFID scanning */}
-      <input
-        id="rfid-scan-input"
-        type="text"
-        onKeyPress={handleRfidScanInput}
-        style={{
-          position: 'absolute',
-          left: '-9999px',
-          opacity: 0,
-          pointerEvents: 'none'
-        }}
-      />
 
       {/* Modern Delete Confirmation Modal */}
       {showDeleteModal && deleteItem && (
-        <div className="fixed inset-0 overflow-y-auto z-50">
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
           {/* Backdrop with blur and fade animation */}
           <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
-            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+            deleteModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
           }`}>
             <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
               {/* Modal container with scale and fade animation */}
               <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
-                modalAnimation === 'visible' 
+                deleteModalAnimation === 'visible' 
                   ? 'scale-100 opacity-100 translate-y-0' 
                   : 'scale-95 opacity-0 translate-y-4'
               }`}>
@@ -1884,7 +1472,7 @@ function Users() {
                   <button
                     type="button"
                     onClick={() => {
-                      setModalAnimation('hidden');
+                      setDeleteModalAnimation('hidden');
                       setTimeout(() => {
                         setShowDeleteModal(false);
                         setDeleteItem(null);
@@ -1922,15 +1510,15 @@ function Users() {
 
       {/* Bulk Delete Confirmation Modal */}
       {showBulkDeleteModal && (
-        <div className="fixed inset-0 overflow-y-auto z-50">
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
           {/* Backdrop with blur and fade animation */}
           <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
-            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+            deleteModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
           }`}>
             <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
               {/* Modal container with scale and fade animation */}
               <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
-                modalAnimation === 'visible' 
+                deleteModalAnimation === 'visible' 
                   ? 'scale-100 opacity-100 translate-y-0' 
                   : 'scale-95 opacity-0 translate-y-4'
               }`}>
@@ -1952,7 +1540,7 @@ function Users() {
                   <button
                     type="button"
                     onClick={() => {
-                      setModalAnimation('hidden');
+                      setDeleteModalAnimation('hidden');
                       setTimeout(() => {
                         setShowBulkDeleteModal(false);
                       }, 300);
@@ -1989,15 +1577,15 @@ function Users() {
 
       {/* Delete All by Type - Double Confirmation Modal */}
       {showDeleteAllModal && (
-        <div className="fixed inset-0 overflow-y-auto z-50">
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
           {/* Backdrop with blur and fade animation */}
           <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
-            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+            deleteModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
           }`}>
             <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
               {/* Modal container with scale and fade animation */}
               <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
-                modalAnimation === 'visible' 
+                deleteModalAnimation === 'visible' 
                   ? 'scale-100 opacity-100 translate-y-0' 
                   : 'scale-95 opacity-0 translate-y-4'
               }`}>

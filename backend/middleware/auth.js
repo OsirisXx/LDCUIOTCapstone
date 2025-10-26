@@ -14,8 +14,8 @@ const authenticateToken = async (req, res, next) => {
         
         // Get user from database to ensure they still exist and are active
         const user = await getSingleResult(
-            'SELECT USERID as id, EMAIL as email, USERTYPE as role, STATUS as status, FIRSTNAME as first_name, LASTNAME as last_name FROM USERS WHERE USERID = ? AND STATUS = "Active"',
-            [decoded.userId]
+            'SELECT USERID as id, EMAIL as email, USERTYPE as role, STATUS as status, FIRSTNAME as first_name, LASTNAME as last_name FROM USERS WHERE USERID = ? AND STATUS = ?',
+            [decoded.userId, 'Active']
         );
 
         if (!user) {

@@ -164,37 +164,55 @@ async function importInstructors(instructors, results, options) {
         
         for (const instructor of batch) {
             try {
-                // Check if instructor exists by email or faculty ID
+                // Check if instructor exists by email, faculty ID, or name (including archived)
                 let existing = null;
                 if (instructor.email) {
                     existing = await getSingleResult(
-                        'SELECT USERID FROM USERS WHERE EMAIL = ? AND USERTYPE = "instructor"',
+                        'SELECT USERID, ARCHIVED_AT FROM USERS WHERE EMAIL = ? AND USERTYPE = "instructor"',
                         [instructor.email]
                     );
                 }
                 if (!existing && instructor.employee_id) {
                     existing = await getSingleResult(
-                        'SELECT USERID FROM USERS WHERE FACULTYID = ? AND USERTYPE = "instructor"',
+                        'SELECT USERID, ARCHIVED_AT FROM USERS WHERE FACULTYID = ? AND USERTYPE = "instructor"',
                         [instructor.employee_id]
+                    );
+                }
+                // If still not found, check by name to catch duplicates
+                if (!existing && instructor.first_name && instructor.last_name) {
+                    existing = await getSingleResult(
+                        'SELECT USERID, ARCHIVED_AT FROM USERS WHERE FIRSTNAME = ? AND LASTNAME = ? AND USERTYPE = "instructor"',
+                        [instructor.first_name, instructor.last_name]
                     );
                 }
 
                 if (existing && !options.updateExisting) {
-                    // Skip if exists and not updating
-                    continue;
+                    // If instructor is archived, unarchive it; otherwise skip
+                    if (existing.ARCHIVED_AT) {
+                        await executeQuery(
+                            `UPDATE USERS SET 
+                             EMAIL = ?, DEPARTMENT = ?, STATUS = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
+                             WHERE USERID = ?`,
+                            [instructor.email || null, instructor.department, instructor.status, existing.USERID]
+                        );
+                        results.updated++;
+                    } else {
+                        // Skip if exists and not updating
+                        continue;
+                    }
                 }
 
                 if (existing && options.updateExisting) {
-                    // Update existing instructor
+                    // Update existing instructor (including unarchiving if needed)
                     await executeQuery(
                         `UPDATE USERS SET 
-                         FIRSTNAME = ?, LASTNAME = ?, EMAIL = ?, DEPARTMENT = ?, STATUS = ?, UPDATED_AT = CURRENT_TIMESTAMP
+                         FIRSTNAME = ?, LASTNAME = ?, EMAIL = ?, DEPARTMENT = ?, STATUS = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
                          WHERE USERID = ?`,
                         [instructor.first_name, instructor.last_name, instructor.email || null,
                          instructor.department, instructor.status, existing.USERID]
                     );
                     results.updated++;
-                } else {
+                } else if (!existing) {
                     // Create new instructor
                     await executeQuery(
                         `INSERT INTO USERS (USERID, USERTYPE, FACULTYID, FIRSTNAME, LASTNAME, EMAIL, DEPARTMENT, STATUS)
@@ -227,28 +245,40 @@ async function importStudents(students, results, options) {
         
         for (const student of batch) {
             try {
-                // Check if student exists by student ID
+                // Check if student exists by student ID (including archived)
                 const existing = await getSingleResult(
-                    'SELECT USERID FROM USERS WHERE STUDENTID = ? AND USERTYPE = "student"',
+                    'SELECT USERID, ARCHIVED_AT FROM USERS WHERE STUDENTID = ? AND USERTYPE = "student"',
                     [student.student_id]
                 );
 
                 if (existing && !options.updateExisting) {
-                    // Skip if exists and not updating
-                    continue;
+                    // If student is archived, unarchive it; otherwise skip
+                    if (existing.ARCHIVED_AT) {
+                        await executeQuery(
+                            `UPDATE USERS SET 
+                             FIRSTNAME = ?, LASTNAME = ?, EMAIL = ?, YEARLEVEL = ?, DEPARTMENT = ?, STATUS = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
+                             WHERE USERID = ?`,
+                            [student.first_name, student.last_name, student.email || null,
+                             student.year_level, student.department, student.status, existing.USERID]
+                        );
+                        results.updated++;
+                    } else {
+                        // Skip if exists and not updating
+                        continue;
+                    }
                 }
 
                 if (existing && options.updateExisting) {
-                    // Update existing student
+                    // Update existing student (including unarchiving if needed)
                     await executeQuery(
                         `UPDATE USERS SET 
-                         FIRSTNAME = ?, LASTNAME = ?, EMAIL = ?, YEARLEVEL = ?, DEPARTMENT = ?, STATUS = ?, UPDATED_AT = CURRENT_TIMESTAMP
+                         FIRSTNAME = ?, LASTNAME = ?, EMAIL = ?, YEARLEVEL = ?, DEPARTMENT = ?, STATUS = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
                          WHERE USERID = ?`,
                         [student.first_name, student.last_name, student.email || null,
                          student.year_level, student.department, student.status, existing.USERID]
                     );
                     results.updated++;
-                } else {
+                } else if (!existing) {
                     // Create new student
                     await executeQuery(
                         `INSERT INTO USERS (USERID, USERTYPE, STUDENTID, FIRSTNAME, LASTNAME, EMAIL, YEARLEVEL, DEPARTMENT, STATUS)
@@ -281,27 +311,38 @@ async function importRooms(rooms, results, options) {
         
         for (const room of batch) {
             try {
-                // Check if room exists by room number
+                // Check if room exists by room number (including archived)
                 const existing = await getSingleResult(
-                    'SELECT ROOMID FROM ROOMS WHERE ROOMNUMBER = ?',
+                    'SELECT ROOMID, ARCHIVED_AT FROM ROOMS WHERE ROOMNUMBER = ?',
                     [room.room_number]
                 );
 
                 if (existing && !options.updateExisting) {
-                    // Skip if exists and not updating
-                    continue;
+                    // If room is archived, unarchive it; otherwise skip
+                    if (existing.ARCHIVED_AT) {
+                        await executeQuery(
+                            `UPDATE ROOMS SET 
+                             ROOMNAME = ?, BUILDING = ?, CAPACITY = ?, STATUS = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
+                             WHERE ROOMID = ?`,
+                            [room.room_name, room.building, room.capacity, room.status, existing.ROOMID]
+                        );
+                        results.updated++;
+                    } else {
+                        // Skip if exists and not updating
+                        continue;
+                    }
                 }
 
                 if (existing && options.updateExisting) {
-                    // Update existing room
+                    // Update existing room (including unarchiving if needed)
                     await executeQuery(
                         `UPDATE ROOMS SET 
-                         ROOMNAME = ?, BUILDING = ?, CAPACITY = ?, STATUS = ?, UPDATED_AT = CURRENT_TIMESTAMP
+                         ROOMNAME = ?, BUILDING = ?, CAPACITY = ?, STATUS = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
                          WHERE ROOMID = ?`,
                         [room.room_name, room.building, room.capacity, room.status, existing.ROOMID]
                     );
                     results.updated++;
-                } else {
+                } else if (!existing) {
                     // Create new room
                     await executeQuery(
                         `INSERT INTO ROOMS (ROOMID, ROOMNUMBER, ROOMNAME, BUILDING, CAPACITY, STATUS)
@@ -368,27 +409,38 @@ async function importSubjects(subjects, results, options) {
                 console.log(`✅ Found instructor ${instructorId} for subject ${subject.code}`);
             }
 
-            // Check if subject exists by code, semester, academic year, description AND instructor (to differentiate multi-faculty)
+            // Check if subject exists by code, semester, academic year, description AND instructor (including archived)
             const existing = await getSingleResult(
-                'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTCODE = ? AND SEMESTER = ? AND ACADEMICYEAR = ? AND DESCRIPTION <=> ? AND INSTRUCTORID <=> ?',
+                'SELECT SUBJECTID, ARCHIVED_AT FROM SUBJECTS WHERE SUBJECTCODE = ? AND SEMESTER = ? AND ACADEMICYEAR = ? AND DESCRIPTION <=> ? AND INSTRUCTORID <=> ?',
                 [subject.code, subject.semester, subject.academic_year, subject.description, instructorId]
             );
 
             if (existing && !options.updateExisting) {
-                // Skip if exists and not updating
-                continue;
+                // If subject is archived, unarchive it; otherwise skip
+                if (existing.ARCHIVED_AT) {
+                    await executeQuery(
+                        `UPDATE SUBJECTS SET 
+                         SUBJECTNAME = ?, INSTRUCTORID = ?, DESCRIPTION = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
+                         WHERE SUBJECTID = ?`,
+                        [subject.name, instructorId, subject.description, existing.SUBJECTID]
+                    );
+                    results.updated++;
+                } else {
+                    // Skip if exists and not updating
+                    continue;
+                }
             }
 
             if (existing && options.updateExisting) {
-                // Update existing subject
+                // Update existing subject (including unarchiving if needed)
                 await executeQuery(
                     `UPDATE SUBJECTS SET 
-                     SUBJECTNAME = ?, INSTRUCTORID = ?, DESCRIPTION = ?, UPDATED_AT = CURRENT_TIMESTAMP
+                     SUBJECTNAME = ?, INSTRUCTORID = ?, DESCRIPTION = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
                      WHERE SUBJECTID = ?`,
                     [subject.name, instructorId, subject.description, existing.SUBJECTID]
                 );
                 results.updated++;
-            } else {
+            } else if (!existing) {
                 // Create new distinct subject (allow null instructor ID)
                 await executeQuery(
                     `INSERT INTO SUBJECTS (SUBJECTID, SUBJECTCODE, SUBJECTNAME, INSTRUCTORID, SEMESTER, YEAR, ACADEMICYEAR, DESCRIPTION)
@@ -433,17 +485,18 @@ async function importSchedules(schedules, results, options) {
             }
 
             // Resolve subject ID: prefer provided subject_id; fallback to code+term, then code+term+description
+            // Only look up non-archived subjects
             let subject = null;
             if (schedule.subject_id) {
                 subject = await getSingleResult(
-                    'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTID = ?',
+                    'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTID = ? AND ARCHIVED_AT IS NULL',
                     [schedule.subject_id]
                 );
             }
             // Prefer matching by description (section-aware) before broad code+term
             if (!subject && schedule.description) {
                 subject = await getSingleResult(
-                    'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTCODE = ? AND SEMESTER = ? AND ACADEMICYEAR = ? AND DESCRIPTION <=> ?',
+                    'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTCODE = ? AND SEMESTER = ? AND ACADEMICYEAR = ? AND DESCRIPTION <=> ? AND ARCHIVED_AT IS NULL',
                     [schedule.subject_code, schedule.semester, schedule.academic_year, schedule.description]
                 );
             }
@@ -455,19 +508,19 @@ async function importSchedules(schedules, results, options) {
                 continue;
             }
 
-            // Check for existing schedule to avoid duplicates
+            // Check for existing schedule to avoid duplicates (including archived)
             // If ISLAB column isn't present yet, select without it
             let existing;
             try {
                 existing = await getSingleResult(
-                    `SELECT SCHEDULEID, ISLAB FROM CLASSSCHEDULES 
+                    `SELECT SCHEDULEID, ISLAB, ARCHIVED_AT FROM CLASSSCHEDULES 
                      WHERE SUBJECTID = ? AND DAYOFWEEK = ? AND STARTTIME = ? AND ENDTIME = ?`,
                     [subject.SUBJECTID, schedule.day_of_week, schedule.start_time, schedule.end_time]
                 );
             } catch (e) {
                 if (e.code === 'ER_BAD_FIELD_ERROR') {
                     existing = await getSingleResult(
-                        `SELECT SCHEDULEID FROM CLASSSCHEDULES 
+                        `SELECT SCHEDULEID, ARCHIVED_AT FROM CLASSSCHEDULES 
                          WHERE SUBJECTID = ? AND DAYOFWEEK = ? AND STARTTIME = ? AND ENDTIME = ?`,
                         [subject.SUBJECTID, schedule.day_of_week, schedule.start_time, schedule.end_time]
                     );
@@ -477,28 +530,39 @@ async function importSchedules(schedules, results, options) {
             }
 
             if (existing && !options.updateExisting) {
-                // Backfill only the ISLAB flag if it differs, even when not updating
-                const targetLab = schedule.is_lab ? 1 : 0;
-                if (typeof existing.ISLAB === 'number' && existing.ISLAB !== targetLab) {
+                // If schedule is archived, unarchive it; otherwise backfill ISLAB flag
+                if (existing.ARCHIVED_AT) {
                     await executeQuery(
-                        `UPDATE CLASSSCHEDULES SET ISLAB = ?, UPDATED_AT = CURRENT_TIMESTAMP WHERE SCHEDULEID = ?`,
-                        [targetLab, existing.SCHEDULEID]
+                        `UPDATE CLASSSCHEDULES SET 
+                         ROOMID = ?, ISLAB = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
+                         WHERE SCHEDULEID = ?`,
+                        [roomId, schedule.is_lab ? 1 : 0, existing.SCHEDULEID]
                     );
                     results.updated++;
+                } else {
+                    // Backfill only the ISLAB flag if it differs
+                    const targetLab = schedule.is_lab ? 1 : 0;
+                    if (typeof existing.ISLAB === 'number' && existing.ISLAB !== targetLab) {
+                        await executeQuery(
+                            `UPDATE CLASSSCHEDULES SET ISLAB = ?, UPDATED_AT = CURRENT_TIMESTAMP WHERE SCHEDULEID = ?`,
+                            [targetLab, existing.SCHEDULEID]
+                        );
+                        results.updated++;
+                    }
                 }
                 continue;
             }
 
             if (existing && options.updateExisting) {
-                // Update existing schedule
+                // Update existing schedule (including unarchiving if needed)
                 await executeQuery(
                     `UPDATE CLASSSCHEDULES SET 
-                     ROOMID = ?, ISLAB = ?, UPDATED_AT = CURRENT_TIMESTAMP
+                     ROOMID = ?, ISLAB = ?, ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL, UPDATED_AT = CURRENT_TIMESTAMP
                      WHERE SCHEDULEID = ?`,
                     [roomId, schedule.is_lab ? 1 : 0, existing.SCHEDULEID]
                 );
                 results.updated++;
-            } else {
+            } else if (!existing) {
                 // Create new schedule
                 await executeQuery(
                     `INSERT INTO CLASSSCHEDULES (SCHEDULEID, SUBJECTID, ROOMID, DAYOFWEEK, STARTTIME, ENDTIME, ACADEMICYEAR, SEMESTER, ISLAB)
@@ -531,23 +595,32 @@ async function importEnrollments(enrollments, results, options) {
         
         for (const enrollment of batch) {
         try {
-            // Get actual user ID by student ID and subject ID from database
+            // Get actual user ID by student ID and subject ID from database (including archived)
             const user = await getSingleResult(
-                'SELECT USERID FROM USERS WHERE STUDENTID = ? AND USERTYPE = "student"',
+                'SELECT USERID, ARCHIVED_AT FROM USERS WHERE STUDENTID = ? AND USERTYPE = "student"',
                 [enrollment.student_id]
             );
+            
+            // If user is archived, unarchive them
+            if (user && user.ARCHIVED_AT) {
+                await executeQuery(
+                    'UPDATE USERS SET ARCHIVED_AT = NULL, ARCHIVED_BY = NULL, ARCHIVE_REASON = NULL WHERE USERID = ?',
+                    [user.USERID]
+                );
+            }
 
             // Resolve subject: prefer exact SUBJECTID from parsed data, then code+term+description, then code+term
+            // Only look up non-archived subjects
             let subject = null;
             if (enrollment.subject_id) {
                 subject = await getSingleResult(
-                    'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTID = ?',
+                    'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTID = ? AND ARCHIVED_AT IS NULL',
                     [enrollment.subject_id]
                 );
             }
             if (!subject && enrollment.subject_code && enrollment.description) {
                 subject = await getSingleResult(
-                    'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTCODE = ? AND ACADEMICYEAR = ? AND SEMESTER = ? AND DESCRIPTION <=> ?',
+                    'SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTCODE = ? AND ACADEMICYEAR = ? AND SEMESTER = ? AND DESCRIPTION <=> ? AND ARCHIVED_AT IS NULL',
                     [enrollment.subject_code.replace(/\s+/g, '').toUpperCase(), enrollment.academic_year, enrollment.semester, enrollment.description]
                 );
             }

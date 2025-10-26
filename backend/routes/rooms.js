@@ -23,7 +23,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
                 COUNT(CASE WHEN d.STATUS = 'Active' THEN 1 END) as active_devices
             FROM ROOMS r
             LEFT JOIN DEVICES d ON r.ROOMID = d.ROOMID
-            WHERE 1=1
+            WHERE 1=1 AND r.ARCHIVED_AT IS NULL
         `;
         const params = [];
 
@@ -56,7 +56,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
         const rooms = await executeQuery(query, params);
 
         // Get total count
-        let countQuery = 'SELECT COUNT(*) as total FROM ROOMS r WHERE 1=1';
+        let countQuery = 'SELECT COUNT(*) as total FROM ROOMS r WHERE 1=1 AND r.ARCHIVED_AT IS NULL';
         const countParams = [];
 
         if (room_type) {

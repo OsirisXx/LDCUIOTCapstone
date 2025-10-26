@@ -580,7 +580,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
             FROM USERS u
             LEFT JOIN AUTHENTICATIONMETHODS am ON u.USERID = am.USERID 
                 AND am.METHODTYPE = 'Fingerprint'
-            WHERE 1=1
+            WHERE 1=1 AND u.ARCHIVED_AT IS NULL
         `;
         const params = [];
 
@@ -636,7 +636,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
         });
 
         // Get total count for pagination
-        let countQuery = 'SELECT COUNT(DISTINCT u.USERID) as total FROM USERS u LEFT JOIN AUTHENTICATIONMETHODS am ON u.USERID = am.USERID AND am.METHODTYPE = \'Fingerprint\' WHERE 1=1';
+        let countQuery = 'SELECT COUNT(DISTINCT u.USERID) as total FROM USERS u LEFT JOIN AUTHENTICATIONMETHODS am ON u.USERID = am.USERID AND am.METHODTYPE = \'Fingerprint\' WHERE 1=1 AND u.ARCHIVED_AT IS NULL';
         const countParams = [];
 
         if (type) {
@@ -710,9 +710,9 @@ router.post('/', [
     requireAdmin,
     body('first_name').trim().isLength({ min: 1 }),
     body('last_name').trim().isLength({ min: 1 }),
-    body('email').isEmail().normalizeEmail(),
-    body('password').isLength({ min: 6 }),
-    body('user_type').isIn(['student', 'instructor', 'admin']),
+    body('email').optional().isEmail().normalizeEmail(),
+    body('password').optional().isLength({ min: 6 }),
+    body('user_type').isIn(['student', 'instructor', 'admin', 'custodian', 'dean']),
     body('department').optional().trim()
 ], async (req, res) => {
     try {
@@ -749,9 +749,12 @@ router.post('/', [
             return res.status(409).json({ message: 'Student ID or Faculty ID already exists' });
         }
 
-        // Hash password
-        const saltRounds = 10;
-        const password_hash = await bcrypt.hash(password, saltRounds);
+        // Hash password only if provided
+        let password_hash = null;
+        if (password && password.trim() !== '') {
+            const saltRounds = 10;
+            password_hash = await bcrypt.hash(password, saltRounds);
+        }
 
         const { v4: uuidv4 } = require('uuid');
         const userId = uuidv4();
@@ -798,7 +801,17 @@ router.post('/', [
 router.put('/:id/assign-rfid', [
     authenticateToken,
     requireAdmin,
-    body('rfid_tag').isString().isLength({ min: 4, max: 50 })
+    body('rfid_tag').custom((value) => {
+        // Allow empty string or null for deletion
+        if (!value || value === '' || value === null) {
+            return true;
+        }
+        // If not empty, must be 4-50 characters
+        if (typeof value !== 'string' || value.length < 4 || value.length > 50) {
+            throw new Error('RFID tag must be between 4 and 50 characters');
+        }
+        return true;
+    })
 ], async (req, res) => {
     try {
         console.log('RFID assignment request:', { id: req.params.id, rfid_tag: req.body.rfid_tag });
@@ -822,6 +835,32 @@ router.put('/:id/assign-rfid', [
         }
 
         console.log('User found:', existingUser);
+
+        // Handle deletion if rfid_tag is empty
+        if (!rfid_tag || rfid_tag.trim() === '') {
+            console.log('Deleting RFID tag...');
+            await executeQuery(
+                'UPDATE USERS SET RFIDTAG = NULL, UPDATED_AT = CURRENT_TIMESTAMP WHERE USERID = ?',
+                [id]
+            );
+            
+            const updatedUser = await getSingleResult(
+                'SELECT USERID, FIRSTNAME, LASTNAME, STUDENTID, RFIDTAG FROM USERS WHERE USERID = ?',
+                [id]
+            );
+            
+            console.log('RFID deleted successfully:', updatedUser);
+            
+            return res.json({
+                message: 'RFID deleted successfully',
+                user: {
+                    id: updatedUser.USERID,
+                    name: `${updatedUser.FIRSTNAME} ${updatedUser.LASTNAME}`,
+                    student_id: updatedUser.STUDENTID,
+                    rfid_tag: updatedUser.RFIDTAG
+                }
+            });
+        }
 
         // Check if RFID tag is already assigned to another user
         const duplicateRfid = await getSingleResult(
@@ -876,9 +915,18 @@ router.put('/:id', [
     requireAdmin,
     body('first_name').optional().trim().isLength({ min: 1 }),
     body('last_name').optional().trim().isLength({ min: 1 }),
-    body('email').optional().isEmail().normalizeEmail(),
-    body('user_type').optional().isIn(['student', 'instructor', 'admin']),
-    body('status').optional().isIn(['active', 'inactive']),
+    body('email').optional().custom((value) => {
+        if (value === '' || value === null || value === undefined) {
+            return true; // Allow empty/null emails
+        }
+        return require('validator').isEmail(value);
+    }).normalizeEmail(),
+    body('user_type').optional().isIn(['student', 'instructor', 'admin', 'custodian', 'dean']),
+    body('status').optional().custom((value) => {
+        if (!value) return true; // Allow empty/null status
+        const validStatuses = ['active', 'inactive', 'Active', 'Inactive'];
+        return validStatuses.includes(value);
+    }),
     body('rfid_tag').optional().isString().isLength({ min: 4, max: 50 })
 ], async (req, res) => {
     try {
@@ -887,7 +935,11 @@ router.put('/:id', [
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
             console.log('Validation errors:', errors.array());
-            return res.status(400).json({ errors: errors.array() });
+            return res.status(400).json({ 
+                message: 'Validation failed',
+                errors: errors.array(),
+                receivedData: req.body
+            });
         }
 
         const { id } = req.params;
@@ -897,8 +949,15 @@ router.put('/:id', [
         Object.keys(updateFields).forEach(key => {
             if (updateFields[key] === undefined) {
                 delete updateFields[key];
-            } else if ((key === 'student_id' || key === 'employee_id') && updateFields[key] === '') {
+            } else if ((key === 'student_id' || key === 'faculty_id') && updateFields[key] === '') {
                 updateFields[key] = null;
+            } else if (key === 'status') {
+                // Normalize status values to match database
+                if (updateFields[key] === 'active') {
+                    updateFields[key] = 'Active';
+                } else if (updateFields[key] === 'inactive') {
+                    updateFields[key] = 'Inactive';
+                }
             }
         });
 
@@ -938,6 +997,7 @@ router.put('/:id', [
         const fieldMap = {
             first_name: 'FIRSTNAME',
             last_name: 'LASTNAME',
+            email: 'EMAIL',
             user_type: 'USERTYPE',
             year_level: 'YEARLEVEL',
             department: 'DEPARTMENT',
@@ -1008,7 +1068,7 @@ router.get('/by-type/:type', authenticateToken, requireAdmin, async (req, res) =
     try {
         const { type } = req.params;
         
-        if (!['student', 'instructor', 'admin'].includes(type)) {
+        if (!['student', 'instructor', 'admin', 'custodian', 'dean'].includes(type)) {
             return res.status(400).json({ message: 'Invalid user type' });
         }
 

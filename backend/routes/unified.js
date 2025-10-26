@@ -52,19 +52,30 @@ router.get('/data', authenticateToken, requireInstructor, async (req, res) => {
 
         // Get rooms with their schedules and subjects
         const roomsData = await executeQuery(`
-            SELECT DISTINCT
+            SELECT 
                 r.ROOMID,
                 r.ROOMNUMBER,
                 r.ROOMNAME,
                 r.BUILDING,
                 r.CAPACITY,
                 r.STATUS,
-                COUNT(DISTINCT cs.SCHEDULEID) as schedule_count,
-                COUNT(DISTINCT s.SUBJECTID) as subject_count
+                COALESCE(schedule_counts.schedule_count, 0) as schedule_count,
+                COALESCE(subject_counts.subject_count, 0) as subject_count
             FROM ROOMS r
-            LEFT JOIN CLASSSCHEDULES cs ON r.ROOMID = cs.ROOMID
-            LEFT JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID ${whereClause.replace('WHERE 1=1', 'AND 1=1')}
-            GROUP BY r.ROOMID, r.ROOMNUMBER, r.ROOMNAME, r.BUILDING, r.CAPACITY, r.STATUS
+            LEFT JOIN (
+                SELECT cs.ROOMID, COUNT(DISTINCT cs.SCHEDULEID) as schedule_count
+                FROM CLASSSCHEDULES cs
+                WHERE cs.ARCHIVED_AT IS NULL
+                GROUP BY cs.ROOMID
+            ) schedule_counts ON r.ROOMID = schedule_counts.ROOMID
+            LEFT JOIN (
+                SELECT cs.ROOMID, COUNT(DISTINCT s.SUBJECTID) as subject_count
+                FROM CLASSSCHEDULES cs
+                JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID AND s.ARCHIVED_AT IS NULL ${whereClause.replace('WHERE 1=1', 'AND 1=1')}
+                WHERE cs.ARCHIVED_AT IS NULL
+                GROUP BY cs.ROOMID
+            ) subject_counts ON r.ROOMID = subject_counts.ROOMID
+            WHERE r.ARCHIVED_AT IS NULL
             ORDER BY r.BUILDING, r.ROOMNUMBER
         `, params);
 
@@ -80,15 +91,30 @@ router.get('/data', authenticateToken, requireInstructor, async (req, res) => {
                 s.ACADEMICYEAR,
                 s.DESCRIPTION,
                 CONCAT(u.FIRSTNAME, ' ', u.LASTNAME) as instructor_name,
-                COUNT(DISTINCT cs.SCHEDULEID) as schedule_count,
-                COUNT(DISTINCT cs.ROOMID) as room_count,
-                COUNT(DISTINCT CASE WHEN se.ACADEMICYEAR = s.ACADEMICYEAR AND se.SEMESTER = s.SEMESTER THEN se.USERID END) as enrolled_students
+                COALESCE(schedule_counts.schedule_count, 0) as schedule_count,
+                COALESCE(schedule_counts.room_count, 0) as room_count,
+                COALESCE(enrollment_counts.enrolled_students, 0) as enrolled_students
             FROM SUBJECTS s
             LEFT JOIN USERS u ON s.INSTRUCTORID = u.USERID
-            LEFT JOIN CLASSSCHEDULES cs ON s.SUBJECTID = cs.SUBJECTID
-            LEFT JOIN SUBJECTENROLLMENT se ON s.SUBJECTID = se.SUBJECTID AND se.STATUS = 'enrolled'
-            ${whereClause}
-            GROUP BY s.SUBJECTID, s.SUBJECTCODE, s.SUBJECTNAME, s.INSTRUCTORID, s.SEMESTER, s.YEAR, s.ACADEMICYEAR, s.DESCRIPTION, instructor_name
+            LEFT JOIN (
+                SELECT 
+                    cs.SUBJECTID,
+                    COUNT(DISTINCT cs.SCHEDULEID) as schedule_count,
+                    COUNT(DISTINCT cs.ROOMID) as room_count
+                FROM CLASSSCHEDULES cs
+                WHERE cs.ARCHIVED_AT IS NULL
+                GROUP BY cs.SUBJECTID
+            ) schedule_counts ON s.SUBJECTID = schedule_counts.SUBJECTID
+            LEFT JOIN (
+                SELECT 
+                    se.SUBJECTID,
+                    COUNT(DISTINCT se.USERID) as enrolled_students
+                FROM SUBJECTENROLLMENT se
+                WHERE se.STATUS = 'enrolled'
+                GROUP BY se.SUBJECTID
+            ) enrollment_counts ON s.SUBJECTID = enrollment_counts.SUBJECTID
+            ${whereClause.replace('WHERE 1=1', 'WHERE 1=1 AND s.ARCHIVED_AT IS NULL')}
+            GROUP BY s.SUBJECTID, s.SUBJECTCODE, s.SUBJECTNAME, s.INSTRUCTORID, s.SEMESTER, s.YEAR, s.ACADEMICYEAR, s.DESCRIPTION, instructor_name, schedule_counts.schedule_count, schedule_counts.room_count, enrollment_counts.enrolled_students
             ORDER BY s.SUBJECTCODE
         `, params);
 
@@ -116,7 +142,7 @@ router.get('/data', authenticateToken, requireInstructor, async (req, res) => {
             LEFT JOIN USERS u ON s.INSTRUCTORID = u.USERID
             JOIN ROOMS r ON cs.ROOMID = r.ROOMID
             LEFT JOIN SUBJECTENROLLMENT se ON s.SUBJECTID = se.SUBJECTID AND se.STATUS = 'enrolled'
-            ${whereClause.replace('WHERE 1=1', 'WHERE 1=1 AND s.SUBJECTID IS NOT NULL')}
+            ${whereClause.replace('WHERE 1=1', 'WHERE 1=1 AND s.SUBJECTID IS NOT NULL AND cs.ARCHIVED_AT IS NULL AND s.ARCHIVED_AT IS NULL AND r.ARCHIVED_AT IS NULL')}
             GROUP BY cs.SCHEDULEID, cs.SUBJECTID, cs.ROOMID, cs.DAYOFWEEK, cs.STARTTIME, cs.ENDTIME, cs.ACADEMICYEAR, cs.SEMESTER, s.SUBJECTCODE, s.SUBJECTNAME, instructor_name, r.ROOMNUMBER, r.ROOMNAME, r.BUILDING
             ORDER BY cs.DAYOFWEEK, cs.STARTTIME
         `, params);
@@ -139,7 +165,7 @@ router.get('/data', authenticateToken, requireInstructor, async (req, res) => {
                 JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
                 LEFT JOIN USERS u ON s.INSTRUCTORID = u.USERID
                 LEFT JOIN SUBJECTENROLLMENT se ON s.SUBJECTID = se.SUBJECTID AND se.STATUS = 'enrolled'
-                WHERE cs.ROOMID = ? ${academic_year ? 'AND s.ACADEMICYEAR = ?' : ''} ${semester ? 'AND s.SEMESTER = ?' : ''}
+                WHERE cs.ROOMID = ? AND cs.ARCHIVED_AT IS NULL AND s.ARCHIVED_AT IS NULL ${academic_year ? 'AND s.ACADEMICYEAR = ?' : ''} ${semester ? 'AND s.SEMESTER = ?' : ''}
                 GROUP BY cs.SCHEDULEID, cs.DAYOFWEEK, cs.STARTTIME, cs.ENDTIME, s.SUBJECTCODE, s.SUBJECTNAME, instructor_name
                 ORDER BY cs.DAYOFWEEK, cs.STARTTIME
             `, [room.ROOMID, ...(academic_year ? [academic_year] : []), ...(semester ? [semester] : [])]);
@@ -161,7 +187,7 @@ router.get('/data', authenticateToken, requireInstructor, async (req, res) => {
                     r.BUILDING
                 FROM CLASSSCHEDULES cs
                 JOIN ROOMS r ON cs.ROOMID = r.ROOMID
-                WHERE cs.SUBJECTID = ?
+                WHERE cs.SUBJECTID = ? AND cs.ARCHIVED_AT IS NULL AND r.ARCHIVED_AT IS NULL
                 ORDER BY cs.DAYOFWEEK, cs.STARTTIME
             `, [subject.SUBJECTID]);
             
@@ -283,6 +309,12 @@ router.get('/subject/:id', authenticateToken, requireInstructor, async (req, res
     try {
         const { id } = req.params;
 
+        // Check if optional column exists to avoid selecting non-existent fields
+        const isLabCol = await getSingleResult(
+            `SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'CLASSSCHEDULES' AND COLUMN_NAME = 'ISLAB'`
+        );
+        const selectIsLab = (isLabCol && isLabCol.cnt > 0) ? 'COALESCE(cs.ISLAB,0) as ISLAB' : '0 as ISLAB';
+
         // Get subject details
         const subject = await getSingleResult(`
             SELECT 
@@ -321,6 +353,7 @@ router.get('/subject/:id', authenticateToken, requireInstructor, async (req, res
                 cs.DAYOFWEEK,
                 cs.STARTTIME,
                 cs.ENDTIME,
+                ${selectIsLab},
                 r.ROOMNUMBER,
                 r.ROOMNAME,
                 r.BUILDING

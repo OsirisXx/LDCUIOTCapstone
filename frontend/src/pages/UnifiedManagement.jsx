@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   BuildingOfficeIcon,
   BookOpenIcon,
@@ -35,14 +36,17 @@ function UnifiedManagement() {
   const [selectedSemester, setSelectedSemester] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [showModal, setShowModal] = useState(false);
+  const [modalAnimation, setModalAnimation] = useState('hidden');
   const [modalData, setModalData] = useState(null);
   const [modalType, setModalType] = useState(''); // 'room', 'subject', 'schedule'
   const [expandedCards, setExpandedCards] = useState(new Set());
+  const [studentSearchTerm, setStudentSearchTerm] = useState('');
   
   // Bulk operations states
   const [selectedItems, setSelectedItems] = useState(new Set());
   const [selectAll, setSelectAll] = useState(false);
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+  const [bulkDeleteModalAnimation, setBulkDeleteModalAnimation] = useState('hidden');
   const [bulkDeleteType, setBulkDeleteType] = useState('');
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   
@@ -56,6 +60,7 @@ function UnifiedManagement() {
   const [importResults, setImportResults] = useState(null);
   const [showPreview, setShowPreview] = useState(false);
   const [showDataModal, setShowDataModal] = useState(false);
+  const [dataModalAnimation, setDataModalAnimation] = useState('hidden');
   const [activeTab, setActiveTab] = useState('subjects');
   const [importOptions, setImportOptions] = useState({
     updateExisting: false,
@@ -67,12 +72,13 @@ function UnifiedManagement() {
   
   // Delete functionality states
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteModalAnimation, setDeleteModalAnimation] = useState('hidden');
   const [deleteItem, setDeleteItem] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [modalAnimation, setModalAnimation] = useState('hidden');
   
   // TEMPORARY: Schedule editing states
   const [showEditModal, setShowEditModal] = useState(false);
+  const [editModalAnimation, setEditModalAnimation] = useState('hidden');
   const [editingSchedule, setEditingSchedule] = useState(null);
   const [editFormData, setEditFormData] = useState({
     subject_id: '',
@@ -159,6 +165,7 @@ function UnifiedManagement() {
       setModalData(response.data);
       setModalType(type);
       setShowModal(true);
+      setTimeout(() => setModalAnimation('visible'), 10);
     } catch (error) {
       console.error('Error fetching detailed data:', error);
       toast.error('Failed to load detailed information');
@@ -167,10 +174,8 @@ function UnifiedManagement() {
 
   const toggleCardExpansion = (id) => {
     setExpandedCards(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(id)) {
-        newSet.delete(id);
-      } else {
+      const newSet = new Set();
+      if (!prev.has(id)) {
         newSet.add(id);
       }
       return newSet;
@@ -211,7 +216,7 @@ function UnifiedManagement() {
       confirmText
     });
     setShowDeleteModal(true);
-    setTimeout(() => setModalAnimation('visible'), 10);
+    setTimeout(() => setDeleteModalAnimation('visible'), 10);
   };
 
   const confirmDelete = async () => {
@@ -279,7 +284,7 @@ function UnifiedManagement() {
       }
     } finally {
       setIsDeleting(false);
-      setModalAnimation('hidden');
+      setDeleteModalAnimation('hidden');
       setTimeout(() => {
         setShowDeleteModal(false);
         setDeleteItem(null);
@@ -345,7 +350,8 @@ function UnifiedManagement() {
       case 'subjects':
         return item.SUBJECTID;
       case 'schedules':
-        return item.SCHEDULEID;
+        // Create unique key for schedule groups
+        return `schedule-${item.subject_code}-${item.schedules[0]?.SCHEDULEID || 'default'}`;
       default:
         return item.id;
     }
@@ -356,7 +362,7 @@ function UnifiedManagement() {
     
     setBulkDeleteType(sortBy);
     setShowBulkDeleteModal(true);
-    setTimeout(() => setModalAnimation('visible'), 10);
+    setTimeout(() => setBulkDeleteModalAnimation('visible'), 10);
   };
 
   const confirmBulkDelete = async () => {
@@ -427,7 +433,7 @@ function UnifiedManagement() {
       }
     } finally {
       setIsBulkDeleting(false);
-      setModalAnimation('hidden');
+      setBulkDeleteModalAnimation('hidden');
       setTimeout(() => {
         setShowBulkDeleteModal(false);
         setBulkDeleteType('');
@@ -557,6 +563,7 @@ function UnifiedManagement() {
   const handleDeleteClick = (item, type) => {
     setDeleteItem({ ...item, type });
     setShowDeleteModal(true);
+    setTimeout(() => setDeleteModalAnimation('visible'), 10);
   };
 
   const handleDeleteConfirm = async () => {
@@ -596,8 +603,11 @@ function UnifiedManagement() {
       await fetchData();
       
       // Close modal
-      setShowDeleteModal(false);
-      setDeleteItem(null);
+      setDeleteModalAnimation('hidden');
+      setTimeout(() => {
+        setShowDeleteModal(false);
+        setDeleteItem(null);
+      }, 300);
 
     } catch (error) {
       console.error('Delete error:', error);
@@ -612,8 +622,11 @@ function UnifiedManagement() {
   };
 
   const handleDeleteCancel = () => {
-    setShowDeleteModal(false);
-    setDeleteItem(null);
+    setDeleteModalAnimation('hidden');
+    setTimeout(() => {
+      setShowDeleteModal(false);
+      setDeleteItem(null);
+    }, 300);
   };
 
   // TEMPORARY: Schedule editing functions
@@ -629,6 +642,7 @@ function UnifiedManagement() {
       semester: schedule.SEMESTER || ''
     });
     setShowEditModal(true);
+    setTimeout(() => setEditModalAnimation('visible'), 10);
   };
 
   const handleEditSubmit = async (e) => {
@@ -657,8 +671,11 @@ function UnifiedManagement() {
       await fetchData();
       
       // Close modal
-      setShowEditModal(false);
-      setEditingSchedule(null);
+      setEditModalAnimation('hidden');
+      setTimeout(() => {
+        setShowEditModal(false);
+        setEditingSchedule(null);
+      }, 300);
       setEditFormData({
         subject_id: '',
         room_id: '',
@@ -687,6 +704,86 @@ function UnifiedManagement() {
     return `${displayHour}:${minutes} ${ampm}`;
   };
 
+  // Collapsible container with measured height for smooth open/close
+  const Collapsible = ({ isOpen, children }) => {
+    const containerRef = useRef(null);
+    const [height, setHeight] = useState('0px');
+
+    useEffect(() => {
+      const el = containerRef.current;
+      if (!el) return;
+
+      if (isOpen) {
+        // From current height to content height
+        setHeight(`${el.scrollHeight}px`);
+        const onEnd = () => {
+          el.removeEventListener('transitionend', onEnd);
+          setHeight('auto');
+        };
+        el.addEventListener('transitionend', onEnd);
+      } else {
+        // If currently auto, snap to pixel height first
+        const current = el.scrollHeight;
+        setHeight(`${current}px`);
+        // Wait for browser to paint, then collapse to zero
+        setTimeout(() => {
+          requestAnimationFrame(() => setHeight('0px'));
+        }, 10);
+      }
+    }, [isOpen]);
+
+    useEffect(() => {
+      const el = containerRef.current;
+      if (!el) return;
+      el.style.overflow = 'hidden';
+    }, []);
+
+    return (
+      <div
+        ref={containerRef}
+        style={{ height, transition: 'height 300ms ease-in-out, opacity 300ms ease-in-out', opacity: isOpen ? 1 : 0, willChange: 'height' }}
+      >
+        <div className="pt-2">
+          {children}
+        </div>
+      </div>
+    );
+  };
+
+  // Helper function to group schedules by subject
+  const groupSchedulesBySubject = (schedulesList) => {
+    const groups = {};
+    schedulesList.forEach(schedule => {
+      // Group by subject code only (which includes section like BSIT-4102-BSIT4-1)
+      const key = schedule.SUBJECTCODE;
+      if (!groups[key]) {
+        groups[key] = {
+          subject_code: schedule.SUBJECTCODE,
+          subject_name: schedule.SUBJECTNAME,
+          instructor_name: schedule.instructor_name,
+          academic_year: schedule.ACADEMICYEAR,
+          semester: schedule.SEMESTER,
+          schedules: []
+        };
+      }
+      groups[key].schedules.push(schedule);
+    });
+    return Object.values(groups);
+  };
+
+  const filterStudents = (students, searchTerm) => {
+    if (!Array.isArray(students) || !searchTerm) return students;
+    
+    const searchLower = searchTerm.toLowerCase();
+    return students.filter(student => 
+      student.FIRSTNAME?.toLowerCase().includes(searchLower) ||
+      student.LASTNAME?.toLowerCase().includes(searchLower) ||
+      student.STUDENTID?.toLowerCase().includes(searchLower) ||
+      student.DEPARTMENT?.toLowerCase().includes(searchLower) ||
+      student.YEARLEVEL?.toString().includes(searchLower)
+    );
+  };
+
   const filterData = (items, searchTerm) => {
     if (!Array.isArray(items)) return [];
     if (!searchTerm) return items;
@@ -709,11 +806,13 @@ function UnifiedManagement() {
           );
         case 'schedules':
           return (
-            item.SUBJECTCODE?.toLowerCase().includes(searchLower) ||
-            item.SUBJECTNAME?.toLowerCase().includes(searchLower) ||
+            item.subject_code?.toLowerCase().includes(searchLower) ||
+            item.subject_name?.toLowerCase().includes(searchLower) ||
             item.instructor_name?.toLowerCase().includes(searchLower) ||
-            item.ROOMNUMBER?.toLowerCase().includes(searchLower) ||
-            item.DAYOFWEEK?.toLowerCase().includes(searchLower)
+            item.schedules?.some(schedule => 
+              schedule.ROOMNUMBER?.toLowerCase().includes(searchLower) ||
+              schedule.DAYOFWEEK?.toLowerCase().includes(searchLower)
+            )
           );
         default:
           return true;
@@ -730,13 +829,37 @@ function UnifiedManagement() {
       case 'subjects':
         return data.subjects.data || [];
       case 'schedules':
-        return data.schedules.data || [];
+        // Group schedules by subject for unified display
+        const schedules = data.schedules.data || [];
+        return groupSchedulesBySubject(schedules);
       default:
         return [];
     }
   };
 
   const filteredData = filterData(getCurrentData(), searchTerm);
+
+  // Distribute items into fixed columns so expanding one card only affects its column
+  const distributeIntoColumns = (items, numCols) => {
+    const cols = Array.from({ length: numCols }, () => []);
+    items.forEach((item, index) => {
+      cols[index % numCols].push(item);
+    });
+    return cols;
+  };
+
+  const renderItem = (item) => {
+    switch (sortBy) {
+      case 'rooms':
+        return renderRoomCard(item);
+      case 'subjects':
+        return renderSubjectCard(item);
+      case 'schedules':
+        return renderScheduleCard(item);
+      default:
+        return null;
+    }
+  };
 
   const getSortIcon = (type) => {
     switch (type) {
@@ -756,7 +879,7 @@ function UnifiedManagement() {
     const schedules = data?.rooms?.schedules?.[room.ROOMID] || [];
 
     return (
-      <div key={room.ROOMID} className="bg-white rounded-xl shadow border-2 border-gray-300 p-6 hover:shadow-md hover:border-gray-400 transition">
+      <div key={room.ROOMID} className="bg-white rounded-xl shadow border-2 border-gray-300 p-6 hover:shadow-md hover:border-gray-400 transition min-h-[180px] overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 mb-4">
           <div className="flex items-start space-x-3">
             <input
@@ -842,7 +965,7 @@ function UnifiedManagement() {
     const schedules = data?.subjects?.schedules?.[subject.SUBJECTID] || [];
 
     return (
-      <div key={subject.SUBJECTID} className="bg-white rounded-xl shadow border-2 border-gray-300 p-6 hover:shadow-md hover:border-gray-400 transition">
+      <div key={subject.SUBJECTID} className="bg-white rounded-xl shadow border-2 border-gray-300 p-6 hover:shadow-md hover:border-gray-400 transition min-h-[180px] overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 mb-4">
           <div className="flex items-start space-x-3">
             <input
@@ -925,53 +1048,39 @@ function UnifiedManagement() {
     );
   };
 
-  const renderScheduleCard = (schedule) => {
-    const isExpanded = expandedCards.has(schedule.SCHEDULEID);
+  const renderScheduleCard = (scheduleGroup) => {
+    // Create a unique key for this specific schedule group
+    const uniqueKey = `schedule-${scheduleGroup.subject_code}-${scheduleGroup.schedules[0]?.SCHEDULEID || 'default'}`;
+    const isExpanded = expandedCards.has(uniqueKey);
+    const totalEnrolledStudents = scheduleGroup.schedules.reduce((sum, s) => sum + (s.enrolled_students || 0), 0);
 
     return (
-      <div key={schedule.SCHEDULEID} className="bg-white rounded-xl shadow border-2 border-gray-300 p-6 hover:shadow-md hover:border-gray-400 transition">
+      <div key={scheduleGroup.subject_code} className="bg-white rounded-xl shadow border-2 border-gray-300 p-6 hover:shadow-md hover:border-gray-400 transition min-h-[180px] overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 mb-4">
           <div className="flex items-start space-x-3">
             <input
               type="checkbox"
-              checked={selectedItems.has(schedule.SCHEDULEID)}
-              onChange={() => handleSelectItem(schedule.SCHEDULEID)}
+              checked={selectedItems.has(uniqueKey)}
+              onChange={() => handleSelectItem(uniqueKey)}
               className="mt-1 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
             />
             <div className="text-2xl">📅</div>
             <div>
-              <h3 className="text-lg font-semibold text-gray-900">{schedule.SUBJECTCODE}</h3>
-              <p className="text-sm text-gray-600">{schedule.SUBJECTNAME}</p>
-              <p className="text-xs text-gray-500">{schedule.instructor_name}</p>
+              <h3 className="text-lg font-semibold text-gray-900">{scheduleGroup.subject_code}</h3>
+              <p className="text-sm text-gray-600">{scheduleGroup.subject_name}</p>
+              <p className="text-xs text-gray-500">{scheduleGroup.instructor_name}</p>
             </div>
           </div>
           <div className="flex space-x-2">
             <button
-              onClick={() => toggleCardExpansion(schedule.SCHEDULEID)}
-              className="text-gray-400 hover:text-blue-600 p-1 rounded"
-              title={isExpanded ? "Collapse" : "Expand"}
-            >
-              {isExpanded ? <ChevronUpIcon className="h-4 w-4" /> : <ChevronDownIcon className="h-4 w-4" />}
-            </button>
-            {/* TEMPORARY: Edit button for schedules */}
-            <button
-              onClick={() => handleEditSchedule(schedule)}
-              className="text-gray-400 hover:text-yellow-600 p-1 rounded"
-              title="Edit Schedule (Temporary)"
-            >
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-              </svg>
-            </button>
-            <button
-              onClick={() => fetchDetailedData(schedule.SCHEDULEID, 'schedule')}
+              onClick={() => fetchDetailedData(scheduleGroup.schedules[0].SCHEDULEID, 'schedule')}
               className="text-gray-400 hover:text-green-600 p-1 rounded"
               title="View Details"
             >
               <EyeIcon className="h-4 w-4" />
             </button>
             <button
-              onClick={() => handleDelete(schedule, 'schedule')}
+              onClick={() => handleDelete(scheduleGroup.schedules[0], 'schedule')}
               className="text-gray-400 hover:text-red-600 p-1 rounded"
               title="Delete Schedule"
             >
@@ -981,30 +1090,86 @@ function UnifiedManagement() {
         </div>
 
         <div className="space-y-3">
-          <div className="flex items-center text-sm text-gray-700">
-            <ClockIcon className="h-4 w-4 mr-2 text-blue-500" />
-            <span className="font-medium">
-              {schedule.DAYOFWEEK} • {formatTime(schedule.STARTTIME)} - {formatTime(schedule.ENDTIME)}
-            </span>
-            {((schedule.ISLAB === 1) || (schedule.ISLAB === '1') || (schedule.ISLAB === true)) ? (
-              <span className="ml-2 inline-flex items-center rounded-full bg-purple-100 text-purple-800 px-2 py-0.5 text-xs font-medium">LAB</span>
-            ) : (
-              <span className="ml-2 inline-flex items-center rounded-full bg-blue-100 text-blue-800 px-2 py-0.5 text-xs font-medium">LEC</span>
-            )}
+          {/* Summary of schedules */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center text-sm text-gray-600">
+              <ClockIcon className="h-4 w-4 mr-2 text-blue-500" />
+              <span>{scheduleGroup.schedules.length} schedule{scheduleGroup.schedules.length !== 1 ? 's' : ''}</span>
+            </div>
+            <button
+              onClick={() => toggleCardExpansion(uniqueKey)}
+              className={`inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium transition-all duration-300 ease-in-out transform hover:scale-105 ${
+                isExpanded 
+                  ? 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-300' 
+                  : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 shadow-sm'
+              }`}
+            >
+              <span className="mr-2">
+                {isExpanded ? 'Hide Schedules' : 'Show Schedules'}
+              </span>
+              <div className={`transition-transform duration-300 ${isExpanded ? 'rotate-180' : 'rotate-0'}`}>
+                <ChevronDownIcon className="h-4 w-4" />
+              </div>
+            </button>
           </div>
 
-          <div className="flex items-center text-sm text-gray-600">
-            <MapPinIcon className="h-4 w-4 mr-2" />
-            <span>{schedule.ROOMNUMBER} - {schedule.ROOMNAME} ({schedule.BUILDING})</span>
-          </div>
+          {/* Collapsible detailed schedule list with measured height */}
+          <Collapsible isOpen={isExpanded}>
+            <div className="space-y-2 pt-2">
+              {scheduleGroup.schedules.map((schedule, index) => (
+                <div 
+                  key={schedule.SCHEDULEID} 
+                  className="bg-gray-50 rounded-lg p-3 border border-gray-200 transition-all duration-150 ease-in-out"
+                  style={{ transitionDelay: isExpanded ? `${index * 40}ms` : '0ms' }}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center text-sm text-gray-700">
+                      <ClockIcon className="h-4 w-4 mr-2 text-blue-500" />
+                      <span className="font-medium">
+                        {schedule.DAYOFWEEK} • {formatTime(schedule.STARTTIME)} - {formatTime(schedule.ENDTIME)}
+                      </span>
+                      {((schedule.ISLAB === 1) || (schedule.ISLAB === '1') || (schedule.ISLAB === true)) ? (
+                        <span className="ml-2 inline-flex items-center rounded-full bg-purple-100 text-purple-800 px-2 py-0.5 text-xs font-medium">LAB</span>
+                      ) : (
+                        <span className="ml-2 inline-flex items-center rounded-full bg-blue-100 text-blue-800 px-2 py-0.5 text-xs font-medium">LEC</span>
+                      )}
+                    </div>
+                    <div className="flex space-x-1">
+                      <button
+                        onClick={() => handleEditSchedule(schedule)}
+                        className="text-gray-400 hover:text-yellow-600 p-1 rounded transition-colors duration-150"
+                        title="Edit Schedule"
+                      >
+                        <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => handleDelete(schedule, 'schedule')}
+                        className="text-gray-400 hover:text-red-600 p-1 rounded transition-colors duration-150"
+                        title="Delete Schedule"
+                      >
+                        <TrashIcon className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center text-sm text-gray-600 mt-2">
+                    <MapPinIcon className="h-4 w-4 mr-2" />
+                    <span>{schedule.ROOMNUMBER} - {schedule.ROOMNAME} ({schedule.BUILDING})</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Collapsible>
 
           <div className="flex items-center justify-between text-sm text-gray-600">
             <div className="flex items-center">
               <UsersIcon className="h-4 w-4 mr-1" />
-              <span>{schedule.enrolled_students || 0} students enrolled</span>
+              <span>{totalEnrolledStudents} students enrolled</span>
             </div>
             <div className="text-xs text-gray-500">
-              {schedule.SEMESTER} • {schedule.ACADEMICYEAR}
+              {scheduleGroup.semester} • {scheduleGroup.academic_year}
             </div>
           </div>
 
@@ -1012,10 +1177,16 @@ function UnifiedManagement() {
             <div className="mt-4 pt-4 border-t border-gray-200">
               <div className="grid grid-cols-2 gap-4 text-xs text-gray-600">
                 <div>
-                  <span className="font-medium">Academic Year:</span> {schedule.ACADEMICYEAR}
+                  <span className="font-medium">Academic Year:</span> {scheduleGroup.academic_year}
                 </div>
                 <div>
-                  <span className="font-medium">Semester:</span> {schedule.SEMESTER}
+                  <span className="font-medium">Semester:</span> {scheduleGroup.semester}
+                </div>
+                <div>
+                  <span className="font-medium">Total Schedules:</span> {scheduleGroup.schedules.length}
+                </div>
+                <div>
+                  <span className="font-medium">Instructor:</span> {scheduleGroup.instructor_name}
                 </div>
               </div>
             </div>
@@ -1117,22 +1288,41 @@ function UnifiedManagement() {
               </div>
 
               <div>
-                <h3 className="text-lg font-semibold text-gray-900 mb-3">
-                  Students ({modalData.students?.length || 0})
-                </h3>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    Students ({modalData.students?.length || 0})
+                  </h3>
+                  {modalData.students?.length > 0 && (
+                    <div className="relative w-64">
+                      <MagnifyingGlassIcon className="h-4 w-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+                      <input
+                        type="text"
+                        placeholder="Search students..."
+                        value={studentSearchTerm}
+                        onChange={(e) => setStudentSearchTerm(e.target.value)}
+                        className="w-full pl-10 pr-3 py-1 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                  )}
+                </div>
                 <div className="space-y-3 max-h-64 overflow-y-auto">
-                  {modalData.students?.map((student) => (
+                  {filterStudents(modalData.students, studentSearchTerm)?.map((student) => (
                     <div key={student.USERID} className="bg-gray-50 rounded p-3">
                       <div className="font-medium text-gray-900">
                         {student.FIRSTNAME} {student.LASTNAME}
                       </div>
                       <div className="text-sm text-gray-600">{student.STUDENTID}</div>
                       <div className="text-xs text-gray-500">
-                        Year {student.YEARLEVEL} • {student.DEPARTMENT}
+                        {student.YEARLEVEL ? `Year ${student.YEARLEVEL}` : 'Graduate Program'} • {student.DEPARTMENT}
                       </div>
                       <div className="text-xs text-gray-500">{student.EMAIL}</div>
                     </div>
                   ))}
+                  {filterStudents(modalData.students, studentSearchTerm)?.length === 0 && studentSearchTerm && (
+                    <div className="text-center py-4 text-gray-500">
+                      No students found matching "{studentSearchTerm}"
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1145,7 +1335,14 @@ function UnifiedManagement() {
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   {modalData.schedules.map((schedule) => (
                     <div key={schedule.SCHEDULEID} className="bg-gray-50 rounded p-3">
-                      <div className="font-medium text-gray-900">{schedule.DAYOFWEEK}</div>
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="font-medium text-gray-900">{schedule.DAYOFWEEK}</div>
+                        {((schedule.ISLAB === 1) || (schedule.ISLAB === '1') || (schedule.ISLAB === true)) ? (
+                          <span className="inline-flex items-center rounded-full bg-purple-100 text-purple-800 px-2 py-0.5 text-xs font-medium">LAB</span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full bg-blue-100 text-blue-800 px-2 py-0.5 text-xs font-medium">LEC</span>
+                        )}
+                      </div>
                       <div className="text-sm text-gray-600">
                         {formatTime(schedule.STARTTIME)} - {formatTime(schedule.ENDTIME)}
                       </div>
@@ -1206,7 +1403,7 @@ function UnifiedManagement() {
                       </div>
                       <div className="text-sm text-gray-600">{student.STUDENTID}</div>
                       <div className="text-xs text-gray-500">
-                        Year {student.YEARLEVEL} • {student.DEPARTMENT}
+                        {student.YEARLEVEL ? `Year ${student.YEARLEVEL}` : 'Graduate Program'} • {student.DEPARTMENT}
                       </div>
                     </div>
                   ))}
@@ -1406,6 +1603,7 @@ function UnifiedManagement() {
                       onClick={() => {
                         setActiveTab('subjects');
                         setShowDataModal(true);
+                        setTimeout(() => setDataModalAnimation('visible'), 10);
                       }}
                       className="inline-flex items-center px-4 py-2 border border-blue-300 rounded-md text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100"
                     >
@@ -1629,19 +1827,19 @@ function UnifiedManagement() {
           </div>
         </div>
       )}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {Array.isArray(filteredData) ? filteredData.map((item) => {
-          switch (sortBy) {
-            case 'rooms':
-              return renderRoomCard(item);
-            case 'subjects':
-              return renderSubjectCard(item);
-            case 'schedules':
-              return renderScheduleCard(item);
-            default:
-              return null;
-          }
-        }) : []}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 items-start content-start">
+        {(() => {
+          const cols = distributeIntoColumns(Array.isArray(filteredData) ? filteredData : [], 3);
+          return cols.map((colItems, colIdx) => (
+            <div key={`col-${colIdx}`} className="space-y-6">
+              {colItems.map((item, idx) => (
+                <React.Fragment key={`item-${colIdx}-${idx}`}>
+                  {renderItem(item)}
+                </React.Fragment>
+              ))}
+            </div>
+          ));
+        })()}
       </div>
 
       {filteredData.length === 0 && !loading && (
@@ -1657,18 +1855,39 @@ function UnifiedManagement() {
       )}
 
       {/* Detail Modal */}
-      {showModal && modalData && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-10 mx-auto p-6 border max-w-6xl shadow-lg rounded-md bg-white my-8">
+      {showModal && modalData && createPortal(
+        <div 
+          className={`fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60] transition-opacity duration-300 ease-in-out ${
+            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: '100vw',
+            height: '100vh',
+            zIndex: 60
+          }}
+        >
+          <div className={`relative top-10 mx-auto p-6 border max-w-6xl shadow-lg rounded-md bg-white my-8 transition-all duration-300 ease-out ${
+            modalAnimation === 'visible' 
+              ? 'scale-100 opacity-100 translate-y-0' 
+              : 'scale-95 opacity-0 translate-y-4'
+          }`}>
             <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-semibold text-gray-900">
+              <h2 className="text-xl font-semibold text-gray-900">  
                 {modalType.charAt(0).toUpperCase() + modalType.slice(1)} Details
               </h2>
               <button
                 onClick={() => {
-                  setShowModal(false);
-                  setModalData(null);
-                  setModalType('');
+                  setModalAnimation('hidden');
+                  setTimeout(() => {
+                    setShowModal(false);
+                    setModalData(null);
+                    setModalType('');
+                    setStudentSearchTerm('');
+                  }, 300);
                 }}
                 className="text-gray-400 hover:text-gray-600"
               >
@@ -1683,9 +1902,13 @@ function UnifiedManagement() {
             <div className="mt-6 flex justify-end">
               <button
                 onClick={() => {
-                  setShowModal(false);
-                  setModalData(null);
-                  setModalType('');
+                  setModalAnimation('hidden');
+                  setTimeout(() => {
+                    setShowModal(false);
+                    setModalData(null);
+                    setModalType('');
+                    setStudentSearchTerm('');
+                  }, 300);
                 }}
                 className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
@@ -1693,19 +1916,40 @@ function UnifiedManagement() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Data Preview Modal */}
-      {showDataModal && parsedData && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-6xl shadow-lg rounded-md bg-white">
+      {showDataModal && parsedData && createPortal(
+        <div 
+          className={`fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60] transition-opacity duration-300 ease-in-out ${
+            dataModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: '100vw',
+            height: '100vh',
+            zIndex: 60
+          }}
+        >
+          <div className={`relative top-20 mx-auto p-5 border w-11/12 max-w-6xl shadow-lg rounded-md bg-white transition-all duration-300 ease-out ${
+            dataModalAnimation === 'visible' 
+              ? 'scale-100 opacity-100 translate-y-0' 
+              : 'scale-95 opacity-0 translate-y-4'
+          }`}>
             <div className="mt-3">
               {/* Modal Header */}
               <div className="flex justify-between items-center mb-6">
                 <h3 className="text-lg font-semibold text-gray-900">PDF Data Preview</h3>
                 <button
-                  onClick={() => setShowDataModal(false)}
+                  onClick={() => {
+                    setDataModalAnimation('hidden');
+                    setTimeout(() => setShowDataModal(false), 300);
+                  }}
                   className="text-gray-400 hover:text-gray-600"
                 >
                   <XMarkIcon className="h-6 w-6" />
@@ -1791,7 +2035,7 @@ function UnifiedManagement() {
                           <div className="font-medium text-gray-900">{student.full_name}</div>
                           <div className="text-sm text-gray-600">{student.student_id}</div>
                           <div className="text-xs text-gray-500">
-                            {student.course} • Year {student.year_level} • {student.gender}
+                            {student.course} • {student.year_level ? `Year ${student.year_level}` : 'Graduate Program'} • {student.gender}
                           </div>
                           <div className="text-xs text-gray-500">{student.email}</div>
                         </div>
@@ -1883,15 +2127,21 @@ function UnifiedManagement() {
               {/* Modal Footer */}
               <div className="flex justify-end space-x-3 mt-6 pt-4 border-t border-gray-200">
                 <button
-                  onClick={() => setShowDataModal(false)}
+                  onClick={() => {
+                    setDataModalAnimation('hidden');
+                    setTimeout(() => setShowDataModal(false), 300);
+                  }}
                   className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
                 >
                   Close
                 </button>
                 <button
                   onClick={() => {
-                    setShowDataModal(false);
-                    handleImport();
+                    setDataModalAnimation('hidden');
+                    setTimeout(() => {
+                      setShowDataModal(false);
+                      handleImport();
+                    }, 300);
                   }}
                   disabled={isImporting}
                   className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
@@ -1911,20 +2161,21 @@ function UnifiedManagement() {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Modern Delete Confirmation Modal */}
       {showDeleteModal && deleteItem && (
-        <div className="fixed inset-0 overflow-y-auto z-50">
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
           {/* Backdrop with blur and fade animation */}
           <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
-            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+            deleteModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
           }`}>
             <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
               {/* Modal container with scale and fade animation */}
               <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
-                modalAnimation === 'visible' 
+                deleteModalAnimation === 'visible' 
                   ? 'scale-100 opacity-100 translate-y-0' 
                   : 'scale-95 opacity-0 translate-y-4'
               }`}>
@@ -1946,7 +2197,7 @@ function UnifiedManagement() {
                   <button
                     type="button"
                     onClick={() => {
-                      setModalAnimation('hidden');
+                      setDeleteModalAnimation('hidden');
                       setTimeout(() => {
                         setShowDeleteModal(false);
                         setDeleteItem(null);
@@ -1984,15 +2235,15 @@ function UnifiedManagement() {
 
       {/* Bulk Delete Modal */}
       {showBulkDeleteModal && (
-        <div className="fixed inset-0 overflow-y-auto z-50">
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
           {/* Backdrop with blur and fade animation */}
           <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
-            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+            bulkDeleteModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
           }`}>
             <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
               {/* Modal container with scale and fade animation */}
               <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
-                modalAnimation === 'visible' 
+                bulkDeleteModalAnimation === 'visible' 
                   ? 'scale-100 opacity-100 translate-y-0' 
                   : 'scale-95 opacity-0 translate-y-4'
               }`}>
@@ -2014,7 +2265,7 @@ function UnifiedManagement() {
                   <button
                     type="button"
                     onClick={() => {
-                      setModalAnimation('hidden');
+                      setBulkDeleteModalAnimation('hidden');
                       setTimeout(() => {
                         setShowBulkDeleteModal(false);
                         setBulkDeleteType('');
@@ -2051,9 +2302,26 @@ function UnifiedManagement() {
       )}
 
       {/* TEMPORARY: Schedule Edit Modal */}
-      {showEditModal && editingSchedule && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+      {showEditModal && editingSchedule && createPortal(
+        <div 
+          className={`fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60] transition-opacity duration-300 ease-in-out ${
+            editModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: '100vw',
+            height: '100vh',
+            zIndex: 60
+          }}
+        >
+          <div className={`relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white transition-all duration-300 ease-out ${
+            editModalAnimation === 'visible' 
+              ? 'scale-100 opacity-100 translate-y-0' 
+              : 'scale-95 opacity-0 translate-y-4'
+          }`}>
             <div className="mt-3">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-medium text-gray-900">
@@ -2061,17 +2329,20 @@ function UnifiedManagement() {
                 </h3>
                 <button
                   onClick={() => {
-                    setShowEditModal(false);
-                    setEditingSchedule(null);
-                    setEditFormData({
-                      subject_id: '',
-                      room_id: '',
-                      day_of_week: '',
-                      start_time: '',
-                      end_time: '',
-                      academic_year: '',
-                      semester: ''
-                    });
+                    setEditModalAnimation('hidden');
+                    setTimeout(() => {
+                      setShowEditModal(false);
+                      setEditingSchedule(null);
+                      setEditFormData({
+                        subject_id: '',
+                        room_id: '',
+                        day_of_week: '',
+                        start_time: '',
+                        end_time: '',
+                        academic_year: '',
+                        semester: ''
+                      });
+                    }, 300);
                   }}
                   className="text-gray-400 hover:text-gray-600"
                 >
@@ -2192,17 +2463,20 @@ function UnifiedManagement() {
                   <button
                     type="button"
                     onClick={() => {
-                      setShowEditModal(false);
-                      setEditingSchedule(null);
-                      setEditFormData({
-                        subject_id: '',
-                        room_id: '',
-                        day_of_week: '',
-                        start_time: '',
-                        end_time: '',
-                        academic_year: '',
-                        semester: ''
-                      });
+                      setEditModalAnimation('hidden');
+                      setTimeout(() => {
+                        setShowEditModal(false);
+                        setEditingSchedule(null);
+                        setEditFormData({
+                          subject_id: '',
+                          room_id: '',
+                          day_of_week: '',
+                          start_time: '',
+                          end_time: '',
+                          academic_year: '',
+                          semester: ''
+                        });
+                      }, 300);
                     }}
                     className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
                   >
@@ -2218,7 +2492,8 @@ function UnifiedManagement() {
               </form>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
