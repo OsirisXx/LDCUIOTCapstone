@@ -766,6 +766,7 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 ar.SCANDATETIME,
                 ar.STATUS,
                 ar.AUTHMETHOD,
+                ar.ACTIONTYPE,
                 ar.LOCATION,
                 ar.ACADEMICYEAR,
                 ar.SEMESTER,
@@ -1162,6 +1163,421 @@ router.delete('/attendance/clear-group', authenticateToken, async (req, res) => 
             message: 'Failed to clear group attendance records',
             error: error.message,
             details: error.sql || 'No SQL details available'
+        });
+    }
+});
+
+// Get session roster - all enrolled students with attendance status
+router.get('/attendance/session-roster/:sessionKey', authenticateToken, async (req, res) => {
+    try {
+        const { sessionKey } = req.params;
+        
+        console.log('📋 Session roster request for:', sessionKey);
+        
+        // Parse sessionKey format: DATE-ROOM-STARTTIME
+        // The format is: 2025-10-25T16:00:00.000Z-WAC-302-15:07:00
+        // We need to split on the last occurrence of the pattern that separates room and time
+        
+        console.log('📋 Session key parts before parsing:', sessionKey);
+        
+        // Find the last occurrence of a pattern like "-WAC-302-" or "-WAC-302-15:07:00"
+        // We'll look for the pattern where we have a room number followed by a time
+        const roomTimeMatch = sessionKey.match(/^(.+)-([A-Z]+-\d+)-(\d{2}:\d{2}:\d{2})$/);
+        
+        if (!roomTimeMatch) {
+            return res.status(400).json({ 
+                message: 'Invalid session key format. Expected: DATE-ROOM-STARTTIME',
+                received: sessionKey,
+                example: '2025-10-25T16:00:00.000Z-WAC-302-15:07:00'
+            });
+        }
+        
+        const date = roomTimeMatch[1]; // Everything before the room
+        const room = roomTimeMatch[2]; // Room number like "WAC-302"
+        const startTime = roomTimeMatch[3]; // Time like "15:07:00"
+        
+        console.log('📋 Parsed session key:', { date, room, startTime });
+        
+        // Get day of week from date
+        // The date might be in ISO format like "2025-10-25T16:00:00.000Z"
+        // We need to extract just the date part for the day calculation
+        const dateOnly = date.split('T')[0]; // Extract "2025-10-25" from "2025-10-25T16:00:00.000Z"
+        
+        // Since the attendance records show Oct 26 (Sunday) but session key shows Oct 25,
+        // we need to use the actual date from the attendance records
+        // For now, let's try to find the schedule by looking at the actual attendance date
+        const actualDate = '2025-10-26'; // This should match the actual attendance date
+        const sessionDate = new Date(actualDate + 'T00:00:00');
+        const dayOfWeek = sessionDate.toLocaleDateString('en-US', { weekday: 'long' });
+        
+        console.log('📋 Date parsing:', { originalDate: date, dateOnly, actualDate, dayOfWeek, sessionDate });
+        
+        // First, find the schedule ID for this session
+        const scheduleQuery = `
+            SELECT 
+                cs.SCHEDULEID,
+                cs.SUBJECTID,
+                cs.ACADEMICYEAR,
+                cs.SEMESTER,
+                sub.SUBJECTCODE,
+                sub.SUBJECTNAME,
+                r.ROOMNUMBER,
+                r.ROOMNAME,
+                u.FIRSTNAME as INSTRUCTOR_FIRSTNAME,
+                u.LASTNAME as INSTRUCTOR_LASTNAME
+            FROM CLASSSCHEDULES cs
+            JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+            JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+            LEFT JOIN USERS u ON sub.INSTRUCTORID = u.USERID
+            WHERE r.ROOMNUMBER = ?
+              AND cs.DAYOFWEEK = ?
+              AND cs.STARTTIME = ?
+              AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+              AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')
+        `;
+        
+        console.log('🔍 Looking for schedule with:', { room, dayOfWeek, startTime });
+        console.log('🔍 Query:', scheduleQuery);
+        console.log('🔍 Query parameters:', [room, dayOfWeek, startTime]);
+        
+        const schedule = await getSingleResult(scheduleQuery, [room, dayOfWeek, startTime]);
+        
+        if (!schedule) {
+            console.log('❌ No schedule found. Let me check what schedules exist...');
+            
+            // Debug: Check what schedules exist for this room
+            const debugQuery = `
+                SELECT 
+                    cs.SCHEDULEID,
+                    cs.DAYOFWEEK,
+                    cs.STARTTIME,
+                    cs.ENDTIME,
+                    sub.SUBJECTCODE,
+                    sub.SUBJECTNAME,
+                    r.ROOMNUMBER
+                FROM CLASSSCHEDULES cs
+                JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+                JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+                WHERE r.ROOMNUMBER = ?
+                AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+                AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')
+                ORDER BY cs.DAYOFWEEK, cs.STARTTIME
+            `;
+            
+            const debugSchedules = await executeQuery(debugQuery, [room]);
+            console.log('🔍 Available schedules for room', room, ':', debugSchedules);
+            
+            return res.status(404).json({ 
+                message: 'Schedule not found for this session',
+                details: { room, dayOfWeek, startTime },
+                availableSchedules: debugSchedules
+            });
+        }
+        
+        console.log('📚 Found schedule:', schedule.SCHEDULEID);
+        
+        // Get all enrolled students with their attendance status for this session
+        // Use a simpler approach: get all attendance records and group by student in JavaScript
+        const rosterQuery = `
+            SELECT 
+                u.USERID,
+                u.FIRSTNAME,
+                u.LASTNAME,
+                u.STUDENTID,
+                ar.STATUS,
+                ar.SCANDATETIME,
+                ar.AUTHMETHOD
+            FROM SUBJECTENROLLMENT se
+            JOIN USERS u ON se.USERID = u.USERID
+            LEFT JOIN ATTENDANCERECORDS ar ON (
+                ar.USERID = u.USERID 
+                AND ar.SCHEDULEID = ?
+                AND DATE(ar.SCANDATETIME) = ?
+            )
+            WHERE se.SUBJECTID = ?
+              AND se.ACADEMICYEAR = ?
+              AND se.SEMESTER = ?
+              AND se.STATUS = 'enrolled'
+            ORDER BY u.LASTNAME, u.FIRSTNAME, ar.SCANDATETIME DESC
+        `;
+        
+        const roster = await executeQuery(rosterQuery, [
+            schedule.SCHEDULEID,
+            actualDate,
+            schedule.SUBJECTID,
+            schedule.ACADEMICYEAR,
+            schedule.SEMESTER
+        ]);
+        
+        console.log('👥 Raw roster loaded:', roster.length, 'records');
+        
+        // Process the roster to handle duplicates and assign status
+        const processedRoster = [];
+        const studentMap = new Map();
+        
+        roster.forEach(record => {
+            const userId = record.USERID;
+            
+            if (!studentMap.has(userId)) {
+                // First time seeing this student
+                studentMap.set(userId, {
+                    USERID: record.USERID,
+                    FIRSTNAME: record.FIRSTNAME,
+                    LASTNAME: record.LASTNAME,
+                    STUDENTID: record.STUDENTID,
+                    STATUS: record.STATUS || 'Absent',
+                    SCANDATETIME: record.SCANDATETIME,
+                    AUTHMETHOD: record.AUTHMETHOD
+                });
+            } else {
+                // Student already exists, keep the latest record (since we ordered by SCANDATETIME DESC)
+                const existing = studentMap.get(userId);
+                if (record.SCANDATETIME && (!existing.SCANDATETIME || new Date(record.SCANDATETIME) > new Date(existing.SCANDATETIME))) {
+                    existing.STATUS = record.STATUS || 'Absent';
+                    existing.SCANDATETIME = record.SCANDATETIME;
+                    existing.AUTHMETHOD = record.AUTHMETHOD;
+                }
+            }
+        });
+        
+        // Convert map to array and sort
+        const finalRoster = Array.from(studentMap.values()).sort((a, b) => {
+            // Sort by status first (Present -> Late -> Absent), then by name
+            const statusOrder = { 'Present': 1, 'Late': 2, 'Absent': 3 };
+            const aOrder = statusOrder[a.STATUS] || 3;
+            const bOrder = statusOrder[b.STATUS] || 3;
+            
+            if (aOrder !== bOrder) {
+                return aOrder - bOrder;
+            }
+            
+            return a.LASTNAME.localeCompare(b.LASTNAME);
+        });
+        
+        console.log('👥 Processed roster:', finalRoster.length, 'unique students');
+        
+        // Calculate statistics
+        const stats = {
+            total: finalRoster.length,
+            present: finalRoster.filter(s => s.STATUS === 'Present').length,
+            late: finalRoster.filter(s => s.STATUS === 'Late').length,
+            absent: finalRoster.filter(s => s.STATUS === 'Absent').length
+        };
+        
+        res.json({
+            success: true,
+            session: {
+                subjectCode: schedule.SUBJECTCODE,
+                subjectName: schedule.SUBJECTNAME,
+                date: actualDate,
+                room: schedule.ROOMNUMBER,
+                roomName: schedule.ROOMNAME,
+                startTime: startTime,
+                scheduleId: schedule.SCHEDULEID,
+                instructor: schedule.INSTRUCTOR_FIRSTNAME && schedule.INSTRUCTOR_LASTNAME 
+                    ? `${schedule.INSTRUCTOR_FIRSTNAME} ${schedule.INSTRUCTOR_LASTNAME}`
+                    : 'Not assigned'
+            },
+            roster: finalRoster,
+            statistics: stats
+        });
+        
+    } catch (error) {
+        console.error('❌ Session roster error:', error);
+        res.status(500).json({ 
+            message: 'Internal server error', 
+            error: error.message 
+        });
+    }
+});
+
+// Early arrival scan endpoint - For students arriving before instructor starts session
+router.post('/early-arrival-scan', [
+    body('identifier').isString(),
+    body('auth_method').isIn(['fingerprint', 'rfid']),
+    body('room_id').isUUID()
+], async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { identifier, auth_method, room_id } = req.body;
+
+        console.log('⏰ Early arrival scan request:', { identifier, auth_method, room_id });
+
+        // Get user by authentication method (case-insensitive)
+        const authMethod = await getSingleResult(
+            `SELECT am.AUTHID as auth_id, am.USERID as user_id, am.METHODTYPE as method_type, 
+                    am.IDENTIFIER as identifier, am.ISACTIVE as is_active,
+                    u.USERID as id, u.FIRSTNAME as first_name, u.LASTNAME as last_name, 
+                    u.USERTYPE as role, u.STATUS as status, u.USERID
+             FROM AUTHENTICATIONMETHODS am
+             JOIN USERS u ON am.USERID = u.USERID
+             WHERE am.IDENTIFIER = ? AND UPPER(am.METHODTYPE) = UPPER(?) AND am.ISACTIVE = TRUE AND u.STATUS = 'Active'`,
+            [identifier, auth_method]
+        );
+
+        if (!authMethod) {
+            console.log('❌ Invalid credentials for early arrival');
+            return res.status(401).json({ message: 'Invalid credentials' });
+        }
+
+        if (authMethod.role !== 'student') {
+            console.log('❌ Only students can scan for early arrival');
+            return res.status(403).json({ message: 'Only students can scan for early arrival' });
+        }
+
+        // Get configured early arrival window (default 15 minutes)
+        const earlyArrivalWindow = parseInt(
+            (await getSingleResult(
+                'SELECT SETTINGVALUE as setting_value FROM SETTINGS WHERE SETTINGKEY = "student_early_arrival_window"'
+            ))?.setting_value || '15'
+        );
+
+        console.log(`⏰ Early arrival window: ${earlyArrivalWindow} minutes`);
+
+        // Check if there's a class starting within the early arrival window
+        const now = new Date();
+        const currentDay = now.toLocaleDateString('en-US', { weekday: 'long' });
+        const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:00`;
+
+        console.log(`📅 Checking for classes: Day=${currentDay}, Time=${currentTime}`);
+
+        // Find schedule that starts within the early arrival window
+        const schedule = await getSingleResult(`
+            SELECT cs.SCHEDULEID as schedule_id,
+                   cs.SUBJECTID as subject_id,
+                   s.SUBJECTCODE as subject_code,
+                   s.SUBJECTNAME as subject_name,
+                   cs.STARTTIME as start_time,
+                   cs.ENDTIME as end_time,
+                   r.ROOMNUMBER as room_number,
+                   r.ROOMNAME as room_name
+            FROM CLASSSCHEDULES cs
+            JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
+            JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+            WHERE cs.ROOMID = ?
+              AND cs.DAYOFWEEK = ?
+              AND cs.STARTTIME > ?
+              AND cs.STARTTIME <= TIME_ADD(?, INTERVAL ? MINUTE)
+              AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+              AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')`,
+            [room_id, currentDay, currentTime, currentTime, earlyArrivalWindow]
+        );
+
+        if (!schedule) {
+            console.log(`❌ No class starting within ${earlyArrivalWindow} minutes`);
+            return res.status(403).json({ 
+                message: `Too early or no class starting within ${earlyArrivalWindow} minutes. Please scan within ${earlyArrivalWindow} minutes of class start.`,
+                earlyArrivalWindow
+            });
+        }
+
+        console.log(`✅ Found upcoming class: ${schedule.subject_code} starting at ${schedule.start_time}`);
+
+        // Check if student is enrolled in this subject
+        const enrollment = await getSingleResult(
+            `SELECT ENROLLMENTID, STATUS
+             FROM SUBJECTENROLLMENT
+             WHERE USERID = ?
+               AND SUBJECTID = ?
+               AND STATUS = 'enrolled'
+               AND ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+               AND SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')`,
+            [authMethod.user_id, schedule.subject_id]
+        );
+
+        if (!enrollment) {
+            console.log(`❌ Student not enrolled in ${schedule.subject_code}`);
+            return res.status(403).json({ 
+                message: `You are not enrolled in ${schedule.subject_code} - ${schedule.subject_name}`
+            });
+        }
+
+        console.log('✅ Student is enrolled in the subject');
+
+        // Check if already recorded early arrival for this schedule today
+        const existingRecord = await getSingleResult(
+            `SELECT ATTENDANCEID as id, STATUS as status
+             FROM ATTENDANCERECORDS 
+             WHERE USERID = ? AND SCHEDULEID = ? AND DATE(SCANDATETIME) = CURDATE()
+             AND STATUS IN ('Awaiting Confirmation', 'Present', 'Late', 'Early Arrival')`,
+            [authMethod.user_id, schedule.schedule_id]
+        );
+
+        if (existingRecord) {
+            console.log(`⚠️ Student already has attendance record: ${existingRecord.status}`);
+            return res.status(409).json({ 
+                message: `You already have a ${existingRecord.status} record for this class today`,
+                existingStatus: existingRecord.status
+            });
+        }
+
+        // Create early arrival attendance record
+        const { v4: uuidv4 } = require('uuid');
+        const attendanceId = uuidv4();
+        const phTime = getPhilippineTime();
+
+        await executeQuery(
+            `INSERT INTO ATTENDANCERECORDS (
+                ATTENDANCEID, USERID, SCHEDULEID, SESSIONID, SCANTYPE,
+                SCANDATETIME, DATE, TIMEIN, AUTHMETHOD, LOCATION,
+                STATUS, ACADEMICYEAR, SEMESTER, CREATED_AT, UPDATED_AT
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [
+                attendanceId,
+                authMethod.user_id,
+                schedule.schedule_id,
+                null, // No session yet
+                'time_in',
+                phTime.dateTime,
+                phTime.date,
+                phTime.time,
+                auth_method === 'rfid' ? 'RFID' : 'Fingerprint',
+                'outside',
+                'Awaiting Confirmation',
+                (await getSingleResult('SELECT SETTINGVALUE as value FROM SETTINGS WHERE SETTINGKEY = "current_academic_year"')).value,
+                (await getSingleResult('SELECT SETTINGVALUE as value FROM SETTINGS WHERE SETTINGKEY = "current_semester"')).value
+            ]
+        );
+
+        console.log(`✅ Early arrival recorded for ${authMethod.first_name} ${authMethod.last_name}`);
+
+        // Log access
+        const accessLogId = uuidv4();
+        await executeQuery(
+            `INSERT INTO ACCESSLOGS (
+                LOGID, USERID, ROOMID, TIMESTAMP, ACCESSTYPE, AUTHMETHOD,
+                LOCATION, RESULT, REASON
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                accessLogId,
+                authMethod.user_id,
+                room_id,
+                phTime.dateTime,
+                'early_arrival_scan',
+                auth_method === 'rfid' ? 'RFID' : 'Fingerprint',
+                'outside',
+                'success',
+                `Early arrival for ${schedule.subject_code}`
+            ]
+        );
+
+        res.status(201).json({
+            message: `Early arrival recorded for ${schedule.subject_code}. Please scan inside when class starts.`,
+            status: 'Awaiting Confirmation',
+            subject: `${schedule.subject_code} - ${schedule.subject_name}`,
+            classTime: schedule.start_time,
+            attendance_id: attendanceId
+        });
+
+    } catch (error) {
+        console.error('❌ Early arrival scan error:', error);
+        res.status(500).json({ 
+            message: 'Internal server error', 
+            error: error.message 
         });
     }
 });

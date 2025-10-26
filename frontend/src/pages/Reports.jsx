@@ -48,7 +48,9 @@ function Reports() {
   const [showGroupDetails, setShowGroupDetails] = useState(false);
   const [showClearDialog, setShowClearDialog] = useState(false);
   const [clearing, setClearing] = useState(false);
-  const [expandedCards, setExpandedCards] = useState(new Set());
+  // const [expandedCards, setExpandedCards] = useState(new Set());
+  const [sessionRoster, setSessionRoster] = useState([]);
+  const [rosterLoading, setRosterLoading] = useState(false);
 
   useEffect(() => {
     fetchInitialData();
@@ -90,15 +92,153 @@ function Reports() {
     }
   };
 
-  const fetchReports = async () => {
+  const groupReports = useCallback((reports) => {
+    if (groupBy === 'subject') {
+      // Create hierarchical structure: Subject -> Sessions
+      const hierarchicalGrouped = {};
+      
+      reports.forEach(report => {
+        // Use local date to avoid timezone issues
+        const attendanceDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toLocaleDateString('en-CA'); // YYYY-MM-DD format
+        const dayOfWeek = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
+        const roomNumber = report.ROOMNUMBER || 'Unknown Room';
+        
+        
+        // Subject key
+        const subjectKey = `${report.SUBJECTCODE}-${report.SUBJECTNAME}`;
+        // Session key within subject
+        const sessionKey = `${attendanceDate}-${roomNumber}-${report.STARTTIME}`;
+        
+        // Initialize subject if not exists
+        if (!hierarchicalGrouped[subjectKey]) {
+          hierarchicalGrouped[subjectKey] = {
+            title: `${report.SUBJECTCODE} - ${report.SUBJECTNAME}`,
+            subtitle: `${report.ACADEMICYEAR || 'Unknown Year'} • ${report.SEMESTER || 'Unknown Semester'}`,
+            sessions: {},
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            }
+          };
+        }
+        
+        // Initialize session if not exists
+        if (!hierarchicalGrouped[subjectKey].sessions[sessionKey]) {
+          const sessionTitle = `${dayOfWeek || 'Unknown Day'}, ${new Date(attendanceDate).toLocaleDateString('en-US', { 
+            month: 'short', 
+            day: 'numeric' 
+          })}`;
+          const sessionSubtitle = `Room ${roomNumber || 'Unknown Room'} • ${formatTime(report.STARTTIME) || 'Unknown Time'} - ${formatTime(report.ENDTIME) || 'Unknown Time'}`;
+          
+          
+          hierarchicalGrouped[subjectKey].sessions[sessionKey] = {
+            title: sessionTitle,
+            subtitle: sessionSubtitle,
+            reports: [],
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            }
+          };
+        }
+        
+        // Add report to session
+        hierarchicalGrouped[subjectKey].sessions[sessionKey].reports.push(report);
+        hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.total++;
+        const displayStatus = report.DISPLAY_STATUS || report.STATUS;
+        if (displayStatus === 'Present' || displayStatus === 'Early') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.present++;
+        else if (displayStatus === 'Late') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.late++;
+        else if (displayStatus === 'Absent') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.absent++;
+        
+        // Update subject totals
+        hierarchicalGrouped[subjectKey].stats.total++;
+        if (displayStatus === 'Present' || displayStatus === 'Early') hierarchicalGrouped[subjectKey].stats.present++;
+        else if (displayStatus === 'Late') hierarchicalGrouped[subjectKey].stats.late++;
+        else if (displayStatus === 'Absent') hierarchicalGrouped[subjectKey].stats.absent++;
+      });
+      
+      setGroupedReports(hierarchicalGrouped);
+    } else {
+      // Original flat grouping for other modes
+      const grouped = {};
+      
+      reports.forEach(report => {
+        let key;
+        let title;
+        let subtitle;
+        
+        switch (groupBy) {
+          case 'date':
+            const date = new Date(report.SCANDATETIME).toISOString().split('T')[0];
+            key = date;
+            title = new Date(date).toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              year: 'numeric', 
+              month: 'long', 
+              day: 'numeric' 
+            });
+            subtitle = `${reports.filter(r => new Date(r.SCANDATETIME).toISOString().split('T')[0] === date).length} records`;
+            break;
+          case 'session':
+            // Enhanced session grouping with day and room
+            // Use local date to avoid timezone issues
+            const sessionDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toLocaleDateString('en-CA'); // YYYY-MM-DD format
+            const sessionDay = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
+            const sessionRoom = report.ROOMNUMBER || 'Unknown Room';
+            key = `${report.SUBJECTCODE}-${sessionDate}-${sessionRoom}-${report.STARTTIME}`;
+            title = `${report.SUBJECTCODE} - ${sessionDay}`;
+            subtitle = `${new Date(sessionDate).toLocaleDateString('en-US', { 
+              month: 'short', 
+              day: 'numeric' 
+            })} • Room ${sessionRoom} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`;
+            break;
+          default:
+            key = 'all';
+            title = 'All Reports';
+            subtitle = `${reports.length} records`;
+        }
+        
+        if (!grouped[key]) {
+          grouped[key] = {
+            title,
+            subtitle,
+            reports: [],
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            }
+          };
+        }
+        
+        grouped[key].reports.push(report);
+        grouped[key].stats.total++;
+        const displayStatus = report.DISPLAY_STATUS || report.STATUS;
+        if (displayStatus === 'Present' || displayStatus === 'Early') grouped[key].stats.present++;
+        else if (displayStatus === 'Late') grouped[key].stats.late++;
+        else if (displayStatus === 'Absent') grouped[key].stats.absent++;
+      });
+      
+      setGroupedReports(grouped);
+    }
+  }, [groupBy]);
+
+  const fetchReports = useCallback(async () => {
     try {
       setLoading(true);
       const token = localStorage.getItem('token');
       const headers = { Authorization: `Bearer ${token}` };
 
-      // For now, use the basic endpoint without complex filtering
-      const response = await axios.get(`/api/logs/attendance`, { headers });
-      let reports = response.data.logs || [];
+      // Use the new reports endpoint with enhanced data
+      console.log('🔍 Calling /api/reports/attendance endpoint');
+      const response = await axios.get(`/api/reports/attendance`, { headers });
+      console.log('📊 Reports response:', response.data);
+      let reports = response.data.data || [];
       
       // Apply client-side filtering for now
       if (filters.search) {
@@ -138,9 +278,9 @@ function Reports() {
       // Calculate statistics
       const stats = {
         totalStudents: new Set(reports.map(r => r.USERID || r.STUDENTID)).size,
-        presentCount: reports.filter(r => r.STATUS === 'Present').length,
-        lateCount: reports.filter(r => r.STATUS === 'Late').length,
-        absentCount: reports.filter(r => r.STATUS === 'Absent').length
+        presentCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Present' || (r.DISPLAY_STATUS || r.STATUS) === 'Early').length,
+        lateCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Late').length,
+        absentCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Absent').length
       };
       setStatistics(stats);
 
@@ -156,134 +296,7 @@ function Reports() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const groupReports = useCallback((reports) => {
-    if (groupBy === 'subject') {
-      // Create hierarchical structure: Subject -> Sessions
-      const hierarchicalGrouped = {};
-      
-      reports.forEach(report => {
-        const attendanceDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toISOString().split('T')[0];
-        const dayOfWeek = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
-        const roomNumber = report.ROOMNUMBER || 'Unknown Room';
-        
-        // Subject key
-        const subjectKey = `${report.SUBJECTCODE}-${report.SUBJECTNAME}`;
-        // Session key within subject
-        const sessionKey = `${attendanceDate}-${roomNumber}-${report.STARTTIME}`;
-        
-        // Initialize subject if not exists
-        if (!hierarchicalGrouped[subjectKey]) {
-          hierarchicalGrouped[subjectKey] = {
-            title: `${report.SUBJECTCODE} - ${report.SUBJECTNAME}`,
-            subtitle: `${report.ACADEMICYEAR} • ${report.SEMESTER}`,
-            sessions: {},
-            stats: {
-              total: 0,
-              present: 0,
-              late: 0,
-              absent: 0
-            }
-          };
-        }
-        
-        // Initialize session if not exists
-        if (!hierarchicalGrouped[subjectKey].sessions[sessionKey]) {
-          hierarchicalGrouped[subjectKey].sessions[sessionKey] = {
-            title: `${dayOfWeek}, ${new Date(attendanceDate).toLocaleDateString('en-US', { 
-              month: 'short', 
-              day: 'numeric' 
-            })}`,
-            subtitle: `Room ${roomNumber} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`,
-            reports: [],
-            stats: {
-              total: 0,
-              present: 0,
-              late: 0,
-              absent: 0
-            }
-          };
-        }
-        
-        // Add report to session
-        hierarchicalGrouped[subjectKey].sessions[sessionKey].reports.push(report);
-        hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.total++;
-        if (report.STATUS === 'Present') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.present++;
-        else if (report.STATUS === 'Late') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.late++;
-        else if (report.STATUS === 'Absent') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.absent++;
-        
-        // Update subject totals
-        hierarchicalGrouped[subjectKey].stats.total++;
-        if (report.STATUS === 'Present') hierarchicalGrouped[subjectKey].stats.present++;
-        else if (report.STATUS === 'Late') hierarchicalGrouped[subjectKey].stats.late++;
-        else if (report.STATUS === 'Absent') hierarchicalGrouped[subjectKey].stats.absent++;
-      });
-      
-      setGroupedReports(hierarchicalGrouped);
-    } else {
-      // Original flat grouping for other modes
-      const grouped = {};
-      
-      reports.forEach(report => {
-        let key;
-        let title;
-        let subtitle;
-        
-        switch (groupBy) {
-          case 'date':
-            const date = new Date(report.SCANDATETIME).toISOString().split('T')[0];
-            key = date;
-            title = new Date(date).toLocaleDateString('en-US', { 
-              weekday: 'long', 
-              year: 'numeric', 
-              month: 'long', 
-              day: 'numeric' 
-            });
-            subtitle = `${reports.filter(r => new Date(r.SCANDATETIME).toISOString().split('T')[0] === date).length} records`;
-            break;
-          case 'session':
-            // Enhanced session grouping with day and room
-            const sessionDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toISOString().split('T')[0];
-            const sessionDay = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
-            const sessionRoom = report.ROOMNUMBER || 'Unknown Room';
-            key = `${report.SUBJECTCODE}-${sessionDate}-${sessionRoom}-${report.STARTTIME}`;
-            title = `${report.SUBJECTCODE} - ${sessionDay}`;
-            subtitle = `${new Date(sessionDate).toLocaleDateString('en-US', { 
-              month: 'short', 
-              day: 'numeric' 
-            })} • Room ${sessionRoom} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`;
-            break;
-          default:
-            key = 'all';
-            title = 'All Reports';
-            subtitle = `${reports.length} records`;
-        }
-        
-        if (!grouped[key]) {
-          grouped[key] = {
-            title,
-            subtitle,
-            reports: [],
-            stats: {
-              total: 0,
-              present: 0,
-              late: 0,
-              absent: 0
-            }
-          };
-        }
-        
-        grouped[key].reports.push(report);
-        grouped[key].stats.total++;
-        if (report.STATUS === 'Present') grouped[key].stats.present++;
-        else if (report.STATUS === 'Late') grouped[key].stats.late++;
-        else if (report.STATUS === 'Absent') grouped[key].stats.absent++;
-      });
-      
-      setGroupedReports(grouped);
-    }
-  }, [groupBy]);
+  }, [filters, groupReports]);
 
   useEffect(() => {
     if (reports.length > 0) {
@@ -298,26 +311,72 @@ function Reports() {
     }));
   };
 
-  const toggleCardExpansion = (cardKey) => {
-    setExpandedCards(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(cardKey)) {
-        newSet.delete(cardKey);
+  // const toggleCardExpansion = (cardKey) => {
+  //   setExpandedCards(prev => {
+  //     const newSet = new Set(prev);
+  //     if (newSet.has(cardKey)) {
+  //       newSet.delete(cardKey);
+  //     } else {
+  //       newSet.add(cardKey);
+  //     }
+  //     return newSet;
+  //   });
+  // };
+
+  const fetchSessionRoster = async (sessionKey) => {
+    try {
+      setRosterLoading(true);
+      const token = localStorage.getItem('token');
+      const headers = { Authorization: `Bearer ${token}` };
+
+      // URL encode the session key to handle special characters
+      const encodedSessionKey = encodeURIComponent(sessionKey);
+      
+      const response = await axios.get(`/api/logs/attendance/session-roster/${encodedSessionKey}`, { headers });
+      
+      if (response.data.success) {
+        setSessionRoster(response.data.roster);
+        // Store instructor information in selectedGroup
+        if (response.data.session?.instructor) {
+          setSelectedGroup(prev => ({
+            ...prev,
+            instructor: response.data.session.instructor
+          }));
+        }
       } else {
-        newSet.add(cardKey);
+        console.error('Failed to load roster:', response.data.message);
+        toast.error('Failed to load class roster');
+        setSessionRoster([]);
       }
-      return newSet;
-    });
+    } catch (error) {
+      console.error('Error fetching session roster:', error);
+      if (error.response?.status === 401) {
+        toast.error('Session expired. Please login again.');
+        localStorage.removeItem('token');
+        window.location.href = '/login';
+      } else {
+        toast.error('Failed to load class roster');
+      }
+      setSessionRoster([]);
+    } finally {
+      setRosterLoading(false);
+    }
   };
 
   const viewGroupDetails = (groupKey, groupData) => {
     setSelectedGroup({ key: groupKey, ...groupData });
     setShowGroupDetails(true);
+    
+    // Fetch session roster when viewing group details
+    if (groupKey && groupData) {
+      fetchSessionRoster(groupKey);
+    }
   };
 
   const backToMainView = () => {
     setShowGroupDetails(false);
     setSelectedGroup(null);
+    setSessionRoster([]);
   };
 
   const clearGroupAttendanceRecords = async () => {
@@ -410,6 +469,8 @@ function Reports() {
     switch (status?.toLowerCase()) {
       case 'present':
         return <CheckCircleIcon className="h-5 w-5 text-green-500" />;
+      case 'early':
+        return <CheckCircleIcon className="h-5 w-5 text-blue-500" />;
       case 'late':
         return <ExclamationTriangleIcon className="h-5 w-5 text-yellow-500" />;
       case 'absent':
@@ -423,6 +484,8 @@ function Reports() {
     switch (status?.toLowerCase()) {
       case 'present':
         return 'bg-green-100 text-green-800';
+      case 'early':
+        return 'bg-blue-100 text-blue-800';
       case 'late':
         return 'bg-yellow-100 text-yellow-800';
       case 'absent':
@@ -499,112 +562,145 @@ function Reports() {
             <div>
               <h1 className="text-2xl font-bold text-gray-900">{selectedGroup.title}</h1>
               <p className="text-gray-600 mt-1">{selectedGroup.subtitle}</p>
+              <div className="mt-3 flex items-center space-x-2">
+                <div className="flex items-center space-x-2 bg-gradient-to-r from-blue-50 to-indigo-50 px-4 py-2 rounded-lg border border-blue-200 shadow-sm">
+                  <div className="flex items-center space-x-2">
+                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                    <span className="text-sm font-semibold text-blue-800">Instructor:</span>
+                  </div>
+                  <span className="text-lg font-bold text-blue-900">
+                    {selectedGroup?.instructor || (rosterLoading ? 'Loading...' : 'Not assigned')}
+                  </span>
+                </div>
+              </div>
             </div>
             
-            {/* Group Statistics */}
-            <div className="flex space-x-8">
-              <div className="text-center">
-                <div className="text-3xl font-bold text-green-600">{selectedGroup.stats.present}</div>
-                <div className="text-sm text-gray-500">Present</div>
-              </div>
-              <div className="text-center">
-                <div className="text-3xl font-bold text-yellow-600">{selectedGroup.stats.late}</div>
-                <div className="text-sm text-gray-500">Late</div>
-              </div>
-              <div className="text-center">
-                <div className="text-3xl font-bold text-red-600">{selectedGroup.stats.absent}</div>
-                <div className="text-sm text-gray-500">Absent</div>
-              </div>
-              <div className="text-center">
-                <div className="text-3xl font-bold text-blue-600">{selectedGroup.stats.total}</div>
-                <div className="text-sm text-gray-500">Total</div>
-              </div>
+        {/* Group Statistics */}
+        <div className="flex space-x-8">
+          <div className="text-center">
+            <div className="text-3xl font-bold text-green-600">
+              {sessionRoster.length > 0 
+                ? sessionRoster.filter(s => s.STATUS === 'Present').length 
+                : selectedGroup.stats.present}
             </div>
+            <div className="text-sm text-gray-500">Present</div>
+          </div>
+          <div className="text-center">
+            <div className="text-3xl font-bold text-yellow-600">
+              {sessionRoster.length > 0 
+                ? sessionRoster.filter(s => s.STATUS === 'Late').length 
+                : selectedGroup.stats.late}
+            </div>
+            <div className="text-sm text-gray-500">Late</div>
+          </div>
+          <div className="text-center">
+            <div className="text-3xl font-bold text-red-600">
+              {sessionRoster.length > 0 
+                ? sessionRoster.filter(s => s.STATUS === 'Absent').length 
+                : selectedGroup.stats.absent}
+            </div>
+            <div className="text-sm text-gray-500">Absent</div>
+          </div>
+          <div className="text-center">
+            <div className="text-3xl font-bold text-blue-600">
+              {sessionRoster.length > 0 
+                ? sessionRoster.length 
+                : selectedGroup.stats.total}
+            </div>
+            <div className="text-sm text-gray-500">Enrolled</div>
+          </div>
+        </div>
           </div>
         </div>
 
-        {/* Detailed Attendance Records */}
+        {/* Class List */}
         <div className="bg-white rounded-lg shadow border border-gray-200">
           <div className="px-6 py-4 border-b border-gray-200">
-            <h3 className="text-lg font-medium text-gray-900">Attendance Records</h3>
+            <h3 className="text-lg font-medium text-gray-900">Class List</h3>
             <p className="text-sm text-gray-500">
-              {selectedGroup.reports.length} record{selectedGroup.reports.length !== 1 ? 's' : ''} found
+              {rosterLoading 
+                ? 'Loading class list...' 
+                : sessionRoster.length > 0 
+                  ? `${sessionRoster.length} enrolled student${sessionRoster.length !== 1 ? 's' : ''}`
+                  : 'No students enrolled in this subject'
+              }
             </p>
           </div>
           
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Student
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Date & Time
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Location
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {selectedGroup.reports.map((report) => (
-                  <tr key={report.ATTENDANCEID} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div className="flex-shrink-0 h-10 w-10">
-                          <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
-                            <AcademicCapIcon className="h-5 w-5 text-blue-600" />
-                          </div>
-                        </div>
-                        <div className="ml-4">
-                          <div className="text-sm font-medium text-gray-900">
-                            {report.FIRSTNAME} {report.LASTNAME}
-                          </div>
-                          <div className="text-sm text-gray-500">
-                            ID: {report.STUDENTID || 'N/A'}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">
-                        {formatDateTime(report.SCANDATETIME)}
-                      </div>
-                      <div className="text-sm text-gray-500">
-                        {report.AUTHMETHOD || 'Fingerprint'}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        {getStatusIcon(report.STATUS)}
-                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.STATUS)}`}>
-                          {report.STATUS || 'Unknown'}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">{report.LOCATION || 'N/A'}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <button
-                        onClick={() => viewReportDetails(report)}
-                        className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-                      >
-                        View Details
-                      </button>
-                    </td>
+          {rosterLoading ? (
+            <div className="flex items-center justify-center h-32">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+          ) : sessionRoster.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Student
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Time Scanned
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {sessionRoster.map((student) => (
+                    <tr key={student.USERID} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0 h-10 w-10">
+                            <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
+                              <AcademicCapIcon className="h-5 w-5 text-blue-600" />
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <div className="text-sm font-medium text-gray-900">
+                              {student.FIRSTNAME} {student.LASTNAME}
+                            </div>
+                            <div className="text-sm text-gray-500">
+                              ID: {student.STUDENTID || 'N/A'}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          {getStatusIcon(student.DISPLAY_STATUS || student.STATUS)}
+                          <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(student.DISPLAY_STATUS || student.STATUS)}`}>
+                            {student.DISPLAY_STATUS || student.STATUS}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {student.TIME_SCANNED 
+                            ? formatTime(student.TIME_SCANNED)
+                            : student.SCANDATETIME 
+                              ? formatDateTime(student.SCANDATETIME)
+                              : <span className="text-gray-400">—</span>
+                          }
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <AcademicCapIcon className="mx-auto h-12 w-12 text-gray-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">No students enrolled</h3>
+              <p className="mt-1 text-sm text-gray-500">
+                This subject doesn't have any enrolled students yet.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -731,7 +827,6 @@ function Reports() {
   }
 
   // Show detailed group view
-  console.log('Current state:', { showGroupDetails, selectedGroup: selectedGroup?.key });
   if (showGroupDetails && selectedGroup) {
     return (
       <div className="space-y-6">
@@ -756,6 +851,19 @@ function Reports() {
             <div>
               <h1 className="text-2xl font-bold text-gray-900">{selectedGroup.title}</h1>
               <p className="text-gray-600 mt-1">{selectedGroup.subtitle}</p>
+              <div className="mt-3 flex items-center space-x-2">
+                <div className="flex items-center space-x-2 bg-gradient-to-r from-blue-50 to-indigo-50 px-4 py-2 rounded-lg border border-blue-200 shadow-sm">
+                  <div className="flex items-center space-x-2">
+                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                    <span className="text-sm font-semibold text-blue-800">Instructor:</span>
+                  </div>
+                  <span className="text-lg font-bold text-blue-900">
+                    {selectedGroup?.instructor || (rosterLoading ? 'Loading...' : 'Not assigned')}
+                  </span>
+                </div>
+              </div>
             </div>
             <div className="flex space-x-4">
               <button
@@ -785,7 +893,11 @@ function Reports() {
               </div>
               <div className="ml-4">
                 <p className="text-sm font-medium text-gray-500">Present</p>
-                <p className="text-2xl font-semibold text-gray-900">{selectedGroup.stats.present}</p>
+                <p className="text-2xl font-semibold text-gray-900">
+                  {sessionRoster.length > 0 
+                    ? sessionRoster.filter(s => s.STATUS === 'Present').length 
+                    : selectedGroup.stats.present}
+                </p>
               </div>
             </div>
           </div>
@@ -796,7 +908,11 @@ function Reports() {
               </div>
               <div className="ml-4">
                 <p className="text-sm font-medium text-gray-500">Late</p>
-                <p className="text-2xl font-semibold text-gray-900">{selectedGroup.stats.late}</p>
+                <p className="text-2xl font-semibold text-gray-900">
+                  {sessionRoster.length > 0 
+                    ? sessionRoster.filter(s => s.STATUS === 'Late').length 
+                    : selectedGroup.stats.late}
+                </p>
               </div>
             </div>
           </div>
@@ -807,7 +923,11 @@ function Reports() {
               </div>
               <div className="ml-4">
                 <p className="text-sm font-medium text-gray-500">Absent</p>
-                <p className="text-2xl font-semibold text-gray-900">{selectedGroup.stats.absent}</p>
+                <p className="text-2xl font-semibold text-gray-900">
+                  {sessionRoster.length > 0 
+                    ? sessionRoster.filter(s => s.STATUS === 'Absent').length 
+                    : selectedGroup.stats.absent}
+                </p>
               </div>
             </div>
           </div>
@@ -817,110 +937,103 @@ function Reports() {
                 <UserGroupIcon className="h-8 w-8 text-blue-500" />
               </div>
               <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500">Total</p>
-                <p className="text-2xl font-semibold text-gray-900">{selectedGroup.stats.total}</p>
+                <p className="text-sm font-medium text-gray-500">Enrolled</p>
+                <p className="text-2xl font-semibold text-gray-900">
+                  {sessionRoster.length > 0 
+                    ? sessionRoster.length 
+                    : selectedGroup.stats.total}
+                </p>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Detailed Attendance Records */}
+        {/* Class List */}
         <div className="bg-white rounded-lg shadow border border-gray-200">
           <div className="px-6 py-4 border-b border-gray-200">
-            <h3 className="text-lg font-medium text-gray-900">Attendance Records</h3>
+            <h3 className="text-lg font-medium text-gray-900">Class List</h3>
             <p className="text-sm text-gray-500">
-              {selectedGroup.reports.length} record{selectedGroup.reports.length !== 1 ? 's' : ''} found
+              {rosterLoading 
+                ? 'Loading class list...' 
+                : sessionRoster.length > 0 
+                  ? `${sessionRoster.length} enrolled student${sessionRoster.length !== 1 ? 's' : ''}`
+                  : 'No students enrolled in this subject'
+              }
             </p>
           </div>
           
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Student
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Date & Time
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Method
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Location
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {selectedGroup.reports.map((report) => (
-                  <tr key={report.ATTENDANCEID} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div className="flex-shrink-0 h-10 w-10">
-                          <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
-                            <AcademicCapIcon className="h-5 w-5 text-blue-600" />
-                          </div>
-                        </div>
-                        <div className="ml-4">
-                          <div className="text-sm font-medium text-gray-900">
-                            {report.FIRSTNAME} {report.LASTNAME}
-                          </div>
-                          <div className="text-sm text-gray-500">
-                            ID: {report.STUDENTID || 'N/A'}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">
-                        {formatDateTime(report.SCANDATETIME)}
-                      </div>
-                      <div className="text-sm text-gray-500">
-                        {report.AUTHMETHOD || 'Fingerprint'}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        {getStatusIcon(report.STATUS)}
-                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.STATUS)}`}>
-                          {report.STATUS || 'Unknown'}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">
-                        {report.AUTHMETHOD || 'Fingerprint'}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center text-sm text-gray-900">
-                        <MapPinIcon className="h-4 w-4 mr-2 text-gray-400" />
-                        <div>
-                          <div>{report.ROOMNUMBER || 'N/A'}</div>
-                          <div className="text-xs text-gray-500">{report.ROOMNAME || ''}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                      <button
-                        onClick={() => viewReportDetails(report)}
-                        className="text-blue-600 hover:text-blue-900 flex items-center"
-                      >
-                        <EyeIcon className="h-4 w-4 mr-1" />
-                        View Details
-                      </button>
-                    </td>
+          {rosterLoading ? (
+            <div className="flex items-center justify-center h-32">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+          ) : sessionRoster.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Student
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Time Scanned
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {sessionRoster.map((student) => (
+                    <tr key={student.USERID} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0 h-10 w-10">
+                            <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
+                              <AcademicCapIcon className="h-5 w-5 text-blue-600" />
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <div className="text-sm font-medium text-gray-900">
+                              {student.FIRSTNAME} {student.LASTNAME}
+                            </div>
+                            <div className="text-sm text-gray-500">
+                              ID: {student.STUDENTID || 'N/A'}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          {getStatusIcon(student.DISPLAY_STATUS || student.STATUS)}
+                          <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(student.DISPLAY_STATUS || student.STATUS)}`}>
+                            {student.DISPLAY_STATUS || student.STATUS}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {student.TIME_SCANNED 
+                            ? formatTime(student.TIME_SCANNED)
+                            : student.SCANDATETIME 
+                              ? formatDateTime(student.SCANDATETIME)
+                              : <span className="text-gray-400">—</span>
+                          }
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <AcademicCapIcon className="mx-auto h-12 w-12 text-gray-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">No students enrolled</h3>
+              <p className="mt-1 text-sm text-gray-500">
+                This subject doesn't have any enrolled students yet.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Clear Group Records Confirmation Dialog */}
@@ -1379,7 +1492,7 @@ function Reports() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm text-gray-900">
-                        {formatDateTime(report.SCANDATETIME)}
+                        {report.TIME_SCANNED ? formatTime(report.TIME_SCANNED) : formatDateTime(report.SCANDATETIME)}
                       </div>
                       <div className="text-sm text-gray-500">
                         {report.AUTHMETHOD || 'Fingerprint'}
@@ -1387,9 +1500,9 @@ function Reports() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
-                        {getStatusIcon(report.STATUS)}
-                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.STATUS)}`}>
-                          {report.STATUS || 'Unknown'}
+                        {getStatusIcon(report.DISPLAY_STATUS || report.STATUS)}
+                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.DISPLAY_STATUS || report.STATUS)}`}>
+                          {report.DISPLAY_STATUS || report.STATUS || 'Unknown'}
                         </span>
                       </div>
                     </td>

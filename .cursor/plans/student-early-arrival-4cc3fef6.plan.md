@@ -1,182 +1,108 @@
-<!-- 4cc3fef6-1044-40e1-9335-e6c6ec172d63 6a1a4067-bdda-4d7c-b45d-5ce926caf4b7 -->
-# Implement Student Early Arrival Window
+<!-- 4cc3fef6-1044-40e1-9335-e6c6ec172d63 60824456-3082-4232-8c0c-729f72374f4c -->
+# Instructor Early Arrival Window Implementation
 
 ## Overview
 
-Enable students to scan at the outside sensor within the configured early arrival window (e.g., 15 minutes before class). Their attendance will be marked as "Awaiting Confirmation" and displayed in the web frontend. They must scan inside to confirm attendance. If the instructor never starts the session and the scheduled class time ends, all "Awaiting Confirmation" scans automatically become "Present".
+Allow instructors to start attendance sessions within a configurable window BEFORE their scheduled class start time (e.g., 15 minutes early).
 
-## Implementation Details
+## Current Issue
 
-### 1. FutronicAttendanceSystem - Outside Sensor Logic
+- Instructor tries to scan at **13:28 PM**
+- Class scheduled for **13:35 PM** (7 minutes early)
+- System denies: "No scheduled class for instructor at this time"
+- Configuration shows `InstructorEarlyWindow = 15` minutes
 
-**File**: `FutronicAttendanceSystem/MainForm.cs` (lines 3984-4027)
+## Configuration Source
 
-Currently, the outside sensor logic blocks students when there's no active session. We need to add early arrival detection:
+File: `attendance_scenarios.json` in application directory
 
-- Check if student is scanning within the early arrival window (configured minutes before scheduled class start)
-- If yes, send attendance record to backend with "Awaiting Confirmation" status
-- If no, deny access as currently implemented
-
-**Key Changes**:
-
-- Add logic to query upcoming schedules from backend API
-- Calculate if current time is within `numStudentEarlyArrivalWindow` minutes before class start
-- Create attendance record with special status
-- Still grant door access for early arrivals
-
-### 2. Backend API - Early Arrival Endpoint
-
-**File**: `backend/routes/scan.js` or `backend/routes/logs.js`
-
-Add/modify endpoint to handle outside sensor scans with early arrival logic:
-
-- Accept fingerprint/RFID scans from outside sensor
-- Check if scan is within configured early arrival window
-- Create ATTENDANCERECORDS entry with STATUS = "Awaiting Confirmation"
-- Store LOCATION = "outside" and SCANTYPE = "early_arrival"
-
-**New/Modified Endpoint**:
-
-```
-POST /api/logs/early-arrival-scan
-- Validate user authentication method
-- Check schedule: is there a class starting soon in this room?
-- Calculate: currentTime >= (classStartTime - earlyArrivalWindow) && currentTime < classStartTime
-- Insert attendance record with "Awaiting Confirmation" status
-```
-
-### 3. Backend API - Confirmation Scan
-
-**File**: `backend/routes/scan.js` (lines 389-414)
-
-Already has logic to handle "Early Arrival" confirmation - needs to be updated to handle "Awaiting Confirmation" status:
-
-- When student scans inside and has existing "Awaiting Confirmation" record
-- Update STATUS from "Awaiting Confirmation" to "Present"
-- Update LOCATION to "inside", SCANTYPE to "time_in_confirmation"
-- Preserve original early arrival timestamp in SCANDATETIME
-
-### 4. Backend - Auto-Confirmation Service
-
-**New File**: `backend/services/earlyArrivalService.js`
-
-Create a scheduled job that runs every 5 minutes to:
-
-- Find all sessions where scheduled end time has passed
-- Check if instructor never started the session (no active session record)
-- Find all ATTENDANCERECORDS with STATUS = "Awaiting Confirmation" for those schedules
-- Update those records to STATUS = "Present" (auto-confirmed due to no-show instructor)
-
-**Logic**:
-
-```javascript
-// Find schedules that ended without an active session
-SELECT cs.SCHEDULEID, cs.ENDTIME 
-FROM CLASSSCHEDULES cs
-LEFT JOIN SESSIONS s ON cs.SCHEDULEID = s.SCHEDULEID AND s.SESSIONDATE = CURDATE()
-WHERE cs.ENDTIME < CURTIME() 
-  AND s.SESSIONID IS NULL
-
-// Update awaiting confirmation records for those schedules
-UPDATE ATTENDANCERECORDS 
-SET STATUS = 'Present', 
-    UPDATED_AT = NOW()
-WHERE SCHEDULEID IN (...)
-  AND STATUS = 'Awaiting Confirmation'
-  AND DATE = CURDATE()
-```
-
-### 5. Backend - Settings Configuration
-
-**File**: `backend/routes/settings.js`
-
-Add new setting to SETTINGS table:
-
-- SETTINGKEY = "student_early_arrival_window"
-- SETTINGVALUE = "15" (default 15 minutes)
-- SETTINGDESCRIPTION = "Minutes before class start that students can scan for early arrival"
-
-This should be retrievable via existing settings API and configurable in the UI.
-
-### 6. Frontend - Attendance Logs Display
-
-**File**: `frontend/src/pages/AttendanceLogs.jsx` (lines 221-245)
-
-Add support for "Awaiting Confirmation" status:
-
-```javascript
-case 'awaiting confirmation':
-  return <ClockIcon className="h-5 w-5 text-blue-500" />;
-
-// In getStatusColor:
-case 'awaiting confirmation':
-  return 'bg-blue-100 text-blue-800';
-```
-
-This ensures the status displays properly with a distinct blue color and clock icon.
-
-### 7. FutronicAttendanceSystem - API Integration
-
-**File**: `FutronicAttendanceSystem/MainForm.cs`
-
-Add new API call method for early arrival scans:
-
-```csharp
-private async Task RecordEarlyArrival(string userId, string userName, string authMethod)
+```json
 {
-    // POST to backend API /api/logs/early-arrival-scan
-    // Include: userId, roomId, authMethod, timestamp
+  "InstructorEarlyWindow": 15,
+  "StudentGracePeriod": 15,
+  "InstructorLateTolerance": 30,
+  "AutoCloseDelay": 30,
+  "StudentEarlyArrivalWindow": 15,
+  "InstructorEndTolerance": 15
 }
 ```
 
-Integrate this into the `ProcessStudentScan` outside sensor logic.
+## Changes Needed
 
-### 8. Backend - Scheduled Job Setup
+### 1. DatabaseManager.cs - Add Configuration Loading
 
-**File**: `backend/server.js`
+**Location:** After `LoadAcademicSettings()` method (~line 99)
 
-Register the auto-confirmation service to run periodically:
+Add method to load scenarios configuration:
 
-```javascript
-const earlyArrivalService = require('./services/earlyArrivalService');
-
-// Run every 5 minutes
-setInterval(() => {
-    earlyArrivalService.autoConfirmNoShowInstructor();
-}, 5 * 60 * 1000);
+```csharp
+private int LoadInstructorEarlyWindow()
+{
+    try
+    {
+        string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "attendance_scenarios.json");
+        if (File.Exists(configPath))
+        {
+            string json = File.ReadAllText(configPath);
+            var config = JsonDocument.Parse(json);
+            if (config.RootElement.TryGetProperty("InstructorEarlyWindow", out var value))
+            {
+                return value.GetInt32();
+            }
+        }
+    }
+    catch { }
+    return 15; // Default
+}
 ```
 
-## Expected Behavior
+### 2. DatabaseManager.cs - Update Instructor Schedule Query  
 
-### Scenario 1: Student Arrives Early, Instructor Shows Up
+**Location:** Line ~1255 in `InternalTryRecordAttendance` method
 
-1. Student scans outside 10 minutes before class (within 15-min window)
-2. Status: "Awaiting Confirmation" (displayed in web UI)
-3. Instructor arrives and starts session
-4. Student scans inside
-5. Status changes to "Present" (preserving early arrival time)
+**Current query:**
 
-### Scenario 2: Student Arrives Early, Instructor No-Show
+```sql
+TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+```
 
-1. Student scans outside 10 minutes before class
-2. Status: "Awaiting Confirmation"
-3. Instructor never starts session
-4. Scheduled class end time passes (e.g., 10:00 AM class ends at 11:30 AM)
-5. Auto-confirmation service runs, detects no session was created
-6. Status automatically changes to "Present"
+**Update to:**
 
-### Scenario 3: Student Arrives Too Early
+```sql
+TIME(NOW()) BETWEEN SUBTIME(cs.STARTTIME, '00:@earlyWindow:00') AND cs.ENDTIME
+```
 
-1. Student scans outside 20 minutes before class (outside 15-min window)
-2. Access denied with message: "Too early. Please scan within 15 minutes of class start."
+This allows instructors to scan from `(STARTTIME - InstructorEarlyWindow)` to `ENDTIME`.
 
-### Scenario 4: Student Scans Outside But Never Enters
+### 3. Load Configuration at Runtime
 
-1. Student scans outside (early arrival)
-2. Status: "Awaiting Confirmation"
-3. Class ends, no inside scan
-4. If instructor showed: remains "Awaiting Confirmation" → manually review/mark absent
-5. If instructor no-show: auto-confirms to "Present"
+Call `LoadInstructorEarlyWindow()` when validating instructor schedule to get current configured value.
+
+## Expected Behavior After Fix
+
+**Scenario:** Instructor Early Arrival
+
+- Configured window: 15 minutes
+- Class schedule: 13:35 PM - 11:59 PM  
+- Instructor scans at: 13:28 PM (7 minutes early)
+- System checks: Is 13:28 within (13:35 - 15 min = 13:20) to 11:59?
+- Result: ✅ **Allowed** - Instructor can start session
+- Action: Start attendance session normally
+
+**Scenario:** Too Early
+
+- Configured window: 15 minutes
+- Class schedule: 13:35 PM - 11:59 PM
+- Instructor scans at: 13:10 PM (25 minutes early)  
+- System checks: Is 13:10 within (13:20) to 11:59?
+- Result: ❌ **Denied** - Outside early window
+
+## Implementation Steps
+
+1. Add `using System.Text.Json` to DatabaseManager.cs imports
+2. Add `LoadInstructorEarlyWindow()` method
+3. Update instructor schedule validation query to use early window
+4. Test with current scenario (7 minutes early, should allow)
 
 ### To-dos
 

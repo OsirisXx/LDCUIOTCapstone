@@ -4,6 +4,8 @@ using System.Data;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
+using System.IO;
 using MySql.Data.MySqlClient;
 using FutronicAttendanceSystem.Database.Models;
 using FutronicAttendanceSystem.Database.Config;
@@ -96,6 +98,50 @@ namespace FutronicAttendanceSystem.Database
                 LogMessage("WARNING", "Using default academic settings - Year: 2024-2025, Semester: First Semester");
                 Console.WriteLine($"Warning: Failed to load academic settings, using defaults: {ex.Message}");
             }
+        }
+
+        private int LoadInstructorEarlyWindow()
+        {
+            try
+            {
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "attendance_scenarios.json");
+                if (File.Exists(configPath))
+                {
+                    string json = File.ReadAllText(configPath);
+                    var config = JsonDocument.Parse(json);
+                    if (config.RootElement.TryGetProperty("InstructorEarlyWindow", out var value))
+                    {
+                        return value.GetInt32();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("WARNING", $"Failed to load InstructorEarlyWindow: {ex.Message}");
+            }
+            return 15; // Default fallback
+        }
+
+        private int LoadStudentEarlyArrivalWindow()
+        {
+            try
+            {
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "attendance_scenarios.json");
+                if (File.Exists(configPath))
+                {
+                    string json = File.ReadAllText(configPath);
+                    var config = JsonDocument.Parse(json);
+                    if (config.RootElement.TryGetProperty("StudentEarlyArrivalWindow", out var value))
+                    {
+                        return value.GetInt32();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("WARNING", $"Failed to load StudentEarlyArrivalWindow: {ex.Message}");
+            }
+            return 15; // Default fallback
         }
 
         private void RegisterDevice()
@@ -1074,13 +1120,165 @@ namespace FutronicAttendanceSystem.Database
                 
                 string location = CurrentLocation; // Use current location setting
 
+                // Check for prior early arrival before recording new attendance
+                string priorAttendanceId = null;
+                DateTime? earlyArrivalTime = null;
+                bool isEarlyArrival = action != null && action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0;
+                
+                if (!isEarlyArrival && !string.IsNullOrEmpty(scheduleId))
+                {
+                    // Check if there's a prior early arrival for this user/schedule today
+                    string priorEarlyArrivalQuery = @"
+                        SELECT ATTENDANCEID, TIMEIN, SCANDATETIME
+                        FROM ATTENDANCERECORDS
+                        WHERE USERID = @userGuid
+                          AND DATE = CURRENT_DATE
+                          AND ACTIONTYPE = 'Early Arrival'
+                          AND SCHEDULEID = @scheduleId
+                        ORDER BY SCANDATETIME DESC
+                        LIMIT 1";
+
+                    using (var cmdCheckEarly = new MySqlCommand(priorEarlyArrivalQuery, connection))
+                    {
+                        cmdCheckEarly.Parameters.AddWithValue("@userGuid", userGuid);
+                        cmdCheckEarly.Parameters.AddWithValue("@scheduleId", scheduleId);
+                        
+                        using (var reader = cmdCheckEarly.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                priorAttendanceId = reader.GetString("ATTENDANCEID");
+                                if (!reader.IsDBNull(reader.GetOrdinal("TIMEIN")))
+                                {
+                                    var timeInStr = reader.GetString("TIMEIN");
+                                    if (TimeSpan.TryParse(timeInStr, out var timeIn))
+                                    {
+                                        earlyArrivalTime = DateTime.Today.Add(timeIn);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Determine action type and status based on timing
+                string actionType = "Sign In"; // Default
+                
+                // Get class start time for late marking calculation
+                TimeSpan classStartTime = TimeSpan.Zero;
+                if (!string.IsNullOrEmpty(scheduleId))
+                {
+                    using (var cmdGetStart = new MySqlCommand(
+                        "SELECT STARTTIME FROM CLASSSCHEDULES WHERE SCHEDULEID = @scheduleId", connection))
+                    {
+                        cmdGetStart.Parameters.AddWithValue("@scheduleId", scheduleId);
+                        var startObj = cmdGetStart.ExecuteScalar();
+                        if (startObj != null && TimeSpan.TryParse(startObj.ToString(), out var st))
+                        {
+                            classStartTime = st;
+                        }
+                    }
+                }
+
+                var currentTime = DateTime.Now.TimeOfDay;
+                var minutesAfterStart = (currentTime - classStartTime).TotalMinutes;
+
+                using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid", connection))
+                {
+                    cmdGetUserType.Parameters.AddWithValue("@userGuid", userGuid);
+                    var userTypeObj = cmdGetUserType.ExecuteScalar();
+                    
+                    if (userTypeObj != null)
+                    {
+                        string userType = userTypeObj.ToString();
+                        
+                        // Check if this is an early arrival
+                        if (isEarlyArrival || minutesAfterStart < 0)
+                        {
+                            actionType = "Early Arrival";
+                            status = "Present";
+                        }
+                        // Check if scan is within grace period (15 minutes after start)
+                        else if (minutesAfterStart > 15)
+                        {
+                            status = "Late";
+                            actionType = "Sign In";
+                        }
+                        else
+                        {
+                            status = "Present";
+                            actionType = "Sign In";
+                        }
+                        
+                        // Override action type based on user type and location
+                        if (!isEarlyArrival && minutesAfterStart >= 0)
+                        {
+                            if (userType.Equals("instructor", StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (location == "outside")
+                                    actionType = scanType == "time_in" ? "Session Start" : "Session End";
+                                else
+                                    actionType = scanType == "time_in" ? "Sign In" : "Sign Out";
+                            }
+                            else if (userType.Equals("student", StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (location == "outside")
+                                    actionType = "Door Access";
+                                else
+                                    actionType = scanType == "time_in" ? "Sign In" : "Sign Out";
+                            }
+                            else if (userType.Equals("custodian", StringComparison.OrdinalIgnoreCase) || 
+                                     userType.Equals("dean", StringComparison.OrdinalIgnoreCase))
+                            {
+                                actionType = "Door Access";
+                            }
+                        }
+                    }
+                }
+
+                // Handle early arrival confirmation - update existing record instead of inserting new
+                if (priorAttendanceId != null && earlyArrivalTime.HasValue)
+                {
+                    // Update the existing early arrival record to reflect confirmation
+                    var updateCmd = new MySqlCommand(@"
+                        UPDATE ATTENDANCERECORDS
+                        SET ACTIONTYPE = @ACTIONTYPE,
+                            AUTHMETHOD = @AUTHMETHOD,
+                            LOCATION = @LOCATION,
+                            STATUS = @STATUS,
+                            SESSIONID = @SESSIONID
+                        WHERE ATTENDANCEID = @ATTENDANCEID
+                    ", connection);
+                    
+                    updateCmd.Parameters.AddWithValue("@ATTENDANCEID", priorAttendanceId);
+                    updateCmd.Parameters.AddWithValue("@ACTIONTYPE", "Sign In"); // Change from "Early Arrival" to "Sign In"
+                    updateCmd.Parameters.AddWithValue("@AUTHMETHOD", "RFID + Fingerprint");
+                    updateCmd.Parameters.AddWithValue("@LOCATION", location);
+                    updateCmd.Parameters.AddWithValue("@STATUS", "Present");
+                    updateCmd.Parameters.AddWithValue("@SESSIONID", (object)sessionId ?? DBNull.Value);
+                    updateCmd.ExecuteNonQuery();
+                    
+                    LogMessage("INFO", $"Early arrival confirmed for user GUID: {userGuid}, preserved early time: {earlyArrivalTime.Value:HH:mm:ss}");
+                    Console.WriteLine($"✅ Early arrival confirmed - preserved early time: {earlyArrivalTime.Value:HH:mm:ss}");
+                    Console.WriteLine($"   UserGUID: {userGuid}");
+                    Console.WriteLine($"   ActionType: Sign In (was Early Arrival)");
+                    Console.WriteLine($"   AuthMethod: RFID + Fingerprint");
+                    Console.WriteLine($"   ScheduleID: {scheduleId}");
+                    Console.WriteLine($"   SessionID: {sessionId ?? "NULL"}");
+                    
+                    return new AttendanceAttemptResult { Success = true, ScheduleId = scheduleId, SubjectName = scheduleValidation.SubjectName };
+                }
+
+                // For new records, capture the scan time explicitly
+                DateTime scanTime = DateTime.Now;
+
                 // Compose insert
                 var insertCmd = new MySqlCommand(@"
                     INSERT INTO ATTENDANCERECORDS
-                    (ATTENDANCEID, USERID, SCHEDULEID, SESSIONID, SCANTYPE, SCANDATETIME, DATE, TIMEIN, AUTHMETHOD, LOCATION, STATUS, ACADEMICYEAR, SEMESTER)
-                    VALUES (UUID(), @USERID, @SCHEDULEID, @SESSIONID, @SCANTYPE, NOW(), CURRENT_DATE,
-                            CASE WHEN @SCANTYPE = 'time_in' THEN CURRENT_TIME ELSE NULL END,
-                            @AUTHMETHOD, @LOCATION, @STATUS,
+                    (ATTENDANCEID, USERID, SCHEDULEID, SESSIONID, SCANTYPE, SCANDATETIME, DATE, TIMEIN, AUTHMETHOD, LOCATION, STATUS, ACTIONTYPE, ACADEMICYEAR, SEMESTER)
+                    VALUES (UUID(), @USERID, @SCHEDULEID, @SESSIONID, @SCANTYPE, @SCANDATETIME, CURRENT_DATE,
+                            @TIMEIN,
+                            @AUTHMETHOD, @LOCATION, @STATUS, @ACTIONTYPE,
                             (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY='current_academic_year' LIMIT 1),
                             (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY='current_semester' LIMIT 1))
                 ", connection);
@@ -1089,16 +1287,20 @@ namespace FutronicAttendanceSystem.Database
                 insertCmd.Parameters.AddWithValue("@SCHEDULEID", (object)scheduleId ?? DBNull.Value);
                 insertCmd.Parameters.AddWithValue("@SESSIONID", (object)sessionId ?? DBNull.Value);
                 insertCmd.Parameters.AddWithValue("@SCANTYPE", scanType);
+                insertCmd.Parameters.AddWithValue("@SCANDATETIME", scanTime);
+                insertCmd.Parameters.AddWithValue("@TIMEIN", scanTime.TimeOfDay);
                 insertCmd.Parameters.AddWithValue("@AUTHMETHOD", authMethod);
                 insertCmd.Parameters.AddWithValue("@LOCATION", location);
                 insertCmd.Parameters.AddWithValue("@STATUS", status);
+                insertCmd.Parameters.AddWithValue("@ACTIONTYPE", actionType);
 
                 insertCmd.ExecuteNonQuery();
                 
-                LogMessage("INFO", $"Attendance recorded successfully for user GUID: {userGuid}, action: {action}, authMethod: {authMethod}");
+                LogMessage("INFO", $"Attendance recorded successfully for user GUID: {userGuid}, action: {action}, authMethod: {authMethod}, actionType: {actionType}");
                 Console.WriteLine($"✅ Attendance saved to ATTENDANCERECORDS:");
                 Console.WriteLine($"   UserGUID: {userGuid}");
                 Console.WriteLine($"   Action: {action}");
+                Console.WriteLine($"   ActionType: {actionType}");
                 Console.WriteLine($"   AuthMethod: {authMethod}");
                 Console.WriteLine($"   ScheduleID: {scheduleId}");
                 Console.WriteLine($"   SessionID: {sessionId ?? "NULL"}");
@@ -1251,7 +1453,12 @@ namespace FutronicAttendanceSystem.Database
                     LogMessage("DEBUG", $"Searching for instructor schedule with: userGuid={userGuid}, roomId={CurrentRoomId}, day={currentDay}, time={currentTime}");
                     Console.WriteLine($"DEBUG: Searching for instructor schedule with: userGuid={userGuid}, roomId={CurrentRoomId}, day={currentDay}, time={currentTime}");
                     
-                    // Use the same logic as the web system: TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                    // Load instructor early window from configuration  
+                    int instructorEarlyMinutes = LoadInstructorEarlyWindow();
+                    string earlyWindowTime = $"-00:{instructorEarlyMinutes:D2}:00";
+                    Console.WriteLine($"DEBUG: Instructor early arrival window: {instructorEarlyMinutes} minutes");
+                    
+                    // Use ADDTIME to allow early arrival within configured window
                     using (var cmdCheckInstructorSchedule = new MySqlCommand(@"
                         SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
                         FROM CLASSSCHEDULES cs
@@ -1259,13 +1466,14 @@ namespace FutronicAttendanceSystem.Database
                         WHERE s.INSTRUCTORID = @userGuid
                           AND cs.ROOMID = @roomId
                           AND cs.DAYOFWEEK = @currentDay
-                          AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                          AND TIME(NOW()) BETWEEN ADDTIME(cs.STARTTIME, @earlyWindow) AND cs.ENDTIME
                           AND cs.ACADEMICYEAR = @academicYear
                           AND cs.SEMESTER = @semester", connection))
                     {
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@currentDay", currentDay);
+                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@earlyWindow", earlyWindowTime);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
 
@@ -1367,7 +1575,12 @@ namespace FutronicAttendanceSystem.Database
                         }
                     }
                     
-                    // Use TIME(NOW()) BETWEEN for consistent time comparison (same as instructor check)
+                    // Load student early window from configuration
+                    int studentEarlyMinutes = LoadStudentEarlyArrivalWindow();
+                    string earlyWindowTime = $"-00:{studentEarlyMinutes:D2}:00";
+                    Console.WriteLine($"DEBUG: Student early arrival window: {studentEarlyMinutes} minutes");
+                    
+                    // Use ADDTIME to allow early arrival within configured window
                     using (var cmdCheckStudentSchedule = new MySqlCommand(@"
                         SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
                         FROM CLASSSCHEDULES cs
@@ -1377,13 +1590,14 @@ namespace FutronicAttendanceSystem.Database
                           AND se.STATUS = 'enrolled'
                           AND cs.ROOMID = @roomId
                           AND cs.DAYOFWEEK = @currentDay
-                          AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                          AND TIME(NOW()) BETWEEN ADDTIME(cs.STARTTIME, @earlyWindow) AND cs.ENDTIME
                           AND cs.ACADEMICYEAR = @academicYear
                           AND cs.SEMESTER = @semester", connection))
                     {
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@currentDay", currentDay);
+                        cmdCheckStudentSchedule.Parameters.AddWithValue("@earlyWindow", earlyWindowTime);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
 
@@ -1459,11 +1673,13 @@ namespace FutronicAttendanceSystem.Database
                             cmdCheckSessionBySubject.Parameters.AddWithValue("@subjectName", subjectName);
                             cmdCheckSessionBySubject.Parameters.AddWithValue("@roomId", CurrentRoomId);
                             
+                            bool sessionFound = false;
                             using (var reader = cmdCheckSessionBySubject.ExecuteReader())
                             {
                                 if (reader.Read())
                                 {
                                     // Found session by subject name match
+                                    sessionFound = true;
                                     result.IsValid = true;
                                     result.ScheduleId = scheduleId;
                                     result.SubjectName = subjectName;
@@ -1475,14 +1691,49 @@ namespace FutronicAttendanceSystem.Database
                                     Console.WriteLine($"✅ Active session found by subject match: {sessionId}");
                                     Console.WriteLine($"   Session ScheduleID: {sessionScheduleId} vs Student ScheduleID: {scheduleId}");
                                 }
-                                else
+                            }
+                            
+                            // Check early arrival only if no session was found (reader is now closed)
+                            if (!sessionFound)
+                            {
+                                // Check if within early arrival window using configured value
+                                int earlyWindowMinutes = LoadStudentEarlyArrivalWindow();
+                                Console.WriteLine($"DEBUG: Checking early arrival for student - window: {earlyWindowMinutes} minutes");
+                                
+                                using (var cmdGetStartTime = new MySqlCommand(
+                                    "SELECT STARTTIME FROM CLASSSCHEDULES WHERE SCHEDULEID = @scheduleId", connection))
                                 {
-                                    // No active session - instructor must start session first
-                                    result.Reason = "No active class session. Instructor must start the session first.";
-                                    LogMessage("WARNING", $"No active session found for scheduleId: {scheduleId} or subject: {subjectName}");
-                                    Console.WriteLine($"❌ No active session found for scheduleId: {scheduleId}");
-                                    Console.WriteLine($"❌ Also no session found for subject: {subjectName} in room: {CurrentRoomId}");
+                                    cmdGetStartTime.Parameters.AddWithValue("@scheduleId", scheduleId);
+                                    var startTimeObj = cmdGetStartTime.ExecuteScalar();
+                                    
+                                    if (startTimeObj != null && TimeSpan.TryParse(startTimeObj.ToString(), out var startTime))
+                                    {
+                                        var nowTime = DateTime.Now.TimeOfDay;
+                                        var timeUntilClass = (startTime - nowTime).TotalMinutes;
+                                        Console.WriteLine($"DEBUG: Current time: {nowTime}, Class starts: {startTime}, Minutes until class: {timeUntilClass:F0}");
+                                        
+                                        if (timeUntilClass > 0 && timeUntilClass <= earlyWindowMinutes)
+                                        {
+                                            // Allow early arrival within configured window
+                                            result.IsValid = true;
+                                            result.ScheduleId = scheduleId;
+                                            result.SubjectName = subjectName;
+                                            result.Reason = $"Early arrival allowed. Class starts in {timeUntilClass:F0} minutes.";
+                                            Console.WriteLine($"✅ Early arrival allowed (window: {earlyWindowMinutes} min, actual: {timeUntilClass:F0} min)");
+                                            return result;
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine($"❌ Too early or too late. Window: {earlyWindowMinutes} min, Time until class: {timeUntilClass:F0} min");
+                                        }
+                                    }
                                 }
+                                
+                                // Not in early arrival window - instructor must start session first
+                                result.Reason = "No active class session. Instructor must start the session first.";
+                                LogMessage("WARNING", $"No active session found for scheduleId: {scheduleId} or subject: {subjectName}");
+                                Console.WriteLine($"❌ No active session found for scheduleId: {scheduleId}");
+                                Console.WriteLine($"❌ Also no session found for subject: {subjectName} in room: {CurrentRoomId}");
                             }
                         }
                     }

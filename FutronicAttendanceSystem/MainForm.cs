@@ -5725,6 +5725,78 @@ These settings allow you to customize the attendance system behavior for differe
             }
         }
 
+        // Record early arrival using direct database access
+        private async Task RecordEarlyArrivalRfid(string userName, string userGuid, string rfidTag)
+        {
+            try
+            {
+                Console.WriteLine("=== EARLY ARRIVAL RFID SCAN START ===");
+                Console.WriteLine($"Student: {userName}");
+                Console.WriteLine($"User GUID: {userGuid}");
+                Console.WriteLine($"RFID Tag: {rfidTag}");
+
+                if (dbManager == null)
+                {
+                    Console.WriteLine("❌ Database manager not available");
+                    SetRfidStatusText("❌ System error - database not available");
+                    return;
+                }
+
+                // Call database manager to record early arrival
+                var result = dbManager.TryRecordAttendanceByGuid(userGuid, "Early Arrival (RFID)", "outside");
+
+                if (result.Success)
+                {
+                    Console.WriteLine($"✅ Early arrival recorded for {result.SubjectName}");
+                    
+                    this.Invoke(new Action(() => {
+                        SetRfidStatusText($"⏰ Early arrival: {userName} for {result.SubjectName}. Scan inside when class starts.");
+                        AddRfidAttendanceRecord(userName, "Early Arrival", $"Awaiting Confirmation - {result.SubjectName}");
+                    }));
+
+                    // Trigger door access for early arrivals
+                    await RequestRfidLockControl(userGuid, "Student Early Arrival (RFID)", rfidTag);
+                }
+                else
+                {
+                    Console.WriteLine($"❌ Early arrival denied: {result.Reason}");
+                    
+                    this.Invoke(new Action(() => {
+                        if (result.Reason.Contains("No class starting"))
+                        {
+                            SetRfidStatusText($"❌ Too early. {result.Reason}");
+                            AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Too Early");
+                        }
+                        else if (result.Reason.Contains("Not enrolled"))
+                        {
+                            SetRfidStatusText($"❌ Not enrolled. {result.Reason}");
+                            AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Not Enrolled");
+                        }
+                        else if (result.Reason.Contains("Already recorded"))
+                        {
+                            SetRfidStatusText($"❌ Already scanned. {result.Reason}");
+                            AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Duplicate");
+                        }
+                        else
+                        {
+                            SetRfidStatusText($"❌ {result.Reason}");
+                            AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Error");
+                        }
+                    }));
+                }
+                
+                Console.WriteLine("=== EARLY ARRIVAL RFID SCAN END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error recording early arrival: {ex.Message}");
+                this.Invoke(new Action(() => {
+                    SetRfidStatusText($"❌ Early arrival error: {ex.Message}");
+                    AddRfidAttendanceRecord(userName, "Early Arrival Error", ex.Message);
+                }));
+            }
+        }
+
         // Request lock control for RFID scans - Auto-discover and send command to ESP32 RFID endpoint
         private async Task RequestRfidLockControl(string userGuid, string action, string rfidData)
         {
@@ -7610,11 +7682,31 @@ These settings allow you to customize the attendance system behavior for differe
                     }
                     else
                     {
-                        Console.WriteLine($"❌ No active session found");
-                        Console.WriteLine($"   State: {currentSessionState}");
-                        Console.WriteLine("   Instructor must start a session first!");
-                        SetRfidStatusText($"❌ No active session. Instructor must start attendance session first.");
-                        AddRfidAttendanceRecord(userInfo.Username, "Session Not Active", currentSessionState.ToString());
+                        // Check if this is an outside sensor scan - try early arrival
+                        if (isDualSensorMode && currentScanLocation == "outside")
+                        {
+                            Console.WriteLine($"⏰ No active session - attempting early arrival for {userInfo.Username}");
+                            
+                            // Call early arrival API
+                            System.Threading.Tasks.Task.Run(async () => {
+                                try
+                                {
+                                    await RecordEarlyArrivalRfid(userInfo.Username, userInfo.EmployeeId, rfidData);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Early arrival scan failed: {ex.Message}");
+                                }
+                            });
+                        }
+                        else
+                        {
+                            Console.WriteLine($"❌ No active session found");
+                            Console.WriteLine($"   State: {currentSessionState}");
+                            Console.WriteLine("   Instructor must start a session first!");
+                            SetRfidStatusText($"❌ No active session. Instructor must start attendance session first.");
+                            AddRfidAttendanceRecord(userInfo.Username, "Session Not Active", currentSessionState.ToString());
+                        }
                     }
                 }
                 else

@@ -226,4 +226,22 @@ router.get('/online', authenticateToken, requireInstructor, async (req, res) => 
     }
 });
 
+// Debug endpoint to see all devices in registry
+router.get('/debug/registry', (req, res) => {
+    try {
+        const allDevices = Array.from(deviceRegistry.deviceIdToDevice.values());
+        res.json({ 
+            total_devices: allDevices.length,
+            devices: allDevices,
+            registry_info: {
+                heartbeat_ttl_ms: deviceRegistry.heartbeatTtlMs,
+                cleanup_interval_ms: deviceRegistry.cleanupIntervalMs
+            }
+        });
+    } catch (error) {
+        console.error('Debug registry error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
 module.exports = router; 

@@ -42,6 +42,7 @@ app.use('/api/import', require('./routes/import'));
 app.use('/api/lock-control', require('./routes/lockControl'));
 app.use('/api/archive', require('./routes/archive'));
 app.use('/api/backup', require('./routes/backup'));
+app.use('/api/reports', require('./routes/reports'));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -82,6 +83,9 @@ const PORT = process.env.PORT || 5000;
 // Start UDP discovery server
 const udpDiscoveryServer = require('./udpDiscoveryServer');
 
+// Start early arrival auto-confirmation service
+const earlyArrivalService = require('./services/earlyArrivalService');
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 IoT Attendance System API Server running on port ${PORT}`);
     console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -89,6 +93,17 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Network access: http://0.0.0.0:${PORT}/api/health`);
     console.log(`📱 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
     console.log(`📡 UDP Discovery Server running on port 8888`);
+    
+    // Start scheduled auto-confirmation job (runs every 5 minutes)
+    setInterval(async () => {
+        try {
+            await earlyArrivalService.autoConfirmNoShowInstructor();
+        } catch (error) {
+            console.error('⏰ Early arrival auto-confirmation error:', error);
+        }
+    }, 5 * 60 * 1000); // Every 5 minutes
+    
+    console.log('⏰ Early arrival auto-confirmation service started (runs every 5 minutes)');
 });
 
 module.exports = app; 
