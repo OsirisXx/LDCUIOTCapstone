@@ -36,6 +36,7 @@ function UnifiedManagement() {
   const [selectedSemester, setSelectedSemester] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [showModal, setShowModal] = useState(false);
+  const [modalAnimation, setModalAnimation] = useState('hidden');
   const [modalData, setModalData] = useState(null);
   const [modalType, setModalType] = useState(''); // 'room', 'subject', 'schedule'
   const [expandedCards, setExpandedCards] = useState(new Set());
@@ -45,6 +46,7 @@ function UnifiedManagement() {
   const [selectedItems, setSelectedItems] = useState(new Set());
   const [selectAll, setSelectAll] = useState(false);
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+  const [bulkDeleteModalAnimation, setBulkDeleteModalAnimation] = useState('hidden');
   const [bulkDeleteType, setBulkDeleteType] = useState('');
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   
@@ -58,6 +60,7 @@ function UnifiedManagement() {
   const [importResults, setImportResults] = useState(null);
   const [showPreview, setShowPreview] = useState(false);
   const [showDataModal, setShowDataModal] = useState(false);
+  const [dataModalAnimation, setDataModalAnimation] = useState('hidden');
   const [activeTab, setActiveTab] = useState('subjects');
   const [importOptions, setImportOptions] = useState({
     updateExisting: false,
@@ -69,12 +72,13 @@ function UnifiedManagement() {
   
   // Delete functionality states
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteModalAnimation, setDeleteModalAnimation] = useState('hidden');
   const [deleteItem, setDeleteItem] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [modalAnimation, setModalAnimation] = useState('hidden');
   
   // TEMPORARY: Schedule editing states
   const [showEditModal, setShowEditModal] = useState(false);
+  const [editModalAnimation, setEditModalAnimation] = useState('hidden');
   const [editingSchedule, setEditingSchedule] = useState(null);
   const [editFormData, setEditFormData] = useState({
     subject_id: '',
@@ -161,6 +165,7 @@ function UnifiedManagement() {
       setModalData(response.data);
       setModalType(type);
       setShowModal(true);
+      setTimeout(() => setModalAnimation('visible'), 10);
     } catch (error) {
       console.error('Error fetching detailed data:', error);
       toast.error('Failed to load detailed information');
@@ -211,7 +216,7 @@ function UnifiedManagement() {
       confirmText
     });
     setShowDeleteModal(true);
-    setTimeout(() => setModalAnimation('visible'), 10);
+    setTimeout(() => setDeleteModalAnimation('visible'), 10);
   };
 
   const confirmDelete = async () => {
@@ -279,7 +284,7 @@ function UnifiedManagement() {
       }
     } finally {
       setIsDeleting(false);
-      setModalAnimation('hidden');
+      setDeleteModalAnimation('hidden');
       setTimeout(() => {
         setShowDeleteModal(false);
         setDeleteItem(null);
@@ -357,7 +362,7 @@ function UnifiedManagement() {
     
     setBulkDeleteType(sortBy);
     setShowBulkDeleteModal(true);
-    setTimeout(() => setModalAnimation('visible'), 10);
+    setTimeout(() => setBulkDeleteModalAnimation('visible'), 10);
   };
 
   const confirmBulkDelete = async () => {
@@ -428,7 +433,7 @@ function UnifiedManagement() {
       }
     } finally {
       setIsBulkDeleting(false);
-      setModalAnimation('hidden');
+      setBulkDeleteModalAnimation('hidden');
       setTimeout(() => {
         setShowBulkDeleteModal(false);
         setBulkDeleteType('');
@@ -558,6 +563,7 @@ function UnifiedManagement() {
   const handleDeleteClick = (item, type) => {
     setDeleteItem({ ...item, type });
     setShowDeleteModal(true);
+    setTimeout(() => setDeleteModalAnimation('visible'), 10);
   };
 
   const handleDeleteConfirm = async () => {
@@ -597,8 +603,11 @@ function UnifiedManagement() {
       await fetchData();
       
       // Close modal
-      setShowDeleteModal(false);
-      setDeleteItem(null);
+      setDeleteModalAnimation('hidden');
+      setTimeout(() => {
+        setShowDeleteModal(false);
+        setDeleteItem(null);
+      }, 300);
 
     } catch (error) {
       console.error('Delete error:', error);
@@ -613,8 +622,11 @@ function UnifiedManagement() {
   };
 
   const handleDeleteCancel = () => {
-    setShowDeleteModal(false);
-    setDeleteItem(null);
+    setDeleteModalAnimation('hidden');
+    setTimeout(() => {
+      setShowDeleteModal(false);
+      setDeleteItem(null);
+    }, 300);
   };
 
   // TEMPORARY: Schedule editing functions
@@ -630,6 +642,7 @@ function UnifiedManagement() {
       semester: schedule.SEMESTER || ''
     });
     setShowEditModal(true);
+    setTimeout(() => setEditModalAnimation('visible'), 10);
   };
 
   const handleEditSubmit = async (e) => {
@@ -658,8 +671,11 @@ function UnifiedManagement() {
       await fetchData();
       
       // Close modal
-      setShowEditModal(false);
-      setEditingSchedule(null);
+      setEditModalAnimation('hidden');
+      setTimeout(() => {
+        setShowEditModal(false);
+        setEditingSchedule(null);
+      }, 300);
       setEditFormData({
         subject_id: '',
         room_id: '',
@@ -709,8 +725,10 @@ function UnifiedManagement() {
         // If currently auto, snap to pixel height first
         const current = el.scrollHeight;
         setHeight(`${current}px`);
-        // Next frame collapse to zero
-        requestAnimationFrame(() => setHeight('0px'));
+        // Wait for browser to paint, then collapse to zero
+        setTimeout(() => {
+          requestAnimationFrame(() => setHeight('0px'));
+        }, 10);
       }
     }, [isOpen]);
 
@@ -723,7 +741,7 @@ function UnifiedManagement() {
     return (
       <div
         ref={containerRef}
-        style={{ height, transition: 'height 150ms ease, opacity 150ms ease', opacity: isOpen ? 1 : 0, willChange: 'height' }}
+        style={{ height, transition: 'height 300ms ease-in-out, opacity 300ms ease-in-out', opacity: isOpen ? 1 : 0, willChange: 'height' }}
       >
         <div className="pt-2">
           {children}
@@ -1585,6 +1603,7 @@ function UnifiedManagement() {
                       onClick={() => {
                         setActiveTab('subjects');
                         setShowDataModal(true);
+                        setTimeout(() => setDataModalAnimation('visible'), 10);
                       }}
                       className="inline-flex items-center px-4 py-2 border border-blue-300 rounded-md text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100"
                     >
@@ -1838,7 +1857,9 @@ function UnifiedManagement() {
       {/* Detail Modal */}
       {showModal && modalData && createPortal(
         <div 
-          className="fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60]"
+          className={`fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60] transition-opacity duration-300 ease-in-out ${
+            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}
           style={{
             top: 0,
             left: 0,
@@ -1849,17 +1870,24 @@ function UnifiedManagement() {
             zIndex: 60
           }}
         >
-          <div className="relative top-10 mx-auto p-6 border max-w-6xl shadow-lg rounded-md bg-white my-8">
+          <div className={`relative top-10 mx-auto p-6 border max-w-6xl shadow-lg rounded-md bg-white my-8 transition-all duration-300 ease-out ${
+            modalAnimation === 'visible' 
+              ? 'scale-100 opacity-100 translate-y-0' 
+              : 'scale-95 opacity-0 translate-y-4'
+          }`}>
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-semibold text-gray-900">  
                 {modalType.charAt(0).toUpperCase() + modalType.slice(1)} Details
               </h2>
               <button
                 onClick={() => {
-                  setShowModal(false);
-                  setModalData(null);
-                  setModalType('');
-                  setStudentSearchTerm('');
+                  setModalAnimation('hidden');
+                  setTimeout(() => {
+                    setShowModal(false);
+                    setModalData(null);
+                    setModalType('');
+                    setStudentSearchTerm('');
+                  }, 300);
                 }}
                 className="text-gray-400 hover:text-gray-600"
               >
@@ -1874,10 +1902,13 @@ function UnifiedManagement() {
             <div className="mt-6 flex justify-end">
               <button
                 onClick={() => {
-                  setShowModal(false);
-                  setModalData(null);
-                  setModalType('');
-                  setStudentSearchTerm('');
+                  setModalAnimation('hidden');
+                  setTimeout(() => {
+                    setShowModal(false);
+                    setModalData(null);
+                    setModalType('');
+                    setStudentSearchTerm('');
+                  }, 300);
                 }}
                 className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
@@ -1892,7 +1923,9 @@ function UnifiedManagement() {
       {/* Data Preview Modal */}
       {showDataModal && parsedData && createPortal(
         <div 
-          className="fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60]"
+          className={`fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60] transition-opacity duration-300 ease-in-out ${
+            dataModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}
           style={{
             top: 0,
             left: 0,
@@ -1903,13 +1936,20 @@ function UnifiedManagement() {
             zIndex: 60
           }}
         >
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-6xl shadow-lg rounded-md bg-white">
+          <div className={`relative top-20 mx-auto p-5 border w-11/12 max-w-6xl shadow-lg rounded-md bg-white transition-all duration-300 ease-out ${
+            dataModalAnimation === 'visible' 
+              ? 'scale-100 opacity-100 translate-y-0' 
+              : 'scale-95 opacity-0 translate-y-4'
+          }`}>
             <div className="mt-3">
               {/* Modal Header */}
               <div className="flex justify-between items-center mb-6">
                 <h3 className="text-lg font-semibold text-gray-900">PDF Data Preview</h3>
                 <button
-                  onClick={() => setShowDataModal(false)}
+                  onClick={() => {
+                    setDataModalAnimation('hidden');
+                    setTimeout(() => setShowDataModal(false), 300);
+                  }}
                   className="text-gray-400 hover:text-gray-600"
                 >
                   <XMarkIcon className="h-6 w-6" />
@@ -2087,15 +2127,21 @@ function UnifiedManagement() {
               {/* Modal Footer */}
               <div className="flex justify-end space-x-3 mt-6 pt-4 border-t border-gray-200">
                 <button
-                  onClick={() => setShowDataModal(false)}
+                  onClick={() => {
+                    setDataModalAnimation('hidden');
+                    setTimeout(() => setShowDataModal(false), 300);
+                  }}
                   className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
                 >
                   Close
                 </button>
                 <button
                   onClick={() => {
-                    setShowDataModal(false);
-                    handleImport();
+                    setDataModalAnimation('hidden');
+                    setTimeout(() => {
+                      setShowDataModal(false);
+                      handleImport();
+                    }, 300);
                   }}
                   disabled={isImporting}
                   className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
@@ -2124,12 +2170,12 @@ function UnifiedManagement() {
         <div className="fixed inset-0 overflow-y-auto z-[60]">
           {/* Backdrop with blur and fade animation */}
           <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
-            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+            deleteModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
           }`}>
             <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
               {/* Modal container with scale and fade animation */}
               <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
-                modalAnimation === 'visible' 
+                deleteModalAnimation === 'visible' 
                   ? 'scale-100 opacity-100 translate-y-0' 
                   : 'scale-95 opacity-0 translate-y-4'
               }`}>
@@ -2151,7 +2197,7 @@ function UnifiedManagement() {
                   <button
                     type="button"
                     onClick={() => {
-                      setModalAnimation('hidden');
+                      setDeleteModalAnimation('hidden');
                       setTimeout(() => {
                         setShowDeleteModal(false);
                         setDeleteItem(null);
@@ -2192,12 +2238,12 @@ function UnifiedManagement() {
         <div className="fixed inset-0 overflow-y-auto z-[60]">
           {/* Backdrop with blur and fade animation */}
           <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
-            modalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+            bulkDeleteModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
           }`}>
             <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
               {/* Modal container with scale and fade animation */}
               <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
-                modalAnimation === 'visible' 
+                bulkDeleteModalAnimation === 'visible' 
                   ? 'scale-100 opacity-100 translate-y-0' 
                   : 'scale-95 opacity-0 translate-y-4'
               }`}>
@@ -2219,7 +2265,7 @@ function UnifiedManagement() {
                   <button
                     type="button"
                     onClick={() => {
-                      setModalAnimation('hidden');
+                      setBulkDeleteModalAnimation('hidden');
                       setTimeout(() => {
                         setShowBulkDeleteModal(false);
                         setBulkDeleteType('');
@@ -2258,7 +2304,9 @@ function UnifiedManagement() {
       {/* TEMPORARY: Schedule Edit Modal */}
       {showEditModal && editingSchedule && createPortal(
         <div 
-          className="fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60]"
+          className={`fixed bg-gray-600 bg-opacity-50 overflow-y-auto z-[60] transition-opacity duration-300 ease-in-out ${
+            editModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}
           style={{
             top: 0,
             left: 0,
@@ -2269,7 +2317,11 @@ function UnifiedManagement() {
             zIndex: 60
           }}
         >
-          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+          <div className={`relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white transition-all duration-300 ease-out ${
+            editModalAnimation === 'visible' 
+              ? 'scale-100 opacity-100 translate-y-0' 
+              : 'scale-95 opacity-0 translate-y-4'
+          }`}>
             <div className="mt-3">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-medium text-gray-900">
@@ -2277,17 +2329,20 @@ function UnifiedManagement() {
                 </h3>
                 <button
                   onClick={() => {
-                    setShowEditModal(false);
-                    setEditingSchedule(null);
-                    setEditFormData({
-                      subject_id: '',
-                      room_id: '',
-                      day_of_week: '',
-                      start_time: '',
-                      end_time: '',
-                      academic_year: '',
-                      semester: ''
-                    });
+                    setEditModalAnimation('hidden');
+                    setTimeout(() => {
+                      setShowEditModal(false);
+                      setEditingSchedule(null);
+                      setEditFormData({
+                        subject_id: '',
+                        room_id: '',
+                        day_of_week: '',
+                        start_time: '',
+                        end_time: '',
+                        academic_year: '',
+                        semester: ''
+                      });
+                    }, 300);
                   }}
                   className="text-gray-400 hover:text-gray-600"
                 >
@@ -2408,17 +2463,20 @@ function UnifiedManagement() {
                   <button
                     type="button"
                     onClick={() => {
-                      setShowEditModal(false);
-                      setEditingSchedule(null);
-                      setEditFormData({
-                        subject_id: '',
-                        room_id: '',
-                        day_of_week: '',
-                        start_time: '',
-                        end_time: '',
-                        academic_year: '',
-                        semester: ''
-                      });
+                      setEditModalAnimation('hidden');
+                      setTimeout(() => {
+                        setShowEditModal(false);
+                        setEditingSchedule(null);
+                        setEditFormData({
+                          subject_id: '',
+                          room_id: '',
+                          day_of_week: '',
+                          start_time: '',
+                          end_time: '',
+                          academic_year: '',
+                          semester: ''
+                        });
+                      }, 300);
                     }}
                     className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
                   >

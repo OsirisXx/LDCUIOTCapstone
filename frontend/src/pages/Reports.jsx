@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { 
   ChartBarIcon,
-  CalendarDaysIcon,
   ClockIcon,
   UserGroupIcon,
   MagnifyingGlassIcon,
@@ -14,13 +13,7 @@ import {
   XCircleIcon,
   AcademicCapIcon,
   MapPinIcon,
-  BuildingOfficeIcon,
-  BookOpenIcon,
-  ChevronRightIcon,
-  ChevronDownIcon,
-  PresentationChartBarIcon,
-  CalendarIcon,
-  UsersIcon
+  ChevronRightIcon
 } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 import axios from 'axios';
@@ -49,12 +42,13 @@ function Reports() {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [groupedReports, setGroupedReports] = useState({});
   const [groupBy, setGroupBy] = useState('subject'); // 'subject', 'date', 'session'
-  const [expandedCards, setExpandedCards] = useState(new Set());
+  const [currentSubject, setCurrentSubject] = useState(null);
   const [viewMode, setViewMode] = useState('cards'); // 'cards', 'table'
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [showGroupDetails, setShowGroupDetails] = useState(false);
   const [showClearDialog, setShowClearDialog] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [expandedCards, setExpandedCards] = useState(new Set());
 
   useEffect(() => {
     fetchInitialData();
@@ -63,12 +57,6 @@ function Reports() {
   useEffect(() => {
     fetchReports();
   }, [filters]);
-
-  useEffect(() => {
-    if (reports.length > 0) {
-      groupReports(reports);
-    }
-  }, [groupBy, reports]);
 
   const fetchInitialData = async () => {
     try {
@@ -81,7 +69,7 @@ function Reports() {
       const headers = { Authorization: `Bearer ${token}` };
 
       // Fetch subjects, academic years, and semesters in parallel
-      const [subjectsRes, academicYearsRes, semestersRes] = await Promise.all([
+      const [subjectsRes] = await Promise.all([
         axios.get('/api/subjects', { headers }),
         axios.get('/api/logs/attendance/stats', { headers }),
         axios.get('/api/logs/attendance/stats', { headers })
@@ -170,65 +158,138 @@ function Reports() {
     }
   };
 
-  const groupReports = (reports) => {
-    const grouped = {};
-    
-    reports.forEach(report => {
-      let key;
-      let title;
-      let subtitle;
+  const groupReports = useCallback((reports) => {
+    if (groupBy === 'subject') {
+      // Create hierarchical structure: Subject -> Sessions
+      const hierarchicalGrouped = {};
       
-      switch (groupBy) {
-        case 'subject':
-          key = `${report.SUBJECTCODE}-${report.SUBJECTNAME}`;
-          title = `${report.SUBJECTCODE} - ${report.SUBJECTNAME}`;
-          subtitle = `${report.ACADEMICYEAR} • ${report.SEMESTER}`;
-          break;
-        case 'date':
-          const date = new Date(report.SCANDATETIME).toISOString().split('T')[0];
-          key = date;
-          title = new Date(date).toLocaleDateString('en-US', { 
-            weekday: 'long', 
-            year: 'numeric', 
-            month: 'long', 
-            day: 'numeric' 
-          });
-          subtitle = `${reports.filter(r => new Date(r.SCANDATETIME).toISOString().split('T')[0] === date).length} records`;
-          break;
-        case 'session':
-          key = `${report.SUBJECTCODE}-${report.DAYOFWEEK}-${report.STARTTIME}`;
-          title = `${report.SUBJECTCODE} - ${report.DAYOFWEEK}`;
-          subtitle = `${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)} • ${report.ROOMNUMBER}`;
-          break;
-        default:
-          key = 'all';
-          title = 'All Reports';
-          subtitle = `${reports.length} records`;
-      }
+      reports.forEach(report => {
+        const attendanceDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toISOString().split('T')[0];
+        const dayOfWeek = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
+        const roomNumber = report.ROOMNUMBER || 'Unknown Room';
+        
+        // Subject key
+        const subjectKey = `${report.SUBJECTCODE}-${report.SUBJECTNAME}`;
+        // Session key within subject
+        const sessionKey = `${attendanceDate}-${roomNumber}-${report.STARTTIME}`;
+        
+        // Initialize subject if not exists
+        if (!hierarchicalGrouped[subjectKey]) {
+          hierarchicalGrouped[subjectKey] = {
+            title: `${report.SUBJECTCODE} - ${report.SUBJECTNAME}`,
+            subtitle: `${report.ACADEMICYEAR} • ${report.SEMESTER}`,
+            sessions: {},
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            }
+          };
+        }
+        
+        // Initialize session if not exists
+        if (!hierarchicalGrouped[subjectKey].sessions[sessionKey]) {
+          hierarchicalGrouped[subjectKey].sessions[sessionKey] = {
+            title: `${dayOfWeek}, ${new Date(attendanceDate).toLocaleDateString('en-US', { 
+              month: 'short', 
+              day: 'numeric' 
+            })}`,
+            subtitle: `Room ${roomNumber} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`,
+            reports: [],
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            }
+          };
+        }
+        
+        // Add report to session
+        hierarchicalGrouped[subjectKey].sessions[sessionKey].reports.push(report);
+        hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.total++;
+        if (report.STATUS === 'Present') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.present++;
+        else if (report.STATUS === 'Late') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.late++;
+        else if (report.STATUS === 'Absent') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.absent++;
+        
+        // Update subject totals
+        hierarchicalGrouped[subjectKey].stats.total++;
+        if (report.STATUS === 'Present') hierarchicalGrouped[subjectKey].stats.present++;
+        else if (report.STATUS === 'Late') hierarchicalGrouped[subjectKey].stats.late++;
+        else if (report.STATUS === 'Absent') hierarchicalGrouped[subjectKey].stats.absent++;
+      });
       
-      if (!grouped[key]) {
-        grouped[key] = {
-          title,
-          subtitle,
-          reports: [],
-          stats: {
-            total: 0,
-            present: 0,
-            late: 0,
-            absent: 0
-          }
-        };
-      }
+      setGroupedReports(hierarchicalGrouped);
+    } else {
+      // Original flat grouping for other modes
+      const grouped = {};
       
-      grouped[key].reports.push(report);
-      grouped[key].stats.total++;
-      if (report.STATUS === 'Present') grouped[key].stats.present++;
-      else if (report.STATUS === 'Late') grouped[key].stats.late++;
-      else if (report.STATUS === 'Absent') grouped[key].stats.absent++;
-    });
-    
-    setGroupedReports(grouped);
-  };
+      reports.forEach(report => {
+        let key;
+        let title;
+        let subtitle;
+        
+        switch (groupBy) {
+          case 'date':
+            const date = new Date(report.SCANDATETIME).toISOString().split('T')[0];
+            key = date;
+            title = new Date(date).toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              year: 'numeric', 
+              month: 'long', 
+              day: 'numeric' 
+            });
+            subtitle = `${reports.filter(r => new Date(r.SCANDATETIME).toISOString().split('T')[0] === date).length} records`;
+            break;
+          case 'session':
+            // Enhanced session grouping with day and room
+            const sessionDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toISOString().split('T')[0];
+            const sessionDay = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
+            const sessionRoom = report.ROOMNUMBER || 'Unknown Room';
+            key = `${report.SUBJECTCODE}-${sessionDate}-${sessionRoom}-${report.STARTTIME}`;
+            title = `${report.SUBJECTCODE} - ${sessionDay}`;
+            subtitle = `${new Date(sessionDate).toLocaleDateString('en-US', { 
+              month: 'short', 
+              day: 'numeric' 
+            })} • Room ${sessionRoom} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`;
+            break;
+          default:
+            key = 'all';
+            title = 'All Reports';
+            subtitle = `${reports.length} records`;
+        }
+        
+        if (!grouped[key]) {
+          grouped[key] = {
+            title,
+            subtitle,
+            reports: [],
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            }
+          };
+        }
+        
+        grouped[key].reports.push(report);
+        grouped[key].stats.total++;
+        if (report.STATUS === 'Present') grouped[key].stats.present++;
+        else if (report.STATUS === 'Late') grouped[key].stats.late++;
+        else if (report.STATUS === 'Absent') grouped[key].stats.absent++;
+      });
+      
+      setGroupedReports(grouped);
+    }
+  }, [groupBy]);
+
+  useEffect(() => {
+    if (reports.length > 0) {
+      groupReports(reports);
+    }
+  }, [reports, groupReports]);
 
   const handleFilterChange = (key, value) => {
     setFilters(prev => ({
@@ -397,6 +458,14 @@ function Reports() {
     setShowDetailModal(true);
   };
 
+  const navigateToSubject = (subjectKey, subjectData) => {
+    setCurrentSubject({ key: subjectKey, data: subjectData });
+  };
+
+  const backToSubjects = () => {
+    setCurrentSubject(null);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -405,7 +474,264 @@ function Reports() {
     );
   }
 
+  // Show detailed group view (check this first)
+  if (showGroupDetails && selectedGroup) {
+    return (
+      <div className="space-y-6">
+        {/* Breadcrumb Navigation */}
+        <div className="bg-white rounded-lg shadow border border-gray-200 p-4">
+          <nav className="flex items-center space-x-2 text-sm">
+            <button
+              onClick={backToMainView}
+              className="text-blue-600 hover:text-blue-800 flex items-center"
+            >
+              <ChevronRightIcon className="h-4 w-4 mr-1 rotate-180" />
+              Back to Reports
+            </button>
+            <span className="text-gray-400">/</span>
+            <span className="text-gray-900 font-medium">{selectedGroup.title}</span>
+          </nav>
+        </div>
+
+        {/* Group Header */}
+        <div className="bg-white rounded-lg shadow border border-gray-200 p-6">
+          <div className="flex items-start justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">{selectedGroup.title}</h1>
+              <p className="text-gray-600 mt-1">{selectedGroup.subtitle}</p>
+            </div>
+            
+            {/* Group Statistics */}
+            <div className="flex space-x-8">
+              <div className="text-center">
+                <div className="text-3xl font-bold text-green-600">{selectedGroup.stats.present}</div>
+                <div className="text-sm text-gray-500">Present</div>
+              </div>
+              <div className="text-center">
+                <div className="text-3xl font-bold text-yellow-600">{selectedGroup.stats.late}</div>
+                <div className="text-sm text-gray-500">Late</div>
+              </div>
+              <div className="text-center">
+                <div className="text-3xl font-bold text-red-600">{selectedGroup.stats.absent}</div>
+                <div className="text-sm text-gray-500">Absent</div>
+              </div>
+              <div className="text-center">
+                <div className="text-3xl font-bold text-blue-600">{selectedGroup.stats.total}</div>
+                <div className="text-sm text-gray-500">Total</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Detailed Attendance Records */}
+        <div className="bg-white rounded-lg shadow border border-gray-200">
+          <div className="px-6 py-4 border-b border-gray-200">
+            <h3 className="text-lg font-medium text-gray-900">Attendance Records</h3>
+            <p className="text-sm text-gray-500">
+              {selectedGroup.reports.length} record{selectedGroup.reports.length !== 1 ? 's' : ''} found
+            </p>
+          </div>
+          
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Student
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Date & Time
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Location
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {selectedGroup.reports.map((report) => (
+                  <tr key={report.ATTENDANCEID} className="hover:bg-gray-50">
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center">
+                        <div className="flex-shrink-0 h-10 w-10">
+                          <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
+                            <AcademicCapIcon className="h-5 w-5 text-blue-600" />
+                          </div>
+                        </div>
+                        <div className="ml-4">
+                          <div className="text-sm font-medium text-gray-900">
+                            {report.FIRSTNAME} {report.LASTNAME}
+                          </div>
+                          <div className="text-sm text-gray-500">
+                            ID: {report.STUDENTID || 'N/A'}
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm text-gray-900">
+                        {formatDateTime(report.SCANDATETIME)}
+                      </div>
+                      <div className="text-sm text-gray-500">
+                        {report.AUTHMETHOD || 'Fingerprint'}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center">
+                        {getStatusIcon(report.STATUS)}
+                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.STATUS)}`}>
+                          {report.STATUS || 'Unknown'}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm text-gray-900">{report.LOCATION || 'N/A'}</div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <button
+                        onClick={() => viewReportDetails(report)}
+                        className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+                      >
+                        View Details
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Show subject detail view
+  if (currentSubject) {
+    const { data: subjectData } = currentSubject;
+    const sessions = subjectData.sessions || {};
+    
+    return (
+      <div className="space-y-6">
+        {/* Breadcrumb Navigation */}
+        <div className="bg-white rounded-lg shadow border border-gray-200 p-4">
+          <nav className="flex items-center space-x-2 text-sm">
+            <button
+              onClick={backToSubjects}
+              className="text-blue-600 hover:text-blue-800 flex items-center"
+            >
+              <ChevronRightIcon className="h-4 w-4 mr-1 rotate-180" />
+              Back to Subjects
+            </button>
+            <span className="text-gray-400">/</span>
+            <span className="text-gray-900 font-medium">{subjectData.title}</span>
+          </nav>
+        </div>
+
+        {/* Subject Header */}
+        <div className="bg-white rounded-lg shadow border border-gray-200 p-6">
+          <div className="flex items-start justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">{subjectData.title}</h1>
+              <p className="text-gray-600 mt-1">{subjectData.subtitle}</p>
+            </div>
+            
+            {/* Subject Statistics */}
+            <div className="flex space-x-8">
+              <div className="text-center">
+                <div className="text-3xl font-bold text-green-600">{subjectData.stats.present}</div>
+                <div className="text-sm text-gray-500">Present</div>
+              </div>
+              <div className="text-center">
+                <div className="text-3xl font-bold text-yellow-600">{subjectData.stats.late}</div>
+                <div className="text-sm text-gray-500">Late</div>
+              </div>
+              <div className="text-center">
+                <div className="text-3xl font-bold text-red-600">{subjectData.stats.absent}</div>
+                <div className="text-sm text-gray-500">Absent</div>
+              </div>
+              <div className="text-center">
+                <div className="text-3xl font-bold text-blue-600">{subjectData.stats.total}</div>
+                <div className="text-sm text-gray-500">Total</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Sessions Grid */}
+        <div className="bg-white rounded-lg shadow border border-gray-200 p-6">
+          <h2 className="text-xl font-semibold text-gray-900 mb-6">Sessions</h2>
+          
+          {Object.keys(sessions).length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {Object.entries(sessions).map(([sessionKey, session]) => (
+                <div 
+                  key={sessionKey} 
+                  className="bg-gray-50 rounded-lg p-6 border border-gray-200 hover:shadow-md hover:border-blue-300 transition-all cursor-pointer"
+                  onClick={() => {
+                    viewGroupDetails(sessionKey, session);
+                  }}
+                >
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex-1">
+                      <h3 className="text-lg font-semibold text-gray-900 mb-1">{session.title}</h3>
+                      <p className="text-sm text-gray-600">{session.subtitle}</p>
+                      <p className="text-xs text-blue-600 mt-1">Click to view students</p>
+                    </div>
+                    
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        viewGroupDetails(sessionKey, session);
+                      }}
+                      className="p-2 text-gray-400 hover:text-gray-600 rounded-md hover:bg-gray-200"
+                    >
+                      <EyeIcon className="h-5 w-5" />
+                    </button>
+                  </div>
+                  
+                  {/* Session Statistics */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-green-600">{session.stats.present}</div>
+                      <div className="text-xs text-gray-500">Present</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-yellow-600">{session.stats.late}</div>
+                      <div className="text-xs text-gray-500">Late</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-red-600">{session.stats.absent}</div>
+                      <div className="text-xs text-gray-500">Absent</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-blue-600">{session.stats.total}</div>
+                      <div className="text-xs text-gray-500">Total</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <ChartBarIcon className="mx-auto h-12 w-12 text-gray-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">No sessions found</h3>
+              <p className="mt-1 text-sm text-gray-500">
+                This subject doesn't have any attendance sessions yet.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // Show detailed group view
+  console.log('Current state:', { showGroupDetails, selectedGroup: selectedGroup?.key });
   if (showGroupDetails && selectedGroup) {
     return (
       <div className="space-y-6">
@@ -898,17 +1224,37 @@ function Reports() {
         </div>
       ) : viewMode === 'cards' ? (
         /* Card View */
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {Object.entries(groupedReports).map(([key, group]) => (
-            <div key={key} className="bg-white rounded-lg shadow border border-gray-200 overflow-hidden">
-              <div className="p-6">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <h3 className="text-lg font-semibold text-gray-900 mb-1">{group.title}</h3>
-                    <p className="text-sm text-gray-600 mb-4">{group.subtitle}</p>
+        <div className="space-y-6">
+          {Object.entries(groupedReports).map(([key, group]) => {
+            const hasSessions = group.sessions && Object.keys(group.sessions).length > 0;
+            
+            return (
+              <div key={key} className="bg-white rounded-lg shadow border border-gray-200 overflow-hidden">
+                {/* Subject Header - Clickable for navigation */}
+                <div 
+                  className={`px-6 py-4 border-b border-gray-200 cursor-pointer hover:bg-gray-50 transition-colors ${
+                    hasSessions ? 'bg-blue-50' : 'bg-gray-50'
+                  }`}
+                  onClick={() => hasSessions && navigateToSubject(key, group)}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center">
+                        <h3 className="text-xl font-semibold text-gray-900 mb-1">{group.title}</h3>
+                        {hasSessions && (
+                          <ChevronRightIcon className="h-5 w-5 ml-2 text-gray-500" />
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-600">{group.subtitle}</p>
+                      {hasSessions && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          {Object.keys(group.sessions).length} session{Object.keys(group.sessions).length !== 1 ? 's' : ''} • Click to view sessions
+                        </p>
+                      )}
+                    </div>
                     
-                    {/* Statistics */}
-                    <div className="grid grid-cols-2 gap-4 mb-4">
+                    {/* Subject Statistics */}
+                    <div className="flex space-x-6">
                       <div className="text-center">
                         <div className="text-2xl font-bold text-green-600">{group.stats.present}</div>
                         <div className="text-xs text-gray-500">Present</div>
@@ -927,17 +1273,50 @@ function Reports() {
                       </div>
                     </div>
                   </div>
-                  
-                  <button
-                    onClick={() => viewGroupDetails(key, group)}
-                    className="ml-4 p-2 text-gray-400 hover:text-gray-600 rounded-md hover:bg-gray-100"
-                  >
-                    <EyeIcon className="h-5 w-5" />
-                  </button>
                 </div>
+                
+                
+                {/* Fallback for non-hierarchical groups */}
+                {!hasSessions && (
+                  <div className="p-6">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <h3 className="text-lg font-semibold text-gray-900 mb-1">{group.title}</h3>
+                        <p className="text-sm text-gray-600 mb-4">{group.subtitle}</p>
+                        
+                        {/* Statistics */}
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                          <div className="text-center">
+                            <div className="text-2xl font-bold text-green-600">{group.stats.present}</div>
+                            <div className="text-xs text-gray-500">Present</div>
+                          </div>
+                          <div className="text-center">
+                            <div className="text-2xl font-bold text-yellow-600">{group.stats.late}</div>
+                            <div className="text-xs text-gray-500">Late</div>
+                          </div>
+                          <div className="text-center">
+                            <div className="text-2xl font-bold text-red-600">{group.stats.absent}</div>
+                            <div className="text-xs text-gray-500">Absent</div>
+                          </div>
+                          <div className="text-center">
+                            <div className="text-2xl font-bold text-blue-600">{group.stats.total}</div>
+                            <div className="text-xs text-gray-500">Total</div>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <button
+                        onClick={() => viewGroupDetails(key, group)}
+                        className="ml-4 p-2 text-gray-400 hover:text-gray-600 rounded-md hover:bg-gray-100"
+                      >
+                        <EyeIcon className="h-5 w-5" />
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         /* Table View */

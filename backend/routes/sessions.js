@@ -46,7 +46,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
             LEFT JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
             LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
             LEFT JOIN ROOMS r ON s.ROOMID = r.ROOMID
-            WHERE 1=1
+            WHERE 1=1 AND s.ARCHIVED_AT IS NULL
         `;
         const params = [];
 
@@ -94,7 +94,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
         const sessions = await executeQuery(query, params);
 
         // Get total count
-        let countQuery = 'SELECT COUNT(*) as total FROM SESSIONS s WHERE 1=1';
+        let countQuery = 'SELECT COUNT(*) as total FROM SESSIONS s WHERE 1=1 AND s.ARCHIVED_AT IS NULL';
         const countParams = [];
 
         if (status) {

@@ -354,20 +354,9 @@ class PDFParserService {
             // Extract instructor information
             sectionData.instructors = this.extractInstructorInfo(lines);
             
-            // If no instructors found, create a default "No Faculty Assigned" entry
+            // If no instructors found, log warning but don't create a dummy entry
             if (sectionData.instructors.length === 0) {
-                console.log('⚠️ No instructors found in this section, creating default entry');
-                sectionData.instructors = [{
-                    id: uuidv4(),
-                    name: 'No Faculty Assigned',
-                    full_name: {
-                        first_name: 'No',
-                        last_name: 'Faculty Assigned',
-                        middle_name: '',
-                        full_name: 'No Faculty Assigned'
-                    },
-                    type: 'main'
-                }];
+                console.log('⚠️ No instructors found in this section - subject will have null instructor');
             }
 
             // Extract student list
@@ -1837,7 +1826,7 @@ class PDFParserService {
                         room_number: schedule.room_number,
                         room_name: schedule.room_name || this.generateRoomName(schedule.room_number),
                         building: schedule.building || this.extractBuilding(schedule.room_number),
-                        capacity: this.estimateRoomCapacity(sectionData.students.length),
+                        capacity: null, // Don't estimate capacity - leave it empty
                         status: 'Available',
                         room_type: schedule.is_lab ? 'laboratory' : 'classroom'
                     });

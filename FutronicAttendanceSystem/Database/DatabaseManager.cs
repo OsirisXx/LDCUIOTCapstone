@@ -263,6 +263,7 @@ namespace FutronicAttendanceSystem.Database
                         U.STUDENTID,
                         U.FACULTYID,
                         U.YEARLEVEL,
+                        U.RFIDTAG,
                         A.FINGERPRINTTEMPLATE,
                         CASE 
                             WHEN A.USERID IS NOT NULL AND A.METHODTYPE = 'Fingerprint' AND A.ISACTIVE = 1 AND A.STATUS = 'Active'
@@ -298,6 +299,9 @@ namespace FutronicAttendanceSystem.Database
                         // Get the HAS_FINGERPRINT status from the query
                         bool hasFingerprint = reader.GetBoolean("HAS_FINGERPRINT");
                         
+                        // Get RFID tag
+                        string rfidTag = reader.IsDBNull(reader.GetOrdinal("RFIDTAG")) ? null : reader.GetString("RFIDTAG");
+
                         users.Add(new User
                         {
                             // Use a hash of the USERID GUID as the Id for identification
@@ -312,6 +316,7 @@ namespace FutronicAttendanceSystem.Database
                             FirstName = firstName,
                             LastName = lastName,
                             UserType = reader.IsDBNull(reader.GetOrdinal("USERTYPE")) ? null : reader.GetString("USERTYPE"),
+                            RfidTag = rfidTag,
                             CreatedAt = DateTime.Now,
                             UpdatedAt = DateTime.Now
                         });
@@ -850,6 +855,26 @@ namespace FutronicAttendanceSystem.Database
             }
         }
 
+        // Update or delete RFID tag for a user
+        public bool UpdateUserRfidTag(string userGuid, string rfidTag)
+        {
+            try
+            {
+                var cmd = new MySqlCommand("UPDATE USERS SET RFIDTAG = @rfidTag, UPDATED_AT = CURRENT_TIMESTAMP WHERE USERID = @userGuid", connection);
+                cmd.Parameters.AddWithValue("@rfidTag", string.IsNullOrEmpty(rfidTag) ? (object)DBNull.Value : rfidTag);
+                cmd.Parameters.AddWithValue("@userGuid", userGuid);
+                
+                int rowsAffected = cmd.ExecuteNonQuery();
+                Console.WriteLine($"Updated RFID tag for user {userGuid}: rows affected = {rowsAffected}");
+                return rowsAffected > 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to update RFID tag: {ex.Message}");
+                throw new Exception($"Failed to update RFID tag: {ex.Message}", ex);
+            }
+        }
+
         public bool DeleteUser(int userId)
         {
             try
@@ -1007,11 +1032,33 @@ namespace FutronicAttendanceSystem.Database
                     LogMessage("INFO", $"Using validated schedule {scheduleId} for attendance recording");
                 }
 
+                // Check if we need a schedule or if user role allows recording without one
                 if (string.IsNullOrWhiteSpace(scheduleId))
                 {
-                    // Cannot record without a valid schedule - this should not happen if validation passed
-                    LogMessage("ERROR", "RecordAttendance: No valid schedule available to attach attendance.");
-                    return new AttendanceAttemptResult { Success = false, Reason = "No valid schedule available" };
+                    // Check user type to see if they can record without a schedule
+                    string userType = null;
+                    using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid", connection))
+                    {
+                        cmdGetUserType.Parameters.AddWithValue("@userGuid", userGuid);
+                        var userTypeObj = cmdGetUserType.ExecuteScalar();
+                        if (userTypeObj != null)
+                        {
+                            userType = userTypeObj.ToString();
+                        }
+                    }
+                    
+                    // Allow recording without schedule for custodian and dean
+                    if (userType != null && (userType.Equals("custodian", StringComparison.OrdinalIgnoreCase) || 
+                                             userType.Equals("dean", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        LogMessage("INFO", $"Recording attendance without schedule for {userType}");
+                    }
+                    else
+                    {
+                        // Other roles require a schedule
+                        LogMessage("ERROR", "RecordAttendance: No valid schedule available to attach attendance.");
+                        return new AttendanceAttemptResult { Success = false, Reason = "No valid schedule available" };
+                    }
                 }
 
                 // Map action to scan type and status
@@ -1039,7 +1086,7 @@ namespace FutronicAttendanceSystem.Database
                 ", connection);
 
                 insertCmd.Parameters.AddWithValue("@USERID", userGuid);
-                insertCmd.Parameters.AddWithValue("@SCHEDULEID", scheduleId);
+                insertCmd.Parameters.AddWithValue("@SCHEDULEID", (object)scheduleId ?? DBNull.Value);
                 insertCmd.Parameters.AddWithValue("@SESSIONID", (object)sessionId ?? DBNull.Value);
                 insertCmd.Parameters.AddWithValue("@SCANTYPE", scanType);
                 insertCmd.Parameters.AddWithValue("@AUTHMETHOD", authMethod);
@@ -1083,7 +1130,7 @@ namespace FutronicAttendanceSystem.Database
         }
 
         // Validate if there's a scheduled class for the current time and user
-        private ScheduleValidationResult ValidateScheduleForCurrentTime(string userGuid)
+        public ScheduleValidationResult ValidateScheduleForCurrentTime(string userGuid)
         {
             try
             {
@@ -1141,6 +1188,60 @@ namespace FutronicAttendanceSystem.Database
                 {
                     result.Reason = "User not found";
                     LogMessage("ERROR", $"User {userGuid} not found in database");
+                    return result;
+                }
+
+                // Custodian: Always allow access, no schedule validation needed
+                if (userType != null && userType.Equals("custodian", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.IsValid = true;
+                    result.Reason = "Custodian access - no schedule required";
+                    LogMessage("INFO", $"Custodian access granted for user {userGuid}");
+                    return result;
+                }
+
+                // Dean: Check if they have scheduled classes, but allow access regardless
+                if (userType != null && userType.Equals("dean", StringComparison.OrdinalIgnoreCase))
+                {
+                    LogMessage("DEBUG", $"Dean access requested for user {userGuid}");
+                    
+                    // Try to find a scheduled class (same query as instructor)
+                    using (var cmdCheckDeanSchedule = new MySqlCommand(@"
+                        SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
+                        FROM CLASSSCHEDULES cs
+                        JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
+                        WHERE s.INSTRUCTORID = @userGuid
+                          AND cs.ROOMID = @roomId
+                          AND cs.DAYOFWEEK = @currentDay
+                          AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                          AND cs.ACADEMICYEAR = @academicYear
+                          AND cs.SEMESTER = @semester", connection))
+                    {
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@userGuid", userGuid);
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@currentDay", currentDay);
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
+
+                        using (var reader = cmdCheckDeanSchedule.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                result.IsValid = true;
+                                result.ScheduleId = reader.GetString("SCHEDULEID");
+                                result.SubjectName = reader.GetString("SUBJECTNAME");
+                                result.Reason = "Dean has scheduled class";
+                                LogMessage("INFO", $"Dean has scheduled class: {result.SubjectName} (ID: {result.ScheduleId})");
+                            }
+                            else
+                            {
+                                result.IsValid = true;
+                                result.Reason = "Dean access granted - no scheduled class";
+                                LogMessage("INFO", $"Dean access granted without scheduled class");
+                            }
+                        }
+                    }
+                    
                     return result;
                 }
 

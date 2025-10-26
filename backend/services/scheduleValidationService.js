@@ -11,7 +11,7 @@ class ScheduleValidationService {
      * Validate if a user has a scheduled class at the current time
      * @param {string} userId - User ID
      * @param {string} roomId - Room ID
-     * @param {string} userType - User type (student, instructor, admin)
+     * @param {string} userType - User type (student, instructor, admin, custodian, dean)
      * @returns {Object} Validation result with isValid, reason, and schedule details
      */
     static async validateCurrentSchedule(userId, roomId, userType) {
@@ -19,6 +19,35 @@ class ScheduleValidationService {
             const now = moment();
             const currentDay = now.format('dddd');
             const currentTime = now.format('HH:mm:ss');
+            
+            // Custodian: Always allow access, no schedule validation needed
+            if (userType === 'custodian') {
+                return {
+                    isValid: true,
+                    reason: 'Custodian access - no schedule required',
+                    schedule: null
+                };
+            }
+            
+            // Dean: Check if they have scheduled classes, but allow access regardless
+            if (userType === 'dean') {
+                // First check if they have a scheduled class
+                const deanSchedule = await this.getDeanSchedule(userId, roomId);
+                if (deanSchedule) {
+                    return {
+                        isValid: true,
+                        reason: 'Dean has scheduled class',
+                        schedule: deanSchedule
+                    };
+                } else {
+                    // Dean still gets access even without schedule
+                    return {
+                        isValid: true,
+                        reason: 'Dean access - no schedule required',
+                        schedule: null
+                    };
+                }
+            }
             
             let query, params;
             
@@ -139,6 +168,47 @@ class ScheduleValidationService {
     }
     
     /**
+     * Get dean's scheduled class (if any) - deans can be instructors of classes
+     * @param {string} deanId - Dean ID
+     * @param {string} roomId - Room ID
+     * @returns {Object} Schedule information or null
+     */
+    static async getDeanSchedule(deanId, roomId) {
+        try {
+            const now = moment();
+            const currentDay = now.format('dddd');
+            const currentTime = now.format('HH:mm:ss');
+            
+            const schedule = await getSingleResult(`
+                SELECT cs.SCHEDULEID as schedule_id, 
+                       s.SUBJECTID as subject_id,
+                       s.SUBJECTCODE as subject_code,
+                       s.SUBJECTNAME as subject_name,
+                       cs.STARTTIME as start_time,
+                       cs.ENDTIME as end_time,
+                       r.ROOMNUMBER as room_number,
+                       r.ROOMNAME as room_name
+                FROM CLASSSCHEDULES cs
+                JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
+                JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+                WHERE s.INSTRUCTORID = ?
+                  AND cs.ROOMID = ?
+                  AND cs.DAYOFWEEK = ?
+                  AND cs.STARTTIME <= ?
+                  AND cs.ENDTIME >= ?
+                  AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+                  AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')`,
+                [deanId, roomId, currentDay, currentTime, currentTime]
+            );
+            
+            return schedule;
+        } catch (error) {
+            console.error('Error getting dean schedule:', error);
+            return null;
+        }
+    }
+    
+    /**
      * Check if a student is enrolled in a subject
      * @param {string} studentId - Student ID
      * @param {string} subjectId - Subject ID
@@ -227,6 +297,24 @@ class ScheduleValidationService {
                 enrollment: null,
                 canRecord: false
             };
+            
+            // Custodian: Always allow access, no schedule validation needed
+            if (userType === 'custodian') {
+                result.isValid = true;
+                result.reason = 'Custodian access - no schedule required';
+                result.canRecord = false; // Custodians don't record attendance
+                return result;
+            }
+            
+            // Dean: Check if they have scheduled classes, but allow access regardless
+            if (userType === 'dean') {
+                const scheduleValidation = await this.validateCurrentSchedule(userId, roomId, userType);
+                result.isValid = true;
+                result.reason = scheduleValidation.reason;
+                result.schedule = scheduleValidation.schedule;
+                result.canRecord = scheduleValidation.schedule ? true : false; // Only record if they have a schedule
+                return result;
+            }
             
             // Step 1: Check if user has a scheduled class
             const scheduleValidation = await this.validateCurrentSchedule(userId, roomId, userType);

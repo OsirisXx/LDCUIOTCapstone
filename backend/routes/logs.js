@@ -758,7 +758,7 @@ router.get('/attendance', authenticateToken, async (req, res) => {
         const testResult = await executeQuery(testQuery, []);
         console.log('ATTENDANCERECORDS table has', testResult[0]?.count || 0, 'records');
 
-        // Enhanced query with room and subject information (using both SUBJECTS and COURSES tables)
+        // Enhanced query with room, subject, and session information (day, time, room)
         const logsQuery = `
             SELECT
                 ar.ATTENDANCEID,
@@ -775,13 +775,18 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 COALESCE(sub.SUBJECTCODE, c.COURSECODE) as SUBJECTCODE,
                 COALESCE(sub.SUBJECTNAME, c.COURSENAME) as SUBJECTNAME,
                 r.ROOMNUMBER,
-                r.ROOMNAME
+                r.ROOMNAME,
+                cs.DAYOFWEEK,
+                cs.STARTTIME,
+                cs.ENDTIME,
+                DATE(ar.SCANDATETIME) as ATTENDANCE_DATE
             FROM ATTENDANCERECORDS ar
             JOIN USERS u ON ar.USERID = u.USERID
             LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID
             LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
             LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
             LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+            WHERE ar.ARCHIVED_AT IS NULL
             ORDER BY ar.SCANDATETIME DESC
             LIMIT 50
         `;

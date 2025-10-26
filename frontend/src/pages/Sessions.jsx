@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   PlayIcon, 
   StopIcon, 
@@ -27,9 +27,11 @@ function Sessions() {
   const [loading, setLoading] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [upcomingClasses, setUpcomingClasses] = useState([]);
-  const [currentOngoingClass, setCurrentOngoingClass] = useState(null);
+  const [currentOngoingClasses, setCurrentOngoingClasses] = useState([]);
   const [selectedDay, setSelectedDay] = useState('');
   const [selectedRoomFilter, setSelectedRoomFilter] = useState('');
+  const [subjectSearchTerm, setSubjectSearchTerm] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
 
   useEffect(() => {
     fetchData();
@@ -42,6 +44,11 @@ function Sessions() {
       clearInterval(timeInterval);
     };
   }, []);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedDay, selectedRoomFilter, subjectSearchTerm]);
 
   const fetchData = async () => {
     try {
@@ -175,18 +182,18 @@ function Sessions() {
       console.log('Current time string:', currentTimeStr);
       console.log('Today\'s schedules:', todaysSchedule);
       
-      // Find current ongoing class
-      const ongoing = todaysSchedule.find(schedule => {
+      // Find all current ongoing classes
+      const ongoing = todaysSchedule.filter(schedule => {
         const startTime = schedule.STARTTIME;
         const endTime = schedule.ENDTIME;
         const isOngoing = currentTimeStr >= startTime && currentTimeStr <= endTime;
-        console.log(`Checking schedule ${schedule?.subject_code || 'Unknown'}: ${startTime}-${endTime}, isOngoing: ${isOngoing}`);
+        console.log(`Checking schedule ${schedule?.SUBJECTCODE || 'Unknown'}: ${startTime}-${endTime}, isOngoing: ${isOngoing}`);
         console.log('Schedule object:', schedule);
         return isOngoing;
       });
       
-      console.log('Current ongoing class:', ongoing);
-      setCurrentOngoingClass(ongoing || null);
+      console.log('Current ongoing classes:', ongoing);
+      setCurrentOngoingClasses(ongoing || []);
       
       // Find upcoming classes (next 3 classes after current time)
       const upcoming = todaysSchedule
@@ -364,8 +371,54 @@ function Sessions() {
       filtered = filtered.filter(schedule => schedule.ROOMID === selectedRoomFilter);
     }
     
+    // Filter by subject search
+    if (subjectSearchTerm) {
+      const searchLower = subjectSearchTerm.toLowerCase();
+      filtered = filtered.filter(schedule => 
+        schedule.SUBJECTCODE?.toLowerCase().includes(searchLower) ||
+        schedule.SUBJECTNAME?.toLowerCase().includes(searchLower)
+      );
+    }
+    
     return filtered;
   };
+
+  // Use useMemo to calculate pagination without side effects
+  const paginationData = useMemo(() => {
+    let filtered = allSchedules;
+    
+    // Filter by day
+    if (selectedDay) {
+      filtered = filtered.filter(schedule => schedule.DAYOFWEEK === selectedDay);
+    }
+    
+    // Filter by room
+    if (selectedRoomFilter) {
+      filtered = filtered.filter(schedule => schedule.ROOMID === selectedRoomFilter);
+    }
+    
+    // Filter by subject search
+    if (subjectSearchTerm) {
+      const searchLower = subjectSearchTerm.toLowerCase();
+      filtered = filtered.filter(schedule => 
+        schedule.SUBJECTCODE?.toLowerCase().includes(searchLower) ||
+        schedule.SUBJECTNAME?.toLowerCase().includes(searchLower)
+      );
+    }
+    
+    const schedulesPerPage = 10;
+    
+    // Calculate pagination
+    const totalFiltered = filtered.length;
+    const pages = Math.ceil(totalFiltered / schedulesPerPage);
+    
+    // Paginate the filtered schedules
+    const startIndex = (currentPage - 1) * schedulesPerPage;
+    const endIndex = startIndex + schedulesPerPage;
+    const paginated = filtered.slice(startIndex, endIndex);
+    
+    return { paginated, totalFiltered, totalPages: pages };
+  }, [allSchedules, selectedDay, selectedRoomFilter, subjectSearchTerm, currentPage]);
 
   if (loading) {
     return (
@@ -408,32 +461,49 @@ function Sessions() {
         </div>
       </div>
 
-      {/* Current Ongoing Class */}
-      {currentOngoingClass && (
+      {/* Current Ongoing Classes */}
+      {currentOngoingClasses.length > 0 && (
         <div className="bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-200 rounded-xl p-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2">
-                <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
-                  <PlayIcon className="h-6 w-6 text-green-600" />
+          <div className="flex items-center space-x-2 mb-4">
+            <PlayIcon className="h-6 w-6 text-green-600" />
+            <h2 className="text-lg font-semibold text-green-900">Classes Currently in Progress</h2>
+            <span className="bg-green-100 text-green-800 px-2 py-1 rounded-full text-sm font-medium">
+              {currentOngoingClasses.length} active
+            </span>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {currentOngoingClasses.map((classItem, index) => (
+              <div key={classItem.SCHEDULEID} className="bg-white rounded-lg p-4 border border-green-200 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
+                      <PlayIcon className="h-4 w-4 text-green-600" />
+                    </div>
+                    <div>
+                      <div className="font-semibold text-green-900">{classItem.SUBJECTCODE}</div>
+                      <div className="text-sm text-green-700">{classItem.SUBJECTNAME}</div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-sm font-bold text-green-600">
+                      {formatScheduleTime(classItem.STARTTIME)} - {formatScheduleTime(classItem.ENDTIME)}
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <div className="text-lg font-bold text-green-900">Class in Progress</div>
-                  <div className="text-sm text-green-700">Session is currently active</div>
+                
+                <div className="space-y-2">
+                  <div className="flex items-center space-x-2 text-sm text-gray-600">
+                    <AcademicCapIcon className="h-4 w-4" />
+                    <span>{classItem.instructor_name}</span>
+                  </div>
+                  <div className="flex items-center space-x-2 text-sm text-gray-600">
+                    <MapPinIcon className="h-4 w-4" />
+                    <span>{classItem.ROOMNUMBER} - {classItem.ROOMNAME}</span>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div className="text-right">
-              <div className="text-2xl font-bold text-green-900">
-                {currentOngoingClass.SUBJECTCODE} - {currentOngoingClass.SUBJECTNAME}
-              </div>
-              <div className="text-sm text-green-700">
-                {currentOngoingClass.instructor_name} • {currentOngoingClass.ROOMNUMBER}
-              </div>
-              <div className="text-sm text-green-600">
-                {formatScheduleTime(currentOngoingClass.STARTTIME)} - {formatScheduleTime(currentOngoingClass.ENDTIME)}
-              </div>
-            </div>
+            ))}
           </div>
         </div>
       )}
@@ -587,6 +657,17 @@ function Sessions() {
           {/* Filters */}
           <div className="flex space-x-4">
             <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Search Subject</label>
+              <input
+                type="text"
+                placeholder="Search by code or name..."
+                value={subjectSearchTerm}
+                onChange={(e) => setSubjectSearchTerm(e.target.value)}
+                className="border border-gray-300 rounded-md px-3 py-2 text-sm w-48"
+              />
+            </div>
+            
+            <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Day Filter</label>
               <select
                 value={selectedDay}
@@ -621,6 +702,7 @@ function Sessions() {
                 onClick={() => {
                   setSelectedDay('');
                   setSelectedRoomFilter('');
+                  setSubjectSearchTerm('');
                 }}
                 className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 underline"
               >
@@ -635,8 +717,8 @@ function Sessions() {
         ) : (
           <div className="space-y-6">
             {(() => {
-              const filteredSchedules = getFilteredSchedules();
-              const dayGroups = groupSchedulesByDay(filteredSchedules);
+              const { paginated: paginatedSchedules, totalFiltered } = paginationData;
+              const dayGroups = groupSchedulesByDay(paginatedSchedules);
               
               if (dayGroups.length === 0) {
                 return (
@@ -725,6 +807,36 @@ function Sessions() {
             })()}
           </div>
         )}
+
+        {/* Pagination */}
+        {(() => {
+          const { totalFiltered, totalPages } = paginationData;
+          if (totalFiltered === 0) return null;
+          
+          return (
+            <div className="mt-6 flex items-center justify-between border-t border-gray-200 pt-4">
+              <div className="text-sm text-gray-700">
+                Showing {Math.min((currentPage - 1) * 10 + 1, totalFiltered)} to {Math.min(currentPage * 10, totalFiltered)} of {totalFiltered} schedules
+              </div>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
+                  disabled={currentPage === 1}
+                  className="px-3 py-1 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
+                  disabled={currentPage === totalPages}
+                  className="px-3 py-1 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
     </div>

@@ -1,5 +1,6 @@
 import React from 'react';
 import { useQuery } from 'react-query';
+import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import {
   UsersIcon,
@@ -39,8 +40,16 @@ const StatCard = ({ title, value, icon: Icon, color = 'primary', change, changeT
 };
 
 function Dashboard() {
+  const navigate = useNavigate();
+  
   const { data: stats, isLoading } = useQuery('dashboard-stats', async () => {
     const response = await axios.get('/api/dashboard/stats');
+    return response.data;
+  });
+
+  // Get unified data for sessions (same as sessions page)
+  const { data: unifiedData } = useQuery('unified-data', async () => {
+    const response = await axios.get('/api/unified/data');
     return response.data;
   });
 
@@ -83,7 +92,20 @@ function Dashboard() {
         />
         <StatCard
           title="Active Sessions"
-          value={stats?.activeSessions || 0}
+          value={(() => {
+            if (!unifiedData?.schedules?.data) return 0;
+            
+            const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+            const currentTime = new Date().toTimeString().slice(0, 8);
+            
+            const activeSessions = unifiedData.schedules.data.filter(schedule => 
+              schedule.DAYOFWEEK === currentDay &&
+              currentTime >= schedule.STARTTIME &&
+              currentTime <= schedule.ENDTIME
+            );
+            
+            return activeSessions.length;
+          })()}
           icon={ClockIcon}
           color="success"
         />
@@ -169,10 +191,16 @@ function Dashboard() {
       <div className="card">
         <h3 className="text-lg font-medium text-gray-900 mb-4">Quick Actions</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <button className="btn-outline">
+          <button 
+            className="btn-outline"
+            onClick={() => navigate('/attendance-logs')}
+          >
             View Attendance
           </button>
-          <button className="btn-outline">
+          <button 
+            className="btn-outline"
+            onClick={() => navigate('/users')}
+          >
             Manage Users
           </button>
         </div>
@@ -193,39 +221,96 @@ function Dashboard() {
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {stats?.todaySessions?.length > 0 ? (
-                stats.todaySessions.map((session, index) => (
-                  <tr key={index}>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      {session.subject_name}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {session.room_number}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {session.start_time} - {session.end_time}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`badge ${
-                        session.status === 'active' ? 'badge-success' :
-                        session.status === 'scheduled' ? 'badge-warning' :
-                        'badge-gray'
-                      }`}>
-                        {session.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {session.instructor_name}
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan="5" className="px-6 py-4 text-center text-gray-500">
-                    No sessions scheduled for today
-                  </td>
-                </tr>
-              )}
+              {(() => {
+                // Get today's sessions from unified data (same logic as sessions page)
+                if (!unifiedData?.schedules?.data) {
+                  return (
+                    <tr>
+                      <td colSpan="5" className="px-6 py-4 text-center text-gray-500">
+                        Loading sessions...
+                      </td>
+                    </tr>
+                  );
+                }
+
+                const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+                const currentTime = new Date().toTimeString().slice(0, 8);
+                
+                const todaysSessions = unifiedData.schedules.data.filter(schedule => 
+                  schedule.DAYOFWEEK === currentDay
+                );
+
+                if (todaysSessions.length === 0) {
+                  return (
+                    <tr>
+                      <td colSpan="5" className="px-6 py-4 text-center text-gray-500">
+                        No sessions scheduled for today
+                      </td>
+                    </tr>
+                  );
+                }
+
+                // Sort sessions: active first, then scheduled, then ended
+                const sortedSessions = todaysSessions.sort((a, b) => {
+                  const aIsActive = currentTime >= a.STARTTIME && currentTime <= a.ENDTIME;
+                  const bIsActive = currentTime >= b.STARTTIME && currentTime <= b.ENDTIME;
+                  const aIsScheduled = currentTime < a.STARTTIME;
+                  const bIsScheduled = currentTime < b.STARTTIME;
+                  const aIsEnded = currentTime > a.ENDTIME;
+                  const bIsEnded = currentTime > b.ENDTIME;
+
+                  // Active sessions first
+                  if (aIsActive && !bIsActive) return -1;
+                  if (!aIsActive && bIsActive) return 1;
+                  
+                  // Then scheduled sessions
+                  if (aIsScheduled && !bIsScheduled && !bIsActive) return -1;
+                  if (!aIsScheduled && bIsScheduled && !aIsActive) return 1;
+                  
+                  // Then ended sessions
+                  if (aIsEnded && !bIsEnded && !bIsActive && !bIsScheduled) return 1;
+                  if (!aIsEnded && bIsEnded && !aIsActive && !aIsScheduled) return -1;
+                  
+                  // Within same status, sort by start time
+                  return a.STARTTIME.localeCompare(b.STARTTIME);
+                });
+
+                return sortedSessions.map((session, index) => {
+                  const isActive = currentTime >= session.STARTTIME && currentTime <= session.ENDTIME;
+                  const isScheduled = currentTime < session.STARTTIME;
+                  const isEnded = currentTime > session.ENDTIME;
+                  
+                  let status = 'ended';
+                  if (isActive) status = 'active';
+                  else if (isScheduled) status = 'scheduled';
+
+                  return (
+                    <tr key={index}>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                        {session.SUBJECTNAME}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {session.ROOMNUMBER}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {session.STARTTIME} - {session.ENDTIME}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`badge ${
+                          status === 'active' ? 'badge-success' :
+                          status === 'scheduled' ? 'badge-warning' :
+                          'badge-gray'
+                        }`}>
+                          {status}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {session.instructor_name}
+                      </td>
+                    </tr>
+                  );
+                });
+              })()}
             </tbody>
           </table>
         </div>

@@ -116,11 +116,11 @@ router.post('/request', [
 
         console.log('User:', user.first_name, user.last_name, '- Role:', user.role);
 
-        // Only instructors can control the lock
-        if (user.role !== 'instructor') {
-            console.log('User is not an instructor');
+        // Allow instructors, custodians, and deans to control the lock
+        if (!['instructor', 'custodian', 'dean'].includes(user.role)) {
+            console.log('User is not authorized for lock control');
             return res.json({
-                message: 'Lock control only available for instructors',
+                message: 'Lock control only available for instructors, custodians, and deans',
                 lock_action: 'none',
                 user_role: user.role
             });

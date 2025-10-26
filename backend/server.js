@@ -40,6 +40,8 @@ app.use('/api/settings', require('./routes/settings'));
 app.use('/api/unified', require('./routes/unified'));
 app.use('/api/import', require('./routes/import'));
 app.use('/api/lock-control', require('./routes/lockControl'));
+app.use('/api/archive', require('./routes/archive'));
+app.use('/api/backup', require('./routes/backup'));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

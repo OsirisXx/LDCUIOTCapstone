@@ -14,6 +14,8 @@ import {
   UserCircleIcon,
   ArrowRightOnRectangleIcon,
   ChartBarIcon,
+  ArchiveBoxIcon,
+  ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline';
 
 const navigation = [
@@ -23,6 +25,8 @@ const navigation = [
   { name: 'Reports', href: '/reports', icon: ChartBarIcon },
   { name: 'Sessions', href: '/sessions', icon: ClockIcon },
   { name: 'Users', href: '/users', icon: UsersIcon },
+  { name: 'Archive', href: '/archive', icon: ArchiveBoxIcon, adminOnly: true },
+  { name: 'Backup & Export', href: '/backup', icon: ArrowDownTrayIcon, adminOnly: true },
 ];
 
 function Layout() {
@@ -83,8 +87,12 @@ function Layout() {
                 <XMarkIcon className="h-6 w-6" />
               </button>
             </div>
-            <nav className="flex-1 space-y-1 px-2 py-4">
-              {navigation.map((item) => (
+          <nav className="flex-1 space-y-1 px-2 py-4">
+            {navigation.map((item) => {
+              // Only show Archive for admins
+              if (item.adminOnly && user?.role !== 'admin') return null;
+              
+              return (
                 <Link
                   key={item.name}
                   to={item.href}
@@ -98,8 +106,9 @@ function Layout() {
                   <item.icon className="mr-3 h-5 w-5 flex-shrink-0" />
                   {item.name}
                 </Link>
-              ))}
-            </nav>
+              );
+            })}
+          </nav>
           </div>
         </div>
       </div>
@@ -136,21 +145,26 @@ function Layout() {
             )}
           </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
-            {navigation.map((item) => (
-              <Link
-                key={item.name}
-                to={item.href}
-                className={`group flex items-center ${desktopSidebarCollapsed ? 'px-2 py-3 justify-center' : 'px-3 py-2.5'} text-sm font-medium rounded-lg transition-all duration-200 ${
-                  isActive(item.href)
-                    ? 'bg-white/20 text-white shadow-lg backdrop-blur-sm border border-white/10'
-                    : 'text-maroon-100 hover:bg-white/10 hover:text-white hover:backdrop-blur-sm'
-                }`}
-                title={desktopSidebarCollapsed ? item.name : ''}
-              >
-                <item.icon className={`${desktopSidebarCollapsed ? 'h-6 w-6' : 'mr-3 h-5 w-5'} flex-shrink-0`} />
-                {!desktopSidebarCollapsed && item.name}
-              </Link>
-            ))}
+            {navigation.map((item) => {
+              // Only show Archive for admins
+              if (item.adminOnly && user?.role !== 'admin') return null;
+              
+              return (
+                <Link
+                  key={item.name}
+                  to={item.href}
+                  className={`group flex items-center ${desktopSidebarCollapsed ? 'px-2 py-3 justify-center' : 'px-3 py-2.5'} text-sm font-medium rounded-lg transition-all duration-200 ${
+                    isActive(item.href)
+                      ? 'bg-white/20 text-white shadow-lg backdrop-blur-sm border border-white/10'
+                      : 'text-maroon-100 hover:bg-white/10 hover:text-white hover:backdrop-blur-sm'
+                  }`}
+                  title={desktopSidebarCollapsed ? item.name : ''}
+                >
+                  <item.icon className={`${desktopSidebarCollapsed ? 'h-6 w-6' : 'mr-3 h-5 w-5'} flex-shrink-0`} />
+                  {!desktopSidebarCollapsed && item.name}
+                </Link>
+              );
+            })}
           </nav>
           
           {/* Logo at bottom when collapsed */}
@@ -215,7 +229,7 @@ function Layout() {
                   className="flex items-center space-x-2 text-sm text-white hover:text-maroon-100 transition-colors duration-200"
                 >
                   <UserCircleIcon className="h-8 w-8 text-maroon-200" />
-                  <span className="hidden sm:block">{user?.FIRSTNAME} {user?.LASTNAME}</span>
+                  <span className="hidden sm:block">{user?.first_name} {user?.last_name}</span>
                   <ChevronDownIcon className="h-4 w-4" />
                 </button>
 
@@ -237,9 +251,9 @@ function Layout() {
                   </div>
                   <div className="relative z-10 py-1">
                     <div className="px-4 py-2 text-sm border-b border-white/10">
-                      <p className="font-medium text-white">{user?.FIRSTNAME} {user?.LASTNAME}</p>
-                      <p className="text-maroon-100">{user?.EMAIL}</p>
-                      <p className="text-xs text-maroon-200 capitalize">{user?.USERTYPE}</p>
+                      <p className="font-medium text-white">{user?.first_name} {user?.last_name}</p>
+                      <p className="text-maroon-100">{user?.email}</p>
+                      <p className="text-xs text-maroon-200 capitalize">{user?.role}</p>
                     </div>
                     <button
                       onClick={() => {

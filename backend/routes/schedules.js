@@ -29,7 +29,7 @@ router.get('/', authenticateToken, requireInstructor, async (req, res) => {
             JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
             JOIN USERS u ON s.INSTRUCTORID = u.USERID
             JOIN ROOMS r ON cs.ROOMID = r.ROOMID
-            WHERE 1=1
+            WHERE 1=1 AND cs.ARCHIVED_AT IS NULL
         `;
         const params = [];
 
