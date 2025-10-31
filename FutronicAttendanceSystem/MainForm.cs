@@ -220,7 +220,6 @@ namespace FutronicAttendanceSystem
         private TabPage enrollmentTab;
         private TabPage attendanceTab;
         private TabPage deviceManagementTab;
-        private TabPage fingerprintUsersTab;
         private TabPage scenariosTab; // NEW: Attendance Scenarios Configuration tab
         private PictureBox pictureFingerprint;
 		private Button btnEnroll;
@@ -280,14 +279,6 @@ namespace FutronicAttendanceSystem
         private ComboBox cmbDeviceRoom;
         private TextBox txtDeviceName;
         private Button btnRefreshDevices;
-
-        // Fingerprint users controls
-        private ListView fingerprintUsersListView;
-        private Button btnExportUsersCsv;
-        private Button btnDeleteFingerprint;
-        private Button btnRefreshFingerprintUsers;
-        private bool fingerprintUsersAccessGranted = false;
-        private List<User> fingerprintUsers = new List<User>();
 
         // Attendance Scenarios Configuration controls
         private NumericUpDown numInstructorEarlyWindow;
@@ -832,10 +823,6 @@ namespace FutronicAttendanceSystem
             deviceManagementTab = new TabPage("Device Management");
             tabControl.TabPages.Add(deviceManagementTab);
 
-            // Create fingerprint users tab
-            fingerprintUsersTab = new TabPage("Fingerprint Users");
-            tabControl.TabPages.Add(fingerprintUsersTab);
-
             // Create attendance scenarios configuration tab
             scenariosTab = new TabPage("Attendance Scenarios");
             tabControl.TabPages.Add(scenariosTab);
@@ -843,7 +830,6 @@ namespace FutronicAttendanceSystem
             InitializeEnrollmentTab();
             InitializeAttendanceTab();
             InitializeDeviceManagementTab();
-            InitializeFingerprintUsersTab();
             InitializeScenariosTab();
         }
 
@@ -2314,53 +2300,6 @@ namespace FutronicAttendanceSystem
             deviceManagementTab.Controls.Add(lblInstructions);
         }
 
-        private void InitializeFingerprintUsersTab()
-        {
-            var title = new Label();
-            title.Location = new Point(20, 20);
-            title.Size = new Size(400, 25);
-            title.Text = "Users With Enrolled Fingerprints";
-            title.Font = new Font(title.Font, FontStyle.Bold);
-            fingerprintUsersTab.Controls.Add(title);
-
-            btnExportUsersCsv = new Button();
-            btnExportUsersCsv.Location = new Point(20, 55);
-            btnExportUsersCsv.Size = new Size(140, 27);
-            btnExportUsersCsv.Text = "Export to CSV";
-            btnExportUsersCsv.BackColor = Color.LightYellow;
-            btnExportUsersCsv.Click += (s, e) => ExportFingerprintUsersToCsv();
-            fingerprintUsersTab.Controls.Add(btnExportUsersCsv);
-
-            btnDeleteFingerprint = new Button();
-            btnDeleteFingerprint.Location = new Point(170, 55);
-            btnDeleteFingerprint.Size = new Size(170, 27);
-            btnDeleteFingerprint.Text = "Delete Selected";
-            btnDeleteFingerprint.BackColor = Color.MistyRose;
-            btnDeleteFingerprint.Click += (s, e) => DeleteSelectedFingerprint();
-            fingerprintUsersTab.Controls.Add(btnDeleteFingerprint);
-
-            btnRefreshFingerprintUsers = new Button();
-            btnRefreshFingerprintUsers.Location = new Point(350, 55);
-            btnRefreshFingerprintUsers.Size = new Size(90, 27);
-            btnRefreshFingerprintUsers.Text = "Refresh";
-            btnRefreshFingerprintUsers.BackColor = Color.LightCyan;
-            btnRefreshFingerprintUsers.Click += (s, e) => LoadFingerprintUsers();
-            fingerprintUsersTab.Controls.Add(btnRefreshFingerprintUsers);
-
-            fingerprintUsersListView = new ListView();
-            fingerprintUsersListView.Location = new Point(20, 90);
-            fingerprintUsersListView.Size = new Size(850, 450);
-            fingerprintUsersListView.View = View.Details;
-            fingerprintUsersListView.FullRowSelect = true;
-            fingerprintUsersListView.GridLines = true;
-            fingerprintUsersListView.Columns.Add("Name", 220);
-            // Email column removed - not available in PDF parse data
-            fingerprintUsersListView.Columns.Add("User Type", 100);
-            fingerprintUsersListView.Columns.Add("Department", 150);
-            fingerprintUsersListView.Columns.Add("GUID", 140);
-            fingerprintUsersTab.Controls.Add(fingerprintUsersListView);
-        }
-
         private void InitializeScenariosTab()
         {
             scenariosTab.Controls.Clear();
@@ -2709,164 +2648,6 @@ namespace FutronicAttendanceSystem
         }
 
         // ============= End of Attendance Scenarios Configuration Methods =============
-
-        private bool PromptForAdminPassword()
-        {
-            using (var form = new Form())
-            using (var lbl = new Label())
-            using (var txt = new TextBox())
-            using (var ok = new Button())
-            using (var cancel = new Button())
-            {
-                form.Text = "Admin Authentication";
-                form.StartPosition = FormStartPosition.CenterParent;
-                form.FormBorderStyle = FormBorderStyle.FixedDialog;
-                form.MinimizeBox = false;
-                form.MaximizeBox = false;
-                form.ClientSize = new Size(360, 140);
-
-                lbl.Text = "Enter admin password:";
-                lbl.SetBounds(12, 15, 320, 20);
-                txt.UseSystemPasswordChar = true;
-                txt.SetBounds(15, 40, 330, 24);
-                ok.Text = "OK";
-                ok.SetBounds(190, 85, 70, 28);
-                ok.DialogResult = DialogResult.OK;
-                cancel.Text = "Cancel";
-                cancel.SetBounds(275, 85, 70, 28);
-                cancel.DialogResult = DialogResult.Cancel;
-
-                form.Controls.AddRange(new Control[] { lbl, txt, ok, cancel });
-                form.AcceptButton = ok;
-                form.CancelButton = cancel;
-
-                var result = form.ShowDialog(this);
-                if (result == DialogResult.OK)
-                {
-                    return txt.Text == "admin123";
-                }
-                return false;
-            }
-        }
-
-        private void LoadFingerprintUsers()
-        {
-            try
-            {
-                SetStatusText("Loading fingerprint users...");
-                fingerprintUsers = dbManager?.LoadAllUsers() ?? new List<User>();
-
-                fingerprintUsersListView.Items.Clear();
-                foreach (var u in fingerprintUsers)
-                {
-                    var fullName = ($"{u.FirstName} {u.LastName}").Trim();
-                    if (string.IsNullOrWhiteSpace(fullName)) fullName = u.Username ?? u.Email;
-                    var item = new ListViewItem(fullName);
-                    item.SubItems.Add(u.Email ?? "");
-                    item.SubItems.Add(u.UserType ?? "");
-                    item.SubItems.Add(u.Department ?? "");
-                    item.SubItems.Add(u.EmployeeId ?? "");
-                    fingerprintUsersListView.Items.Add(item);
-                }
-                SetStatusText($"Loaded {fingerprintUsers.Count} users with fingerprints.");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Failed to load users: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void ExportFingerprintUsersToCsv()
-        {
-            if (fingerprintUsers == null || fingerprintUsers.Count == 0)
-            {
-                MessageBox.Show("No users to export.", "No Data", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            var dlg = new SaveFileDialog();
-            dlg.Filter = "CSV files (*.csv)|*.csv";
-            dlg.FileName = $"FingerprintUsers_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
-            if (dlg.ShowDialog() == DialogResult.OK)
-            {
-                try
-                {
-                    using (var writer = new System.IO.StreamWriter(dlg.FileName, false, Encoding.UTF8))
-                    {
-                        writer.WriteLine("FirstName,LastName,UserType,Department,UserGUID");
-                        foreach (var u in fingerprintUsers)
-                        {
-                            string first = (u.FirstName ?? "").Replace(",", " ");
-                            string last = (u.LastName ?? "").Replace(",", " ");
-                            // Email removed - not available in PDF parse data
-                            string type = (u.UserType ?? "").Replace(",", " ");
-                            string dept = (u.Department ?? "").Replace(",", " ");
-                            string guid = (u.EmployeeId ?? "").Replace(",", " ");
-                            writer.WriteLine($"{first},{last},{type},{dept},{guid}");
-                        }
-                    }
-                    MessageBox.Show($"Exported to {dlg.FileName}", "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Failed to export: {ex.Message}", "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
-
-        private void DeleteSelectedFingerprint()
-        {
-            try
-            {
-                if (fingerprintUsersListView == null || fingerprintUsersListView.SelectedItems.Count == 0)
-                {
-                    MessageBox.Show("Select a user first.", "No Selection", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-
-                var selected = fingerprintUsersListView.SelectedItems[0];
-                var guid = selected.SubItems.Count >= 5 ? selected.SubItems[4].Text : null;
-                if (string.IsNullOrWhiteSpace(guid))
-                {
-                    MessageBox.Show("Selected user has no GUID.", "Invalid Selection", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                var confirm = MessageBox.Show("Permanently delete the fingerprint for this user?", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-                if (confirm != DialogResult.Yes) return;
-
-                if (dbManager.DeleteUserFingerprintByGuid(guid))
-                {
-                    SetStatusText("Fingerprint deleted. Refreshing users and scanner...");
-                    // Refresh cloud users and restart identification so removed templates are not used
-                    System.Threading.Tasks.Task.Run(() =>
-                    {
-                        try
-                        {
-                            SyncUsersFromCloud();
-                            this.Invoke(new Action(() =>
-                            {
-                                LoadFingerprintUsers();
-                                // If attendance loop exists, restart to reload templates
-                                if (m_AttendanceOperation != null)
-                                {
-                                    RestartIdentification();
-                                }
-                            }));
-                        }
-                        catch { }
-                    });
-                }
-                else
-                {
-                    MessageBox.Show("No changes made.", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Failed to delete: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
 
 		private void BtnEnroll_Click(object sender, EventArgs e)
         {
@@ -3673,6 +3454,13 @@ namespace FutronicAttendanceSystem
                             pendingCrossVerificationGuid = userGuid;
                             crossVerificationStartTime = DateTime.Now;
                             
+                            // Send intermediate status to ESP32
+                            User user;
+                            if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                            {
+                                _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                            }
+                            
                             ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                             return;
                         }
@@ -3766,6 +3554,13 @@ namespace FutronicAttendanceSystem
                             pendingCrossVerificationUser = userName;
                             pendingCrossVerificationGuid = userGuid;
                             crossVerificationStartTime = DateTime.Now;
+                            
+                            // Send intermediate status to ESP32
+                            User user;
+                            if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                            {
+                                _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                            }
                             
                             ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                             return;
@@ -3879,6 +3674,13 @@ namespace FutronicAttendanceSystem
                             pendingCrossVerificationUser = userName;
                             pendingCrossVerificationGuid = userGuid;
                             crossVerificationStartTime = DateTime.Now;
+                            
+                            // Send intermediate status to ESP32
+                            User user;
+                            if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                            {
+                                _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                            }
                             
                             ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                             return;
@@ -4278,6 +4080,13 @@ namespace FutronicAttendanceSystem
                                 pendingCrossVerificationUser = userName;
                                 pendingCrossVerificationGuid = userGuid;
                                 crossVerificationStartTime = DateTime.Now;
+                                
+                                // Send intermediate status to ESP32
+                                User userForStatus;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out userForStatus))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(userForStatus, "FINGERPRINT", "RFID", "/api/lock-control"));
+                                }
                             }
                         }
                         
@@ -4474,6 +4283,13 @@ namespace FutronicAttendanceSystem
                         };
                         attendanceRecords.Add(studentSignOutWaitingRecord);
                         UpdateAttendanceDisplay(studentSignOutWaitingRecord);
+                        
+                        // Send intermediate status to ESP32
+                        User userForSignOut;
+                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out userForSignOut))
+                        {
+                            _ = Task.Run(async () => await SendIntermediateStatusToESP32(userForSignOut, "FINGERPRINT", "RFID", "/api/lock-control"));
+                        }
                         
                         // Set cross-type verification state
                         awaitingCrossTypeVerification = true;
@@ -4699,8 +4515,6 @@ namespace FutronicAttendanceSystem
                             this.Invoke(new Action(() =>
                             {
                                 RefreshUserList();
-                                // If admin has fingerprint users tab open/access, refresh it too
-                                LoadFingerprintUsers();
                             }));
                         }
                         catch (Exception ex)
@@ -5949,6 +5763,85 @@ namespace FutronicAttendanceSystem
             }
         }
 
+        // Send intermediate status update to ESP32 when waiting for second scan
+        private async Task SendIntermediateStatusToESP32(
+            User user, 
+            string firstScanType, 
+            string requiredScan,
+            string endpoint)
+        {
+            try
+            {
+                Console.WriteLine($"=== SENDING INTERMEDIATE STATUS TO ESP32 ===");
+                Console.WriteLine($"User: {user.FirstName} {user.LastName}");
+                Console.WriteLine($"First Scan: {firstScanType}");
+                Console.WriteLine($"Required: {requiredScan}");
+                Console.WriteLine($"Endpoint: {endpoint}");
+
+                // Auto-discover ESP32 on the network
+                string esp32Ip = await DiscoverESP32();
+                
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network for intermediate status");
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}{endpoint}";
+                Console.WriteLine($"Sending intermediate status to ESP32: {esp32Url}");
+
+                // Create payload for intermediate status
+                var payload = new
+                {
+                    user = $"{user.FirstName} {user.LastName}",
+                    userType = user.UserType?.ToLower(),
+                    sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                   currentSessionState == AttendanceSessionState.ActiveForSignOut,
+                    awaitingSecondScan = true,
+                    firstScanType = firstScanType,
+                    requiredScan = requiredScan
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"Intermediate Status Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    
+                    // Add API key to request header for security
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
+                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+                    Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
+                    
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    Console.WriteLine($"ESP32 Intermediate Status Response: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"ESP32 Intermediate Response: {responseContent}");
+                        Console.WriteLine("✅ Intermediate status sent successfully");
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"❌ ESP32 intermediate status request failed: {response.StatusCode}");
+                        Console.WriteLine($"Error: {errorContent}");
+                    }
+                }
+                
+                Console.WriteLine("=== INTERMEDIATE STATUS REQUEST END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending intermediate status: {ex.Message}");
+            }
+        }
+
         // Auto-discover ESP32 on the local network
         private async Task<string> DiscoverESP32()
         {
@@ -6780,21 +6673,6 @@ namespace FutronicAttendanceSystem
                 {
                     RefreshDeviceList();
                 }
-                else if (tabControl.SelectedTab == fingerprintUsersTab)
-                {
-                    if (!fingerprintUsersAccessGranted)
-                    {
-                        var ok = PromptForAdminPassword();
-                        if (!ok)
-                        {
-                            MessageBox.Show("Access denied.", "Authentication", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            tabControl.SelectedTab = enrollmentTab;
-                            return;
-                        }
-                        fingerprintUsersAccessGranted = true;
-                    }
-                    LoadFingerprintUsers();
-                }
             }
             catch { }
         }
@@ -7434,6 +7312,13 @@ namespace FutronicAttendanceSystem
                                 pendingCrossVerificationGuid = userInfo.EmployeeId;
                                 crossVerificationStartTime = DateTime.Now;
                                 AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                
+                                // Send intermediate status to ESP32
+                                User user;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                }
                             }
                             break;
                             
@@ -7508,6 +7393,13 @@ namespace FutronicAttendanceSystem
                                 pendingCrossVerificationGuid = userInfo.EmployeeId;
                                 crossVerificationStartTime = DateTime.Now;
                                 AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                
+                                // Send intermediate status to ESP32
+                                User user;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                }
                             }
                             break;
                             
@@ -7627,6 +7519,13 @@ namespace FutronicAttendanceSystem
                                 pendingCrossVerificationGuid = userInfo.EmployeeId;
                                 crossVerificationStartTime = DateTime.Now;
                                 AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                
+                                // Send intermediate status to ESP32
+                                User user;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                }
                             }
                             break;
                             
@@ -7929,6 +7828,13 @@ namespace FutronicAttendanceSystem
                 pendingCrossVerificationGuid = userGuid;
                 crossVerificationStartTime = DateTime.Now;
                 AddRfidAttendanceRecord(userName, "Waiting for Fingerprint", "First Scan");
+                
+                // Send intermediate status to ESP32
+                User user;
+                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                {
+                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                }
             }
             catch (Exception ex)
             {
@@ -8166,6 +8072,13 @@ namespace FutronicAttendanceSystem
                 pendingCrossVerificationGuid = userGuid;
                 crossVerificationStartTime = DateTime.Now;
                 AddRfidAttendanceRecord(userName, "Waiting for Fingerprint", "First Scan");
+                
+                // Send intermediate status to ESP32
+                User user;
+                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                {
+                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                }
             }
             catch (Exception ex)
             {

@@ -604,6 +604,48 @@ void displaySystemStatus() {
   turnOnDisplay();
 }
 
+void displayWaitingForSecondScan(String userName, String firstScanType, String requiredScan, String userType) {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - skipping waiting for second scan display");
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  
+  // Show first scan verification
+  if (firstScanType == "FINGERPRINT") {
+    display.println("Fingerprint verified");
+  } else if (firstScanType == "RFID") {
+    display.println("RFID card verified");
+  } else {
+    display.println("Scan verified");
+  }
+  
+  display.println("");
+  display.println(userName);
+  display.println("");
+  
+  // Show what's needed next
+  if (requiredScan == "RFID") {
+    display.println("Please scan your");
+    display.println("RFID card to continue");
+  } else if (requiredScan == "FINGERPRINT") {
+    display.println("Please scan your");
+    display.println("fingerprint to continue");
+  } else {
+    display.println("Please complete");
+    display.println("verification");
+  }
+  
+  display.display();
+  
+  // Turn on display with timer
+  turnOnDisplay();
+}
+
 void turnOnDisplay() {
   if (!displayWorking) {
     Serial.println("🖥️ Display not working - cannot turn on");
@@ -701,6 +743,9 @@ void handleLockControl() {
     String user = doc["user"];
     String userType = doc["userType"] | "";
     bool sessionActive = doc["sessionActive"] | false;
+    bool awaitingSecondScan = doc["awaitingSecondScan"] | false;
+    String firstScanType = doc["firstScanType"] | "";
+    String requiredScan = doc["requiredScan"] | "";
     
     Serial.print("🔓 Action: ");
     Serial.println(action);
@@ -710,6 +755,24 @@ void handleLockControl() {
     Serial.println(userType);
     Serial.print("📅 Session Active: ");
     Serial.println(sessionActive ? "Yes" : "No");
+    Serial.print("⏳ Awaiting Second Scan: ");
+    Serial.println(awaitingSecondScan ? "Yes" : "No");
+    if (awaitingSecondScan) {
+      Serial.print("🔍 First Scan Type: ");
+      Serial.println(firstScanType);
+      Serial.print("🔍 Required Scan: ");
+      Serial.println(requiredScan);
+    }
+    
+    // Check if this is an intermediate status update (waiting for second scan)
+    if (awaitingSecondScan) {
+      Serial.println("⏳ INTERMEDIATE STATUS: Displaying waiting message for second scan");
+      displayWaitingForSecondScan(user, firstScanType, requiredScan, userType);
+      
+      // Send response for intermediate status
+      server.send(200, "application/json", "{\"message\":\"Intermediate status displayed\",\"awaitingSecondScan\":true,\"requiredScan\":\"" + requiredScan + "\"}");
+      return;
+    }
     
     // Determine if lock should open based on user type and session state
     bool shouldOpenLock = false;
@@ -793,19 +856,40 @@ void handleLockControl() {
        return;
      }
      
-     String rfidData = doc["rfid_data"];
-     String user = doc["user"];
-     String userType = doc["userType"] | "";
-     bool sessionActive = doc["sessionActive"] | false;
-     
-     Serial.print("🔖 RFID Data: ");
-     Serial.println(rfidData);
-     Serial.print("👤 User: ");
-     Serial.println(user);
-     Serial.print("👤 User Type: ");
-     Serial.println(userType);
-     Serial.print("📅 Session Active: ");
-     Serial.println(sessionActive ? "Yes" : "No");
+    String rfidData = doc["rfid_data"];
+    String user = doc["user"];
+    String userType = doc["userType"] | "";
+    bool sessionActive = doc["sessionActive"] | false;
+    bool awaitingSecondScan = doc["awaitingSecondScan"] | false;
+    String firstScanType = doc["firstScanType"] | "";
+    String requiredScan = doc["requiredScan"] | "";
+    
+    Serial.print("🔖 RFID Data: ");
+    Serial.println(rfidData);
+    Serial.print("👤 User: ");
+    Serial.println(user);
+    Serial.print("👤 User Type: ");
+    Serial.println(userType);
+    Serial.print("📅 Session Active: ");
+    Serial.println(sessionActive ? "Yes" : "No");
+    Serial.print("⏳ Awaiting Second Scan: ");
+    Serial.println(awaitingSecondScan ? "Yes" : "No");
+    if (awaitingSecondScan) {
+      Serial.print("🔍 First Scan Type: ");
+      Serial.println(firstScanType);
+      Serial.print("🔍 Required Scan: ");
+      Serial.println(requiredScan);
+    }
+    
+    // Check if this is an intermediate status update (waiting for second scan)
+    if (awaitingSecondScan) {
+      Serial.println("⏳ INTERMEDIATE STATUS: Displaying waiting message for second scan");
+      displayWaitingForSecondScan(user, firstScanType, requiredScan, userType);
+      
+      // Send response for intermediate status
+      server.send(200, "application/json", "{\"message\":\"Intermediate status displayed\",\"awaitingSecondScan\":true,\"requiredScan\":\"" + requiredScan + "\"}");
+      return;
+    }
      
      // Determine if lock should open based on user type and session state
      bool shouldOpenLock = false;
