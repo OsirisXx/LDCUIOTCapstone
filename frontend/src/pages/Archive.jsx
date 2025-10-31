@@ -42,10 +42,13 @@ function Archive() {
   const [archiving, setArchiving] = useState(false);
   const [selectedRoomIds, setSelectedRoomIds] = useState([]);
   const [selectedUserIds, setSelectedUserIds] = useState([]);
+  const [selectedBackupFiles, setSelectedBackupFiles] = useState([]);
   const [availableStudents, setAvailableStudents] = useState([]);
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [availableRooms, setAvailableRooms] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(false);
+  const [availableBackups, setAvailableBackups] = useState([]);
+  const [loadingBackups, setLoadingBackups] = useState(false);
   
   // View archived data states
   const [archivedSubjects, setArchivedSubjects] = useState([]);
@@ -53,7 +56,7 @@ function Archive() {
   const [archivedSchedules, setArchivedSchedules] = useState([]);
   const [archivedUsers, setArchivedUsers] = useState([]);
   const [archivedAttendance, setArchivedAttendance] = useState([]);
-  const [archivedSessions, setArchivedSessions] = useState([]);
+  const [archivedBackups, setArchivedBackups] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [paginationData, setPaginationData] = useState({});
@@ -151,17 +154,16 @@ function Archive() {
           setArchivedAttendance(response.data.records);
           setPaginationData(response.data.pagination);
           break;
-        case 'sessions':
-          response = await axios.get('/api/archive/sessions', { 
-            headers: { Authorization: `Bearer ${token}` },
-            params 
+        case 'backups':
+          response = await axios.get('/api/archive/backups', { 
+            headers: { Authorization: `Bearer ${token}` }
           });
-          setArchivedSessions(response.data.sessions);
-          setPaginationData(response.data.pagination);
+          setArchivedBackups(response.data.backups);
+          setPaginationData({ page: 1, pages: 1, total: response.data.backups.length, limit: response.data.backups.length });
           break;
       }
       
-      setTotalPages(response.data.pagination.pages);
+      if (response.data.pagination) setTotalPages(response.data.pagination.pages);
     } catch (error) {
       console.error('Error fetching archived data:', error);
       toast.error('Failed to load archived data');
@@ -179,6 +181,24 @@ function Archive() {
       await fetchStudents();
     } else if (category === 'rooms') {
       await fetchRooms();
+    } else if (category === 'backups') {
+      await fetchBackupsForArchiving();
+    }
+  };
+
+  const fetchBackupsForArchiving = async () => {
+    try {
+      setLoadingBackups(true);
+      const token = localStorage.getItem('token');
+      const response = await axios.get('/api/backup/list', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setAvailableBackups(response.data.backups || []);
+    } catch (error) {
+      console.error('Error fetching backups:', error);
+      toast.error('Failed to load backups');
+    } finally {
+      setLoadingBackups(false);
     }
   };
 
@@ -261,7 +281,6 @@ function Archive() {
         case 'subjects':
         case 'schedules':
         case 'attendance':
-        case 'sessions':
           if (!archiveAcademicYear || !archiveSemester) {
             toast.error('Please select academic year and semester');
             return;
@@ -283,9 +302,17 @@ function Archive() {
           }
           payload.user_ids = selectedUserIds;
           break;
+        case 'backups':
+          if (selectedBackupFiles.length === 0) {
+            toast.error('Please select at least one backup to archive');
+            return;
+          }
+          payload = { filenames: selectedBackupFiles };
+          break;
       }
 
-      const response = await axios.post(`/api/archive/${archiveCategory}`, payload, {
+      const endpoint = archiveCategory === 'backups' ? '/api/archive/backups' : `/api/archive/${archiveCategory}`;
+      const response = await axios.post(endpoint, payload, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
@@ -404,15 +431,15 @@ function Archive() {
           </div>
         </div>
         <div className="bg-white rounded-lg shadow p-6 border border-gray-200">
-          <div className="flex items-center">
-            <div className="flex-shrink-0">
-              <ClockIcon className="h-8 w-8 text-indigo-500" />
+            <div className="flex items-center">
+              <div className="flex-shrink-0">
+                <DocumentArrowDownIcon className="h-8 w-8 text-indigo-500" />
+              </div>
+              <div className="ml-4">
+                <p className="text-sm font-medium text-gray-500">Archived Backups</p>
+                <p className="text-2xl font-semibold text-gray-900">{getCategoryStats('backups')}</p>
+              </div>
             </div>
-            <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">Archived Sessions</p>
-              <p className="text-2xl font-semibold text-gray-900">{getCategoryStats('sessions')}</p>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -481,14 +508,14 @@ function Archive() {
               Archived Attendance
             </button>
             <button
-              onClick={() => setActiveTab('sessions')}
+              onClick={() => setActiveTab('backups')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'sessions'
+                activeTab === 'backups'
                   ? 'border-blue-500 text-blue-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              Archived Sessions
+              Archived Backups
             </button>
           </nav>
         </div>
@@ -589,20 +616,20 @@ function Archive() {
                   </button>
                 </div>
 
-                {/* Archive Sessions */}
+                {/* Archive Backup Copies */}
                 <div className="bg-indigo-50 border-2 border-indigo-200 rounded-lg p-6">
                   <div className="flex items-center justify-between mb-4">
-                    <ClockIcon className="h-8 w-8 text-indigo-600" />
-                    <span className="text-sm font-medium text-indigo-800">Sessions</span>
+                    <DocumentArrowDownIcon className="h-8 w-8 text-indigo-600" />
+                    <span className="text-sm font-medium text-indigo-800">Backup Copies</span>
                   </div>
                   <p className="text-sm text-gray-600 mb-4">
-                    Archive sessions by academic year and semester.
+                    Archive backup zip files so they are hidden from Backup History.
                   </p>
                   <button
-                    onClick={() => handleArchiveClick('sessions')}
+                    onClick={() => handleArchiveClick('backups')}
                     className="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors"
                   >
-                    Archive Sessions
+                    Archive Backup Copies
                   </button>
                 </div>
               </div>
@@ -851,47 +878,28 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Sessions View */}
-                  {activeTab === 'sessions' && (
+                  {/* Archived Backups View */}
+                  {activeTab === 'backups' && (
                     <div className="space-y-4">
-                      <h3 className="text-lg font-semibold text-gray-900">Archived Sessions</h3>
-                      {archivedSessions.length === 0 ? (
-                        <div className="text-center py-12">
-                          <ClockIcon className="mx-auto h-12 w-12 text-gray-400" />
-                          <h3 className="mt-2 text-sm font-medium text-gray-900">No archived sessions</h3>
-                          <p className="mt-1 text-sm text-gray-500">No sessions have been archived yet.</p>
-                        </div>
+                      <h3 className="text-lg font-semibold text-gray-900">Archived Backup Copies</h3>
+                      {archivedBackups.length === 0 ? (
+                        <div className="text-center py-8 text-gray-500">No archived backups found</div>
                       ) : (
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Size (MB)</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedSessions.map((session) => (
-                                <tr key={session.SESSIONID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{session.SUBJECTCODE}</div>
-                                    <div className="text-sm text-gray-500">{session.SUBJECTNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{session.ROOMNUMBER}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(session.SESSIONDATE)}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                      session.STATUS === 'active' ? 'bg-green-100 text-green-800' :
-                                      session.STATUS === 'ended' ? 'bg-gray-100 text-gray-800' :
-                                      'bg-yellow-100 text-yellow-800'
-                                    }`}>
-                                      {session.STATUS}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(session.ARCHIVED_AT)}</td>
+                              {archivedBackups.map((b) => (
+                                <tr key={b.filename} className="hover:bg-gray-50">
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{b.filename}</td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{b.size}</td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(b.date)}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -970,7 +978,7 @@ function Archive() {
                 </div>
               </div>
 
-              {(archiveCategory === 'subjects' || archiveCategory === 'schedules' || archiveCategory === 'attendance' || archiveCategory === 'sessions') && (
+              {(archiveCategory === 'subjects' || archiveCategory === 'schedules' || archiveCategory === 'attendance') && (
                 <div className="space-y-4 mb-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Academic Year</label>
@@ -998,6 +1006,48 @@ function Archive() {
                       ))}
                     </select>
                   </div>
+                </div>
+              )}
+
+              {archiveCategory === 'backups' && (
+                <div className="mb-4">
+                  <p className="text-sm text-gray-600 mb-2">Select backup files to archive:</p>
+                  {loadingBackups ? (
+                    <div className="flex items-center justify-center py-8">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                    </div>
+                  ) : (
+                    <div className="border border-gray-300 rounded-md max-h-64 overflow-y-auto">
+                      {availableBackups.length === 0 ? (
+                        <div className="text-center py-8 text-gray-500">No backups found</div>
+                      ) : (
+                        <div className="divide-y divide-gray-200">
+                          {availableBackups.map((b) => (
+                            <label key={b.filename} className="flex items-center px-4 py-3 hover:bg-gray-50 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={selectedBackupFiles.includes(b.filename)}
+                                onChange={() => {
+                                  setSelectedBackupFiles(prev => prev.includes(b.filename)
+                                    ? prev.filter(f => f !== b.filename)
+                                    : [...prev, b.filename]
+                                  );
+                                }}
+                                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                              />
+                              <div className="ml-3 flex-1">
+                                <div className="text-sm font-medium text-gray-900">{b.filename}</div>
+                                <div className="text-sm text-gray-500">{b.size} MB • {formatDate(b.date)}</div>
+                              </div>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {selectedBackupFiles.length > 0 && (
+                    <p className="mt-2 text-sm text-blue-600">{selectedBackupFiles.length} backup{selectedBackupFiles.length > 1 ? 's' : ''} selected</p>
+                  )}
                 </div>
               )}
 

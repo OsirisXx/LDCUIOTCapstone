@@ -1,19 +1,19 @@
 const express = require('express');
 const { executeQuery, getSingleResult } = require('../config/database');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
+const backupService = require('../services/backupService');
 
 const router = express.Router();
 
 // Get archive dashboard statistics
 router.get('/dashboard', authenticateToken, requireAdmin, async (req, res) => {
     try {
-        const [subjects, rooms, schedules, users, attendance, sessions] = await Promise.all([
+        const [subjects, rooms, schedules, users, attendance] = await Promise.all([
             executeQuery(`SELECT COUNT(*) as count FROM SUBJECTS WHERE ARCHIVED_AT IS NOT NULL`),
             executeQuery(`SELECT COUNT(*) as count FROM ROOMS WHERE ARCHIVED_AT IS NOT NULL`),
             executeQuery(`SELECT COUNT(*) as count FROM CLASSSCHEDULES WHERE ARCHIVED_AT IS NOT NULL`),
             executeQuery(`SELECT COUNT(*) as count FROM USERS WHERE ARCHIVED_AT IS NOT NULL AND USERTYPE = 'student'`),
-            executeQuery(`SELECT COUNT(*) as count FROM ATTENDANCERECORDS WHERE ARCHIVED_AT IS NOT NULL`),
-            executeQuery(`SELECT COUNT(*) as count FROM SESSIONS WHERE ARCHIVED_AT IS NOT NULL`)
+            executeQuery(`SELECT COUNT(*) as count FROM ATTENDANCERECORDS WHERE ARCHIVED_AT IS NOT NULL`)
         ]);
 
         const stats = [
@@ -22,7 +22,7 @@ router.get('/dashboard', authenticateToken, requireAdmin, async (req, res) => {
             { category: 'schedules', count: schedules[0].count },
             { category: 'users', count: users[0].count },
             { category: 'attendance', count: attendance[0].count },
-            { category: 'sessions', count: sessions[0].count }
+            { category: 'backups', count: (await backupService.listArchivedBackups()).length }
         ];
 
         res.json({ stats });
@@ -169,29 +169,17 @@ router.post('/attendance', authenticateToken, requireAdmin, async (req, res) => 
     }
 });
 
-// Archive sessions by academic year/semester
-router.post('/sessions', authenticateToken, requireAdmin, async (req, res) => {
+// Archive backup copies (move files from backups to archived_backups)
+router.post('/backups', authenticateToken, requireAdmin, async (req, res) => {
     try {
-        const { academic_year, semester, reason } = req.body;
-        const adminId = req.user.id;
-
-        if (!academic_year || !semester) {
-            return res.status(400).json({ message: 'Academic year and semester are required' });
+        const { filenames } = req.body;
+        if (!Array.isArray(filenames) || filenames.length === 0) {
+            return res.status(400).json({ message: 'filenames array is required' });
         }
-
-        const result = await executeQuery(`
-            UPDATE SESSIONS 
-            SET ARCHIVED_AT = NOW(), ARCHIVED_BY = ?, ARCHIVE_REASON = ?
-            WHERE ACADEMICYEAR = ? AND SEMESTER = ? AND ARCHIVED_AT IS NULL
-        `, [adminId, reason || null, academic_year, semester]);
-
-        res.json({
-            success: true,
-            archived: result.affectedRows,
-            message: `Successfully archived ${result.affectedRows} sessions`
-        });
+        const result = await backupService.archiveBackups(filenames);
+        res.json({ success: true, ...result });
     } catch (error) {
-        console.error('Archive sessions error:', error);
+        console.error('Archive backups error:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });
@@ -425,56 +413,13 @@ router.get('/attendance', authenticateToken, requireAdmin, async (req, res) => {
     }
 });
 
-// Get archived sessions
-router.get('/sessions', authenticateToken, requireAdmin, async (req, res) => {
+// Get archived backup copies
+router.get('/backups', authenticateToken, requireAdmin, async (req, res) => {
     try {
-        const { academic_year, semester, page = 1, limit = 20 } = req.query;
-        const pageNum = Math.max(1, parseInt(page) || 1);
-        const limitNum = Math.max(1, Math.min(100, parseInt(limit) || 20));
-        const offset = (pageNum - 1) * limitNum;
-
-        let whereClause = 'WHERE s.ARCHIVED_AT IS NOT NULL';
-        const params = [];
-
-        if (academic_year) {
-            whereClause += ' AND s.ACADEMICYEAR = ?';
-            params.push(academic_year);
-        }
-        if (semester) {
-            whereClause += ' AND s.SEMESTER = ?';
-            params.push(semester);
-        }
-
-        const sessions = await executeQuery(`
-            SELECT s.*,
-                   sub.SUBJECTCODE,
-                   sub.SUBJECTNAME,
-                   r.ROOMNUMBER,
-                   r.ROOMNAME
-            FROM SESSIONS s
-            LEFT JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
-            LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
-            LEFT JOIN ROOMS r ON s.ROOMID = r.ROOMID
-            ${whereClause}
-            ORDER BY s.ARCHIVED_AT DESC
-            LIMIT ? OFFSET ?
-        `, [...params, limitNum.toString(), offset.toString()]);
-
-        const total = await getSingleResult(`
-            SELECT COUNT(*) as count FROM SESSIONS s ${whereClause}
-        `, params);
-
-        res.json({
-            sessions,
-            pagination: {
-                page: pageNum,
-                limit: limitNum,
-                total: total.count,
-                pages: Math.ceil(total.count / limitNum)
-            }
-        });
+        const backups = await backupService.listArchivedBackups();
+        res.json({ backups });
     } catch (error) {
-        console.error('Get archived sessions error:', error);
+        console.error('Get archived backups error:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });
