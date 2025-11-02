@@ -1,25 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArchiveBoxIcon,
   BookOpenIcon,
   BuildingOfficeIcon,
   CalendarDaysIcon,
   UsersIcon,
   ClipboardDocumentListIcon,
-  ClockIcon,
   ExclamationTriangleIcon,
-  CheckCircleIcon,
   XMarkIcon,
-  MagnifyingGlassIcon,
-  TrashIcon,
   DocumentArrowDownIcon,
-  EyeIcon,
-  CalendarIcon,
-  AcademicCapIcon,
-  MapPinIcon,
-  UserGroupIcon,
-  ClockIcon as ClockOutlineIcon,
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';
@@ -59,7 +48,8 @@ function Archive() {
   const [archivedBackups, setArchivedBackups] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [paginationData, setPaginationData] = useState({});
+  const [expandedGroups, setExpandedGroups] = useState({});
+  
 
   useEffect(() => {
     fetchDashboardStats();
@@ -93,8 +83,37 @@ function Archive() {
         headers: { Authorization: `Bearer ${token}` }
       });
       
-      const uniqueYears = [...new Set(response.data.subjects.data.map(s => s.ACADEMICYEAR).filter(Boolean))];
-      const uniqueSemesters = [...new Set(response.data.subjects.data.map(s => s.SEMESTER).filter(Boolean))];
+      // Derive from subjects
+      const subjectYears = Array.isArray(response?.data?.subjects?.data)
+        ? response.data.subjects.data.map(s => s.ACADEMICYEAR).filter(Boolean)
+        : [];
+      const subjectSemesters = Array.isArray(response?.data?.subjects?.data)
+        ? response.data.subjects.data.map(s => s.SEMESTER).filter(Boolean)
+        : [];
+
+      // Also derive from attendance logs so the Attendance archive modal isn't empty
+      let attendanceYears = [];
+      let attendanceSemesters = [];
+      try {
+        const logsRes = await axios.get('/api/logs/attendance', {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const logs = Array.isArray(logsRes?.data?.logs) ? logsRes.data.logs : [];
+        attendanceYears = logs.map(l => l.ACADEMICYEAR).filter(Boolean);
+        attendanceSemesters = logs.map(l => l.SEMESTER).filter(Boolean);
+      } catch (e) {
+        // Best-effort: if attendance logs fail, proceed with subjects-only
+        console.warn('Could not enrich academic years from attendance logs:', e?.message || e);
+      }
+
+      const uniqueYears = [...new Set([...
+        subjectYears,
+        ...attendanceYears
+      ])];
+      const uniqueSemesters = [...new Set([...
+        subjectSemesters,
+        ...attendanceSemesters
+      ])];
       
       setAcademicYears(uniqueYears);
       setSemesters(uniqueSemesters);
@@ -120,7 +139,6 @@ function Archive() {
             params 
           });
           setArchivedSubjects(response.data.subjects);
-          setPaginationData(response.data.pagination);
           break;
         case 'rooms':
           response = await axios.get('/api/archive/rooms', { 
@@ -128,7 +146,6 @@ function Archive() {
             params 
           });
           setArchivedRooms(response.data.rooms);
-          setPaginationData(response.data.pagination);
           break;
         case 'schedules':
           response = await axios.get('/api/archive/schedules', { 
@@ -136,7 +153,6 @@ function Archive() {
             params 
           });
           setArchivedSchedules(response.data.schedules);
-          setPaginationData(response.data.pagination);
           break;
         case 'users':
           response = await axios.get('/api/archive/users', { 
@@ -144,7 +160,6 @@ function Archive() {
             params 
           });
           setArchivedUsers(response.data.users);
-          setPaginationData(response.data.pagination);
           break;
         case 'attendance':
           response = await axios.get('/api/archive/attendance', { 
@@ -152,14 +167,12 @@ function Archive() {
             params 
           });
           setArchivedAttendance(response.data.records);
-          setPaginationData(response.data.pagination);
           break;
         case 'backups':
           response = await axios.get('/api/archive/backups', { 
             headers: { Authorization: `Bearer ${token}` }
           });
           setArchivedBackups(response.data.backups);
-          setPaginationData({ page: 1, pages: 1, total: response.data.backups.length, limit: response.data.backups.length });
           break;
       }
       
@@ -270,6 +283,14 @@ function Archive() {
     }
   };
 
+  const selectAllBackups = () => {
+    if (selectedBackupFiles.length === availableBackups.length) {
+      setSelectedBackupFiles([]);
+    } else {
+      setSelectedBackupFiles(availableBackups.map(b => b.filename));
+    }
+  };
+
   const handleArchive = async () => {
     try {
       setArchiving(true);
@@ -353,6 +374,41 @@ function Archive() {
       hour: '2-digit',
       minute: '2-digit'
     });
+  };
+
+  const getGroupKey = (category, item) => {
+    const raw = category === 'backups' ? item?.date : item?.ARCHIVED_AT;
+    if (!raw) return 'unknown';
+    const ms = new Date(raw).getTime();
+    if (Number.isNaN(ms)) return 'unknown';
+    // Group to seconds using local interpretation; use numeric key
+    return Math.floor(ms / 1000).toString();
+  };
+
+  const groupArchivedItems = (category, items) => {
+    const groups = {};
+    (items || []).forEach((item) => {
+      const key = getGroupKey(category, item);
+      if (!groups[key]) groups[key] = { items: [], displayDate: null };
+      groups[key].items.push(item);
+      const rawDate = category === 'backups' ? item?.date : item?.ARCHIVED_AT;
+      if (!groups[key].displayDate) groups[key].displayDate = rawDate;
+    });
+    return Object.entries(groups)
+      .sort((a, b) => parseInt(b[0], 10) - parseInt(a[0], 10))
+      .map(([key, data]) => ({ key, date: data.displayDate, items: data.items }));
+  };
+
+  const toggleGroup = (category, key) => {
+    setExpandedGroups(prev => {
+      const cat = prev[category] || {};
+      const next = { ...cat, [key]: !cat[key] };
+      return { ...prev, [category]: next };
+    });
+  };
+
+  const isGroupExpanded = (category, key) => {
+    return !!expandedGroups?.[category]?.[key];
   };
 
   if (loading && activeTab === 'dashboard') {
@@ -645,7 +701,7 @@ function Archive() {
                 </div>
               ) : (
                 <>
-                  {/* Archived Subjects View */}
+                  {/* Archived Subjects View (Grouped) */}
                   {activeTab === 'subjects' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Subjects</h3>
@@ -660,23 +716,61 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Academic Year</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Semester</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedSubjects.map((subject) => (
-                                <tr key={subject.SUBJECTID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{subject.SUBJECTCODE}</div>
-                                    <div className="text-sm text-gray-500">{subject.SUBJECTNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{subject.ACADEMICYEAR}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{subject.SEMESTER}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(subject.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('subjects', archivedSubjects).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('subjects', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('subjects', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('subjects', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('subjects', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Academic Year</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Semester</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((subject) => (
+                                                <tr key={subject.SUBJECTID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{subject.SUBJECTCODE}</div>
+                                                    <div className="text-gray-500">{subject.SUBJECTNAME}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{subject.ACADEMICYEAR}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{subject.SEMESTER}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -685,10 +779,13 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Rooms View */}
+                  {/* Archived Rooms View (Grouped) */}
                   {activeTab === 'rooms' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Rooms</h3>
+                      {archivedRooms.length > 0 && (
+                        <div className="text-xs text-gray-500">Diagnostics: {archivedRooms.length} rooms • Most recent archived at {formatDate(archivedRooms[0]?.ARCHIVED_AT)}</div>
+                      )}
                       {archivedRooms.length === 0 ? (
                         <div className="text-center py-12">
                           <BuildingOfficeIcon className="mx-auto h-12 w-12 text-gray-400" />
@@ -700,21 +797,59 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Building</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedRooms.map((room) => (
-                                <tr key={room.ROOMID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{room.ROOMNUMBER}</div>
-                                    <div className="text-sm text-gray-500">{room.ROOMNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{room.BUILDING}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(room.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('rooms', archivedRooms).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('rooms', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('rooms', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('rooms', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('rooms', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Building</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((room) => (
+                                                <tr key={room.ROOMID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{room.ROOMNUMBER}</div>
+                                                    <div className="text-gray-500">{room.ROOMNAME}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{room.BUILDING}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -723,7 +858,7 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Schedules View */}
+                  {/* Archived Schedules View (Grouped) */}
                   {activeTab === 'schedules' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Schedules</h3>
@@ -738,25 +873,63 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Day</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedSchedules.map((schedule) => (
-                                <tr key={schedule.SCHEDULEID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{schedule.SUBJECTCODE}</div>
-                                    <div className="text-sm text-gray-500">{schedule.SUBJECTNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{schedule.ROOMNUMBER}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{schedule.DAYOFWEEK}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{schedule.STARTTIME} - {schedule.ENDTIME}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(schedule.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('schedules', archivedSchedules).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('schedules', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('schedules', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('schedules', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('schedules', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Day</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((schedule) => (
+                                                <tr key={schedule.SCHEDULEID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{schedule.SUBJECTCODE}</div>
+                                                    <div className="text-gray-500">{schedule.SUBJECTNAME}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{schedule.ROOMNUMBER}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{schedule.DAYOFWEEK}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{schedule.STARTTIME} - {schedule.ENDTIME}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -765,7 +938,7 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Users View */}
+                  {/* Archived Users View (Grouped) */}
                   {activeTab === 'users' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Students</h3>
@@ -780,22 +953,60 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Student ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Year Level</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedUsers.map((user) => (
-                                <tr key={user.USERID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{user.FIRSTNAME} {user.LASTNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.STUDENTID}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.YEARLEVEL || 'N/A'}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(user.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('users', archivedUsers).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('users', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('users', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('users', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('users', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Student ID</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Year Level</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((user) => (
+                                                <tr key={user.USERID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{user.FIRSTNAME} {user.LASTNAME}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{user.STUDENTID}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{user.YEARLEVEL || 'N/A'}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -804,7 +1015,7 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Attendance View */}
+                  {/* Archived Attendance View (Grouped) */}
                   {activeTab === 'attendance' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Attendance Records</h3>
@@ -819,57 +1030,95 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action Type</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedAttendance.map((record) => (
-                                <tr key={record.ATTENDANCEID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{record.FIRSTNAME} {record.LASTNAME}</div>
-                                    <div className="text-sm text-gray-500">{record.STUDENTID}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                      record.STATUS === 'Present' ? 'bg-green-100 text-green-800' :
-                                      record.STATUS === 'Late' ? 'bg-yellow-100 text-yellow-800' :
-                                      'bg-red-100 text-red-800'
-                                    }`}>
-                                      {record.STATUS}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{record.ACTIONTYPE || 'N/A'}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                      record.AUTHMETHOD === 'RFID' ? 'bg-blue-100 text-blue-800' :
-                                      record.AUTHMETHOD === 'Fingerprint' ? 'bg-purple-100 text-purple-800' :
-                                      record.AUTHMETHOD === 'RFID + Fingerprint' ? 'bg-indigo-100 text-indigo-800' :
-                                      'bg-gray-100 text-gray-800'
-                                    }`}>
-                                      {record.AUTHMETHOD || 'Fingerprint'}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                      record.LOCATION === 'inside' ? 'bg-green-100 text-green-800' :
-                                      'bg-orange-100 text-orange-800'
-                                    }`}>
-                                      {record.LOCATION === 'inside' ? 'Inside' : 'Outside'}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{record.ROOMNUMBER || 'N/A'}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{record.SUBJECTCODE || 'N/A'}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(record.DATE)}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(record.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('attendance', archivedAttendance).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('attendance', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('attendance', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('attendance', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('attendance', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((record) => (
+                                                <tr key={record.ATTENDANCEID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{record.FIRSTNAME} {record.LASTNAME}</div>
+                                                    <div className="text-gray-500">{record.STUDENTID}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                                      record.STATUS === 'Present' ? 'bg-green-100 text-green-800' :
+                                                      record.STATUS === 'Late' ? 'bg-yellow-100 text-yellow-800' :
+                                                      'bg-red-100 text-red-800'
+                                                    }`}>
+                                                      {record.STATUS}
+                                                    </span>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{record.ACTIONTYPE || 'N/A'}</td>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                                      record.AUTHMETHOD === 'RFID' ? 'bg-blue-100 text-blue-800' :
+                                                      record.AUTHMETHOD === 'Fingerprint' ? 'bg-purple-100 text-purple-800' :
+                                                      record.AUTHMETHOD === 'RFID + Fingerprint' ? 'bg-indigo-100 text-indigo-800' :
+                                                      'bg-gray-100 text-gray-800'
+                                                    }`}>
+                                                      {record.AUTHMETHOD || 'Fingerprint'}
+                                                    </span>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                                      record.LOCATION === 'inside' ? 'bg-green-100 text-green-800' :
+                                                      'bg-orange-100 text-orange-800'
+                                                    }`}>
+                                                      {record.LOCATION === 'inside' ? 'Inside' : 'Outside'}
+                                                    </span>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{record.ROOMNUMBER || 'N/A'}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{record.SUBJECTCODE || 'N/A'}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{formatDate(record.DATE)}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -878,7 +1127,7 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Backups View */}
+                  {/* Archived Backups View (Grouped) */}
                   {activeTab === 'backups' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Backup Copies</h3>
@@ -889,18 +1138,56 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Size (MB)</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedBackups.map((b) => (
-                                <tr key={b.filename} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{b.filename}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{b.size}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(b.date)}</td>
-                                </tr>
+                              {groupArchivedItems('backups', archivedBackups).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('backups', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('backups', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('backups', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('backups', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Size (MB)</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((b) => (
+                                                <tr key={b.filename}>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{b.filename}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{b.size}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -1009,9 +1296,36 @@ function Archive() {
                 </div>
               )}
 
-              {archiveCategory === 'backups' && (
+            {archiveCategory === 'backups' && (
                 <div className="mb-4">
-                  <p className="text-sm text-gray-600 mb-2">Select backup files to archive:</p>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm text-gray-600">Select backup files to archive:</p>
+                    {availableBackups.length > 0 && (
+                      <button
+                        onClick={selectAllBackups}
+                        className="px-3 py-1.5 text-sm font-medium rounded-md transition-all duration-200"
+                        style={{
+                          background: selectedBackupFiles.length === availableBackups.length 
+                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                            : 'linear-gradient(135deg, #800020 0%, #8b1538 100%)',
+                          color: 'white',
+                          boxShadow: '0 2px 4px rgba(128, 0, 32, 0.3)'
+                        }}
+                        onMouseEnter={(e) => {
+                          if (selectedBackupFiles.length !== availableBackups.length) {
+                            e.target.style.transform = 'scale(1.05)';
+                            e.target.style.boxShadow = '0 4px 8px rgba(128, 0, 32, 0.4)';
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          e.target.style.transform = 'scale(1)';
+                          e.target.style.boxShadow = '0 2px 4px rgba(128, 0, 32, 0.3)';
+                        }}
+                      >
+                        {selectedBackupFiles.length === availableBackups.length ? '✓ Deselect All' : 'Select All'}
+                      </button>
+                    )}
+                  </div>
                   {loadingBackups ? (
                     <div className="flex items-center justify-center py-8">
                       <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>

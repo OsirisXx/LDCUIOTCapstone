@@ -14,8 +14,7 @@ import {
   ExclamationTriangleIcon,
   EllipsisVerticalIcon,
   ChevronDownIcon,
-  Squares2X2Icon,
-  RectangleStackIcon
+  Squares2X2Icon
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';

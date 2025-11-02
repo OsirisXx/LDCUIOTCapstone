@@ -163,7 +163,8 @@ namespace FutronicAttendanceSystem.Database
                     // Try to find a room that matches our location or use the first available room
                     var roomCmd = new MySqlCommand(@"
                         SELECT ROOMID FROM ROOMS 
-                        WHERE BUILDING LIKE @location OR ROOMNAME LIKE @location 
+                        WHERE (BUILDING LIKE @location OR ROOMNAME LIKE @location)
+                          AND ARCHIVED_AT IS NULL
                         ORDER BY CREATED_AT DESC LIMIT 1", connection);
                     roomCmd.Parameters.AddWithValue("@location", $"%{deviceLocation}%");
                     
@@ -172,7 +173,7 @@ namespace FutronicAttendanceSystem.Database
                     if (string.IsNullOrEmpty(roomId))
                     {
                         // Get any available room as fallback
-                        roomCmd = new MySqlCommand("SELECT ROOMID FROM ROOMS WHERE STATUS = 'Available' LIMIT 1", connection);
+                        roomCmd = new MySqlCommand("SELECT ROOMID FROM ROOMS WHERE STATUS = 'Available' AND ARCHIVED_AT IS NULL LIMIT 1", connection);
                         roomId = roomCmd.ExecuteScalar()?.ToString();
                     }
                     
@@ -322,7 +323,7 @@ namespace FutronicAttendanceSystem.Database
                        AND A.METHODTYPE = 'Fingerprint' 
                        AND A.ISACTIVE = 1
                        AND A.STATUS = 'Active'
-                    WHERE U.STATUS = 'Active'
+                    WHERE U.STATUS = 'Active' AND U.ARCHIVED_AT IS NULL
                     ORDER BY U.LASTNAME, U.FIRSTNAME", connection);
 
                 using (var reader = cmd.ExecuteReader())
@@ -414,7 +415,7 @@ namespace FutronicAttendanceSystem.Database
                         CREATED_AT,
                         UPDATED_AT
                     FROM ROOMS 
-                    WHERE STATUS = 'Available'
+                    WHERE STATUS = 'Available' AND ARCHIVED_AT IS NULL
                     ORDER BY BUILDING, ROOMNUMBER", connection);
 
                 using (var reader = cmd.ExecuteReader())
@@ -455,7 +456,7 @@ namespace FutronicAttendanceSystem.Database
                 var cmd = new MySqlCommand(@"
                     SELECT DISTINCT BUILDING 
                     FROM ROOMS 
-                    WHERE STATUS = 'Available' 
+                    WHERE STATUS = 'Available' AND ARCHIVED_AT IS NULL
                     ORDER BY BUILDING", connection);
 
                 using (var reader = cmd.ExecuteReader())
@@ -494,7 +495,7 @@ namespace FutronicAttendanceSystem.Database
                         CREATED_AT,
                         UPDATED_AT
                     FROM ROOMS 
-                    WHERE BUILDING = @building AND STATUS = 'Available'
+                    WHERE BUILDING = @building AND STATUS = 'Available' AND ARCHIVED_AT IS NULL
                     ORDER BY ROOMNUMBER", connection);
 
                 cmd.Parameters.AddWithValue("@building", building);
@@ -767,7 +768,7 @@ namespace FutronicAttendanceSystem.Database
                 upsertUser.ExecuteNonQuery();
 
                 // Get USERID by EMAIL
-                var getUserId = new MySqlCommand("SELECT USERID FROM USERS WHERE EMAIL = @EMAIL", connection);
+                var getUserId = new MySqlCommand("SELECT USERID FROM USERS WHERE EMAIL = @EMAIL AND ARCHIVED_AT IS NULL", connection);
                 getUserId.Parameters.AddWithValue("@EMAIL", email);
                 var userIdObj = getUserId.ExecuteScalar();
                 if (userIdObj == null)
@@ -805,7 +806,7 @@ namespace FutronicAttendanceSystem.Database
             try
             {
                 // First, verify the user exists
-                var checkUserCmd = new MySqlCommand("SELECT USERID FROM USERS WHERE USERID = @USERID AND STATUS = 'Active'", connection);
+                var checkUserCmd = new MySqlCommand("SELECT USERID FROM USERS WHERE USERID = @USERID AND STATUS = 'Active' AND ARCHIVED_AT IS NULL", connection);
                 checkUserCmd.Parameters.AddWithValue("@USERID", userGuid);
                 var userExists = checkUserCmd.ExecuteScalar() != null;
                 
@@ -853,7 +854,7 @@ namespace FutronicAttendanceSystem.Database
                 Console.WriteLine($"====== DATABASE RFID LOOKUP ======");
                 Console.WriteLine($"Searching for RFIDTAG = '{rfidTag}'");
                 
-                var cmd = new MySqlCommand("SELECT * FROM USERS WHERE RFIDTAG = @rfidTag", connection);
+                var cmd = new MySqlCommand("SELECT * FROM USERS WHERE RFIDTAG = @rfidTag AND ARCHIVED_AT IS NULL", connection);
                 cmd.Parameters.AddWithValue("@rfidTag", rfidTag);
                 
                 using (var reader = cmd.ExecuteReader())
@@ -992,7 +993,7 @@ namespace FutronicAttendanceSystem.Database
                 var findGuidCmd = new MySqlCommand(@"
                     SELECT USERID 
                     FROM USERS 
-                    WHERE STATUS = 'Active'", connection);
+                    WHERE STATUS = 'Active' AND ARCHIVED_AT IS NULL", connection);
                 
                 try
                 {
@@ -1052,6 +1053,7 @@ namespace FutronicAttendanceSystem.Database
                     WHERE SESSIONDATE = CURRENT_DATE 
                       AND STATUS IN ('active','waiting')
                       AND ROOMID = @currentRoomId
+                      AND ARCHIVED_AT IS NULL
                     ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC 
                     LIMIT 1", connection))
                 {
@@ -1083,7 +1085,7 @@ namespace FutronicAttendanceSystem.Database
                 {
                     // Check user type to see if they can record without a schedule
                     string userType = null;
-                    using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid", connection))
+                    using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid AND ARCHIVED_AT IS NULL", connection))
                     {
                         cmdGetUserType.Parameters.AddWithValue("@userGuid", userGuid);
                         var userTypeObj = cmdGetUserType.ExecuteScalar();
@@ -1169,7 +1171,7 @@ namespace FutronicAttendanceSystem.Database
                 if (!string.IsNullOrEmpty(scheduleId))
                 {
                     using (var cmdGetStart = new MySqlCommand(
-                        "SELECT STARTTIME FROM CLASSSCHEDULES WHERE SCHEDULEID = @scheduleId", connection))
+                        "SELECT STARTTIME FROM CLASSSCHEDULES WHERE SCHEDULEID = @scheduleId AND ARCHIVED_AT IS NULL", connection))
                     {
                         cmdGetStart.Parameters.AddWithValue("@scheduleId", scheduleId);
                         var startObj = cmdGetStart.ExecuteScalar();
@@ -1183,7 +1185,7 @@ namespace FutronicAttendanceSystem.Database
                 var currentTime = DateTime.Now.TimeOfDay;
                 var minutesAfterStart = (currentTime - classStartTime).TotalMinutes;
 
-                using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid", connection))
+                using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid AND ARCHIVED_AT IS NULL", connection))
                 {
                     cmdGetUserType.Parameters.AddWithValue("@userGuid", userGuid);
                     var userTypeObj = cmdGetUserType.ExecuteScalar();
@@ -1364,7 +1366,7 @@ namespace FutronicAttendanceSystem.Database
                 Console.WriteLine($"Time: {currentTime}");
                 
                 using (var cmdGetUserType = new MySqlCommand(@"
-                    SELECT USERTYPE, FIRSTNAME, LASTNAME, EMAIL FROM USERS WHERE USERID = @userGuid", connection))
+                    SELECT USERTYPE, FIRSTNAME, LASTNAME, EMAIL FROM USERS WHERE USERID = @userGuid AND ARCHIVED_AT IS NULL", connection))
                 {
                     cmdGetUserType.Parameters.AddWithValue("@userGuid", userGuid);
                     
@@ -1417,7 +1419,9 @@ namespace FutronicAttendanceSystem.Database
                           AND cs.DAYOFWEEK = @currentDay
                           AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
                           AND cs.ACADEMICYEAR = @academicYear
-                          AND cs.SEMESTER = @semester", connection))
+                          AND cs.SEMESTER = @semester
+                          AND cs.ARCHIVED_AT IS NULL
+                          AND s.ARCHIVED_AT IS NULL", connection))
                     {
                         cmdCheckDeanSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckDeanSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
@@ -1468,7 +1472,9 @@ namespace FutronicAttendanceSystem.Database
                           AND cs.DAYOFWEEK = @currentDay
                           AND TIME(NOW()) BETWEEN ADDTIME(cs.STARTTIME, @earlyWindow) AND cs.ENDTIME
                           AND cs.ACADEMICYEAR = @academicYear
-                          AND cs.SEMESTER = @semester", connection))
+                          AND cs.SEMESTER = @semester
+                          AND cs.ARCHIVED_AT IS NULL
+                          AND s.ARCHIVED_AT IS NULL", connection))
                     {
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
@@ -1506,7 +1512,8 @@ namespace FutronicAttendanceSystem.Database
                             SELECT SESSIONID FROM SESSIONS 
                             WHERE SCHEDULEID = @scheduleId 
                               AND SESSIONDATE = CURRENT_DATE 
-                              AND STATUS = 'active'", connection))
+                              AND STATUS = 'active'
+                              AND ARCHIVED_AT IS NULL", connection))
                         {
                             cmdCheckSession.Parameters.AddWithValue("@scheduleId", scheduleId);
                             var existingSession = cmdCheckSession.ExecuteScalar();
@@ -1549,7 +1556,9 @@ namespace FutronicAttendanceSystem.Database
                         SELECT se.ENROLLMENTID, s.SUBJECTNAME, s.SUBJECTID
                         FROM SUBJECTENROLLMENT se
                         JOIN SUBJECTS s ON se.SUBJECTID = s.SUBJECTID
-                        WHERE se.USERID = @userGuid AND se.STATUS = 'enrolled'", connection))
+                        WHERE se.USERID = @userGuid AND se.STATUS = 'enrolled' 
+                          AND se.ARCHIVED_AT IS NULL
+                          AND s.ARCHIVED_AT IS NULL", connection))
                     {
                         cmdCheckEnrollment.Parameters.AddWithValue("@userGuid", userGuid);
                         
@@ -1592,7 +1601,10 @@ namespace FutronicAttendanceSystem.Database
                           AND cs.DAYOFWEEK = @currentDay
                           AND TIME(NOW()) BETWEEN ADDTIME(cs.STARTTIME, @earlyWindow) AND cs.ENDTIME
                           AND cs.ACADEMICYEAR = @academicYear
-                          AND cs.SEMESTER = @semester", connection))
+                          AND cs.SEMESTER = @semester
+                          AND cs.ARCHIVED_AT IS NULL
+                          AND s.ARCHIVED_AT IS NULL
+                          AND se.ARCHIVED_AT IS NULL", connection))
                     {
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
@@ -1635,7 +1647,8 @@ namespace FutronicAttendanceSystem.Database
                             FROM SESSIONS 
                             WHERE SCHEDULEID = @scheduleId 
                               AND SESSIONDATE = CURRENT_DATE 
-                              AND STATUS = 'active'", connection))
+                              AND STATUS = 'active'
+                              AND ARCHIVED_AT IS NULL", connection))
                         {
                             cmdCheckActiveSession.Parameters.AddWithValue("@scheduleId", scheduleId);
                             
@@ -1668,7 +1681,10 @@ namespace FutronicAttendanceSystem.Database
                             WHERE subj.SUBJECTNAME = @subjectName
                               AND s.ROOMID = @roomId
                               AND s.SESSIONDATE = CURRENT_DATE
-                              AND s.STATUS = 'active'", connection))
+                              AND s.STATUS = 'active'
+                              AND s.ARCHIVED_AT IS NULL
+                              AND cs.ARCHIVED_AT IS NULL
+                              AND subj.ARCHIVED_AT IS NULL", connection))
                         {
                             cmdCheckSessionBySubject.Parameters.AddWithValue("@subjectName", subjectName);
                             cmdCheckSessionBySubject.Parameters.AddWithValue("@roomId", CurrentRoomId);
@@ -1701,7 +1717,7 @@ namespace FutronicAttendanceSystem.Database
                                 Console.WriteLine($"DEBUG: Checking early arrival for student - window: {earlyWindowMinutes} minutes");
                                 
                                 using (var cmdGetStartTime = new MySqlCommand(
-                                    "SELECT STARTTIME FROM CLASSSCHEDULES WHERE SCHEDULEID = @scheduleId", connection))
+                                    "SELECT STARTTIME FROM CLASSSCHEDULES WHERE SCHEDULEID = @scheduleId AND ARCHIVED_AT IS NULL", connection))
                                 {
                                     cmdGetStartTime.Parameters.AddWithValue("@scheduleId", scheduleId);
                                     var startTimeObj = cmdGetStartTime.ExecuteScalar();
@@ -1847,7 +1863,8 @@ namespace FutronicAttendanceSystem.Database
                     SELECT SESSIONID FROM SESSIONS 
                     WHERE SCHEDULEID = @scheduleId 
                       AND SESSIONDATE = CURRENT_DATE 
-                      AND STATUS = 'active'", connection))
+                      AND STATUS = 'active'
+                      AND ARCHIVED_AT IS NULL", connection))
                 {
                     cmdCheckExisting.Parameters.AddWithValue("@scheduleId", scheduleId);
                     var existingSession = cmdCheckExisting.ExecuteScalar();
@@ -1908,7 +1925,8 @@ namespace FutronicAttendanceSystem.Database
                     SELECT SESSIONID FROM SESSIONS 
                     WHERE SCHEDULEID = @scheduleId 
                       AND SESSIONDATE = CURRENT_DATE 
-                      AND STATUS = 'active'", connection))
+                      AND STATUS = 'active'
+                      AND ARCHIVED_AT IS NULL", connection))
                 {
                     cmdFindSession.Parameters.AddWithValue("@scheduleId", scheduleId);
                     var sessionId = cmdFindSession.ExecuteScalar()?.ToString();
@@ -1984,7 +2002,7 @@ namespace FutronicAttendanceSystem.Database
                 
                 // Find the instructor
                 string instructorGuid = null;
-                using (var cmd = new MySqlCommand("SELECT USERID FROM USERS WHERE EMAIL = @email", connection))
+                using (var cmd = new MySqlCommand("SELECT USERID FROM USERS WHERE EMAIL = @email AND ARCHIVED_AT IS NULL", connection))
                 {
                     cmd.Parameters.AddWithValue("@email", instructorEmail);
                     var result = cmd.ExecuteScalar();
@@ -2024,7 +2042,7 @@ namespace FutronicAttendanceSystem.Database
                     LogMessage("INFO", "CurrentRoomId is NULL, attempting to auto-assign to a room...");
                     
                     // Try to find any available room
-                    using (var cmd = new MySqlCommand("SELECT ROOMID FROM ROOMS WHERE STATUS = 'Available' LIMIT 1", connection))
+                    using (var cmd = new MySqlCommand("SELECT ROOMID FROM ROOMS WHERE STATUS = 'Available' AND ARCHIVED_AT IS NULL LIMIT 1", connection))
                     {
                         var roomId = cmd.ExecuteScalar()?.ToString();
                         if (!string.IsNullOrEmpty(roomId))
@@ -2063,7 +2081,7 @@ namespace FutronicAttendanceSystem.Database
                 
                 // Show available rooms
                 LogMessage("DEBUG", "Available rooms:");
-                using (var cmd = new MySqlCommand("SELECT ROOMID, ROOMNAME, STATUS FROM ROOMS", connection))
+                using (var cmd = new MySqlCommand("SELECT ROOMID, ROOMNAME, STATUS FROM ROOMS WHERE ARCHIVED_AT IS NULL", connection))
                 {
                     using (var reader = cmd.ExecuteReader())
                     {
@@ -2076,7 +2094,7 @@ namespace FutronicAttendanceSystem.Database
                 
                 // Check if we have any users
                 var userCount = 0;
-                using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM USERS WHERE STATUS = 'Active'", connection))
+                using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM USERS WHERE STATUS = 'Active' AND ARCHIVED_AT IS NULL", connection))
                 {
                     userCount = Convert.ToInt32(cmd.ExecuteScalar());
                 }
@@ -2084,14 +2102,14 @@ namespace FutronicAttendanceSystem.Database
                 
                 // Check if we have any instructors
                 var instructorCount = 0;
-                using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM USERS WHERE USERTYPE = 'instructor' AND STATUS = 'Active'", connection))
+                using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM USERS WHERE USERTYPE = 'instructor' AND STATUS = 'Active' AND ARCHIVED_AT IS NULL", connection))
                 {
                     instructorCount = Convert.ToInt32(cmd.ExecuteScalar());
                 }
                 LogMessage("DEBUG", $"Active instructors count: {instructorCount}");
                 
                 // Check specific instructor
-                using (var cmd = new MySqlCommand("SELECT USERID, EMAIL, USERTYPE, STATUS FROM USERS WHERE EMAIL = 'harleyinstructor@gmail.com'", connection))
+                using (var cmd = new MySqlCommand("SELECT USERID, EMAIL, USERTYPE, STATUS FROM USERS WHERE EMAIL = 'harleyinstructor@gmail.com' AND ARCHIVED_AT IS NULL", connection))
                 {
                     using (var reader = cmd.ExecuteReader())
                     {
@@ -2108,7 +2126,7 @@ namespace FutronicAttendanceSystem.Database
                 
                 // Check if we have any class schedules
                 var scheduleCount = 0;
-                using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM CLASSSCHEDULES", connection))
+                using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM CLASSSCHEDULES WHERE ARCHIVED_AT IS NULL", connection))
                 {
                     scheduleCount = Convert.ToInt32(cmd.ExecuteScalar());
                 }
@@ -2123,7 +2141,10 @@ namespace FutronicAttendanceSystem.Database
                     JOIN USERS u ON s.INSTRUCTORID = u.USERID
                     WHERE cs.DAYOFWEEK = @today
                       AND cs.ACADEMICYEAR = @academicYear
-                      AND cs.SEMESTER = @semester", connection))
+                      AND cs.SEMESTER = @semester
+                      AND cs.ARCHIVED_AT IS NULL
+                      AND s.ARCHIVED_AT IS NULL
+                      AND u.ARCHIVED_AT IS NULL", connection))
                 {
                     cmd.Parameters.AddWithValue("@today", today);
                     cmd.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);

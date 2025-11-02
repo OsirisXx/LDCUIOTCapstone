@@ -219,7 +219,6 @@ namespace FutronicAttendanceSystem
         private TabControl tabControl;
         private TabPage enrollmentTab;
         private TabPage attendanceTab;
-        private TabPage deviceManagementTab;
         private TabPage scenariosTab; // NEW: Attendance Scenarios Configuration tab
         private PictureBox pictureFingerprint;
 		private Button btnEnroll;
@@ -272,13 +271,6 @@ namespace FutronicAttendanceSystem
         private ComboBox cmbRoom;
         private Button btnChangeRoom;
         private Label lblCurrentRoom;
-        
-        // Device Management controls
-        private ListView deviceListView;
-        private Button btnInitializeInRoom;
-        private ComboBox cmbDeviceRoom;
-        private TextBox txtDeviceName;
-        private Button btnRefreshDevices;
 
         // Attendance Scenarios Configuration controls
         private NumericUpDown numInstructorEarlyWindow;
@@ -819,17 +811,12 @@ namespace FutronicAttendanceSystem
             attendanceTab = new TabPage("Attendance");
             tabControl.TabPages.Add(attendanceTab);
 
-            // Create device management tab
-            deviceManagementTab = new TabPage("Device Management");
-            tabControl.TabPages.Add(deviceManagementTab);
-
             // Create attendance scenarios configuration tab
             scenariosTab = new TabPage("Attendance Scenarios");
             tabControl.TabPages.Add(scenariosTab);
 
             InitializeEnrollmentTab();
             InitializeAttendanceTab();
-            InitializeDeviceManagementTab();
             InitializeScenariosTab();
         }
 
@@ -2214,92 +2201,6 @@ namespace FutronicAttendanceSystem
 
         // Removed obsolete SetRfidComboBoxDropDownWidths() - RFID uses unified location/room controls
 
-        private void InitializeDeviceManagementTab()
-        {
-            // Title label
-            var lblTitle = new Label();
-            lblTitle.Location = new Point(20, 20);
-            lblTitle.Size = new Size(400, 25);
-            lblTitle.Text = "Multi-Device Management";
-            lblTitle.Font = new Font(lblTitle.Font, FontStyle.Bold);
-            lblTitle.ForeColor = Color.DarkBlue;
-            deviceManagementTab.Controls.Add(lblTitle);
-
-            // Device name input
-            var lblDeviceName = new Label();
-            lblDeviceName.Location = new Point(20, 55);
-            lblDeviceName.Size = new Size(100, 20);
-            lblDeviceName.Text = "Device Name:";
-            deviceManagementTab.Controls.Add(lblDeviceName);
-
-            txtDeviceName = new TextBox();
-            txtDeviceName.Location = new Point(125, 53);
-            txtDeviceName.Size = new Size(200, 25);
-            txtDeviceName.Text = config?.Device?.DeviceId ?? "Device1";
-            deviceManagementTab.Controls.Add(txtDeviceName);
-
-            // Room selection for device
-            var lblDeviceRoom = new Label();
-            lblDeviceRoom.Location = new Point(340, 55);
-            lblDeviceRoom.Size = new Size(50, 20);
-            lblDeviceRoom.Text = "Room:";
-            deviceManagementTab.Controls.Add(lblDeviceRoom);
-
-            cmbDeviceRoom = new ComboBox();
-            cmbDeviceRoom.Location = new Point(395, 53);
-            cmbDeviceRoom.Size = new Size(250, 25);
-            cmbDeviceRoom.DropDownStyle = ComboBoxStyle.DropDownList;
-            deviceManagementTab.Controls.Add(cmbDeviceRoom);
-
-            // Initialize device button
-            btnInitializeInRoom = new Button();
-            btnInitializeInRoom.Location = new Point(655, 52);
-            btnInitializeInRoom.Size = new Size(120, 27);
-            btnInitializeInRoom.Text = "Initialize Device";
-            btnInitializeInRoom.BackColor = Color.LightGreen;
-            btnInitializeInRoom.Click += BtnInitializeInRoom_Click;
-            deviceManagementTab.Controls.Add(btnInitializeInRoom);
-
-            // Refresh devices button
-            btnRefreshDevices = new Button();
-            btnRefreshDevices.Location = new Point(785, 52);
-            btnRefreshDevices.Size = new Size(80, 27);
-            btnRefreshDevices.Text = "Refresh";
-            btnRefreshDevices.BackColor = Color.LightCyan;
-            btnRefreshDevices.Click += BtnRefreshDevices_Click;
-            deviceManagementTab.Controls.Add(btnRefreshDevices);
-
-            // Device list
-            deviceListView = new ListView();
-            deviceListView.Location = new Point(20, 90);
-            deviceListView.Size = new Size(850, 400);
-            deviceListView.View = View.Details;
-            deviceListView.FullRowSelect = true;
-            deviceListView.GridLines = true;
-
-            deviceListView.Columns.Add("Device Name", 150);
-            deviceListView.Columns.Add("Type", 120);
-            deviceListView.Columns.Add("Room", 200);
-            deviceListView.Columns.Add("Building", 150);
-            deviceListView.Columns.Add("IP Address", 120);
-            deviceListView.Columns.Add("Status", 80);
-            deviceListView.Columns.Add("Last Seen", 130);
-
-            deviceManagementTab.Controls.Add(deviceListView);
-
-            // Instructions
-            var lblInstructions = new Label();
-            lblInstructions.Location = new Point(20, 500);
-            lblInstructions.Size = new Size(850, 60);
-            lblInstructions.Text = "Instructions:\n" +
-                "1. Enter a unique device name for each fingerprint scanner\n" +
-                "2. Select the room where this device will be installed\n" +
-                "3. Click 'Initialize Device' to register it in the database\n" +
-                "4. Copy this application to each device location with different device names in appsettings.json";
-            lblInstructions.ForeColor = Color.DarkGreen;
-            deviceManagementTab.Controls.Add(lblInstructions);
-        }
-
         private void InitializeScenariosTab()
         {
             scenariosTab.Controls.Clear();
@@ -3017,43 +2918,6 @@ namespace FutronicAttendanceSystem
                     SetStatusText("Failed to change room");
                 }
             }
-        }
-
-        private void BtnInitializeInRoom_Click(object sender, EventArgs e)
-        {
-            if (string.IsNullOrWhiteSpace(txtDeviceName.Text))
-            {
-                MessageBox.Show("Please enter a device name.", "Missing Device Name", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (cmbDeviceRoom.SelectedItem == null)
-            {
-                MessageBox.Show("Please select a room for the device.", "No Room Selected", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            var selectedRoom = (Database.Models.Room)cmbDeviceRoom.SelectedItem;
-            var deviceName = txtDeviceName.Text.Trim();
-
-            if (dbManager.InitializeDeviceInRoom(selectedRoom.RoomId, deviceName))
-            {
-                SetStatusText($"Device '{deviceName}' initialized in room '{selectedRoom.DisplayName}'");
-                RefreshDeviceList();
-                UpdateCurrentRoomDisplay();
-            }
-            else
-            {
-                MessageBox.Show("Failed to initialize device. Check the logs for details.", "Initialization Failed", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void BtnRefreshDevices_Click(object sender, EventArgs e)
-        {
-            RefreshDeviceList();
         }
 
         private void BtnExportAttendance_Click(object sender, EventArgs e)
@@ -6560,19 +6424,6 @@ namespace FutronicAttendanceSystem
                     }
                 }
             }
-
-            // Also update device room combo
-            if (cmbDeviceRoom != null && availableRooms != null)
-            {
-                cmbDeviceRoom.Items.Clear();
-                cmbDeviceRoom.DisplayMember = "DisplayName";
-                cmbDeviceRoom.ValueMember = "RoomId";
-                
-                foreach (var room in availableRooms)
-                {
-                    cmbDeviceRoom.Items.Add(room);
-                }
-            }
         }
 
         private void UpdateCurrentRoomDisplay()
@@ -6609,58 +6460,6 @@ namespace FutronicAttendanceSystem
             }
         }
 
-        private void RefreshDeviceList()
-        {
-            try
-            {
-                var devices = dbManager?.GetAllDevices() ?? new List<Database.Models.Device>();
-                
-                if (this.InvokeRequired)
-                {
-                    this.Invoke(new Action(() => UpdateDeviceListView(devices)));
-                }
-                else
-                {
-                    UpdateDeviceListView(devices);
-                }
-            }
-            catch (Exception ex)
-            {
-                SetStatusText($"Failed to refresh device list: {ex.Message}");
-            }
-        }
-
-        private void UpdateDeviceListView(List<Database.Models.Device> devices)
-        {
-            if (deviceListView == null) return;
-
-            deviceListView.Items.Clear();
-
-            foreach (var device in devices)
-            {
-                var item = new ListViewItem(device.DeviceName);
-                item.SubItems.Add(device.DeviceType);
-                item.SubItems.Add(device.Room?.DisplayName ?? "Not Set");
-                item.SubItems.Add(device.Room?.Building ?? "Unknown");
-                item.SubItems.Add(device.IpAddress ?? "Unknown");
-                item.SubItems.Add(device.Status);
-                item.SubItems.Add(device.LastSeen?.ToString("MM/dd HH:mm") ?? "Never");
-
-                // Highlight current device
-                if (device.DeviceId == dbManager?.CurrentDeviceId)
-                {
-                    item.BackColor = Color.LightGreen;
-                    item.Font = new Font(item.Font, FontStyle.Bold);
-                }
-                else if (device.Status != "Active")
-                {
-                    item.BackColor = Color.LightGray;
-                }
-
-                deviceListView.Items.Add(item);
-            }
-        }
-
         private void TabControl_SelectedIndexChanged(object sender, EventArgs e)
         {
             try
@@ -6668,10 +6467,6 @@ namespace FutronicAttendanceSystem
                 if (tabControl.SelectedTab == enrollmentTab)
                 {
                     RefreshUserList();
-                }
-                else if (tabControl.SelectedTab == deviceManagementTab)
-                {
-                    RefreshDeviceList();
                 }
             }
             catch { }

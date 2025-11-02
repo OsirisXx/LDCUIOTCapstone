@@ -3,17 +3,13 @@ import {
   PlayIcon, 
   StopIcon, 
   CheckCircleIcon,
-  XCircleIcon,
   ExclamationTriangleIcon,
   LockClosedIcon,
   LockOpenIcon,
   ClockIcon,
   CalendarDaysIcon,
-  UserGroupIcon,
   MapPinIcon,
-  AcademicCapIcon,
-  SunIcon,
-  MoonIcon
+  AcademicCapIcon
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';
