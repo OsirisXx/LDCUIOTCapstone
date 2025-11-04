@@ -837,6 +837,77 @@ namespace FutronicAttendanceSystem
             var leftPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8) };
             mainLayout.Controls.Add(leftPanel, 0, 0);
 
+            // Control buttons
+            var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 50, FlowDirection = FlowDirection.LeftToRight };
+            
+            btnEnroll = new Button();
+            btnEnroll.Size = new Size(120, 35);
+            btnEnroll.Text = "Start Enrollment";
+            btnEnroll.BackColor = Color.LightBlue;
+            btnEnroll.Enabled = false; // Disabled until user is selected
+            btnEnroll.Click += BtnEnroll_Click;
+            buttonPanel.Controls.Add(btnEnroll);
+
+            btnStop = new Button();
+            btnStop.Size = new Size(80, 35);
+            btnStop.Text = "Stop";
+            btnStop.BackColor = Color.LightCoral;
+            btnStop.Enabled = false;
+            btnStop.Click += BtnStop_Click;
+            buttonPanel.Controls.Add(btnStop);
+
+            leftPanel.Controls.Add(buttonPanel);
+
+            // NEW: Registration instructions panel (below fingerprint image)
+            var registrationInstructionsPanel = new Panel { Dock = DockStyle.Top, Height = 220, Padding = new Padding(8, 8, 8, 8) };
+            registrationInstructionsPanel.BackColor = Color.FromArgb(249, 251, 253);
+            registrationInstructionsPanel.BorderStyle = BorderStyle.FixedSingle;
+            
+            var generalTip = new Label 
+            { 
+                Dock = DockStyle.Fill, 
+                Text = "💡 Tip: Users must register both fingerprint and RFID for dual authentication", 
+                Font = new Font("Segoe UI", 8, FontStyle.Italic),
+                ForeColor = Color.FromArgb(80, 100, 160),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 5, 0, 0)
+            };
+            registrationInstructionsPanel.Controls.Add(generalTip);
+            
+            var rfidInstructions = new Label 
+            { 
+                Dock = DockStyle.Top, 
+                Height = 45, 
+                Text = "🔑 RFID Card:\n• Select a user from the table\n• Click 'Assign RFID' in Actions column\n• Scan RFID card when prompted", 
+                Font = new Font("Segoe UI", 9, FontStyle.Regular),
+                ForeColor = Color.FromArgb(60, 90, 140),
+                Padding = new Padding(0, 5, 0, 0)
+            };
+            registrationInstructionsPanel.Controls.Add(rfidInstructions);
+            
+            var fingerprintInstructions = new Label 
+            { 
+                Dock = DockStyle.Top, 
+                Height = 60, 
+                Text = "📷 Fingerprint:\n• Select a user from the table\n• Click 'Start Enrollment'\n• Place thumb on sensor 3-4 times until complete", 
+                Font = new Font("Segoe UI", 9, FontStyle.Regular),
+                ForeColor = Color.FromArgb(60, 90, 140),
+                Padding = new Padding(0, 5, 0, 0)
+            };
+            registrationInstructionsPanel.Controls.Add(fingerprintInstructions);
+            
+            var instructionsTitle = new Label 
+            { 
+                Dock = DockStyle.Top, 
+                Height = 25, 
+                Text = "How to Register:", 
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(30, 60, 120)
+            };
+            registrationInstructionsPanel.Controls.Add(instructionsTitle);
+            
+            leftPanel.Controls.Add(registrationInstructionsPanel);
+
             // Fingerprint preview
             pictureFingerprint = new PictureBox();
             pictureFingerprint.Dock = DockStyle.Top;
@@ -866,27 +937,6 @@ namespace FutronicAttendanceSystem
             instructionPanel.Controls.Add(lblEnrollStep);
             instructionPanel.Controls.Add(enrollProgressBar);
             leftPanel.Controls.Add(instructionPanel);
-
-            // Control buttons
-            var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 50, FlowDirection = FlowDirection.LeftToRight };
-            
-            btnEnroll = new Button();
-            btnEnroll.Size = new Size(120, 35);
-            btnEnroll.Text = "Start Enrollment";
-            btnEnroll.BackColor = Color.LightBlue;
-            btnEnroll.Enabled = false; // Disabled until user is selected
-            btnEnroll.Click += BtnEnroll_Click;
-            buttonPanel.Controls.Add(btnEnroll);
-
-            btnStop = new Button();
-            btnStop.Size = new Size(80, 35);
-            btnStop.Text = "Stop";
-            btnStop.BackColor = Color.LightCoral;
-            btnStop.Enabled = false;
-            btnStop.Click += BtnStop_Click;
-            buttonPanel.Controls.Add(btnStop);
-
-            leftPanel.Controls.Add(buttonPanel);
 
             // RIGHT PANEL: User Selection Table with proper spacing using TableLayoutPanel
             var rightPanel = new TableLayoutPanel();
@@ -3222,6 +3272,18 @@ namespace FutronicAttendanceSystem
                                         attendanceRecords.Add(denialRecord);
                                         UpdateAttendanceDisplay(denialRecord);
                                         
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, validationResult.Reason, "instructor");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
                                         ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                                         return;
                                     }
@@ -5435,6 +5497,78 @@ namespace FutronicAttendanceSystem
                 this.Invoke(new Action(() => {
                     SetStatusText($"❌ Lock error: {ex.Message}");
                 }));
+            }
+        }
+
+        // Request lock control denial message for ESP32 OLED display
+        private async Task RequestLockControlDenial(string userGuid, string userName, string denialReason, string userType)
+        {
+            try
+            {
+                Console.WriteLine("=== LOCK CONTROL DENIAL REQUEST START ===");
+                Console.WriteLine($"User GUID: {userGuid}");
+                Console.WriteLine($"User Name: {userName}");
+                Console.WriteLine($"Denial Reason: {denialReason}");
+                Console.WriteLine($"User Type: {userType}");
+
+                // Auto-discover ESP32 on the network
+                string esp32Ip = await DiscoverESP32();
+                
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network - cannot display denial message");
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                Console.WriteLine($"Sending denial to ESP32: {esp32Url}");
+
+                // Create payload for ESP32 with denial information
+                var payload = new
+                {
+                    action = "denied",
+                    user = userName,
+                    userType = userType?.ToLower(),
+                    sessionActive = false,
+                    denialReason = denialReason
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    
+                    // Add API key to request header for security
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
+                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+                    
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    Console.WriteLine($"ESP32 Denial Response Status: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"ESP32 Denial Response: {responseContent}");
+                        Console.WriteLine($"✅ Denial message sent to ESP32 for display");
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"❌ ESP32 denial request failed: {response.StatusCode}");
+                        Console.WriteLine($"Error: {errorContent}");
+                    }
+                }
+                
+                Console.WriteLine("=== LOCK CONTROL DENIAL REQUEST END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending denial to ESP32: {ex.Message}");
             }
         }
 

@@ -751,12 +751,44 @@ router.post('/attendance-logs', [
 // Get attendance logs - ULTRA SIMPLE VERSION FOR TESTING
 router.get('/attendance', authenticateToken, async (req, res) => {
     try {
-        console.log('Attendance logs endpoint called');
+        const { page = 1, limit = 10, search, date, status } = req.query;
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.max(1, Math.min(100, parseInt(limit) || 10));
+        const offset = (pageNum - 1) * limitNum;
 
-        // First, check if tables exist and have data
-        const testQuery = `SELECT COUNT(*) as count FROM ATTENDANCERECORDS`;
-        const testResult = await executeQuery(testQuery, []);
-        console.log('ATTENDANCERECORDS table has', testResult[0]?.count || 0, 'records');
+        console.log('Attendance logs endpoint called - page:', pageNum, 'limit:', limitNum);
+
+        // Build WHERE clause with filters
+        let whereClause = 'WHERE ar.ARCHIVED_AT IS NULL';
+        const params = [];
+
+        if (search) {
+            whereClause += ' AND (u.FIRSTNAME LIKE ? OR u.LASTNAME LIKE ? OR u.STUDENTID LIKE ? OR sub.SUBJECTCODE LIKE ? OR sub.SUBJECTNAME LIKE ?)';
+            const searchPattern = `%${search}%`;
+            params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+        }
+
+        if (date) {
+            whereClause += ' AND DATE(ar.SCANDATETIME) = ?';
+            params.push(date);
+        }
+
+        if (status) {
+            whereClause += ' AND ar.STATUS = ?';
+            params.push(status);
+        }
+
+        // Count total records
+        const countQuery = `
+            SELECT COUNT(*) as count
+            FROM ATTENDANCERECORDS ar
+            JOIN USERS u ON ar.USERID = u.USERID
+            LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID
+            LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+            ${whereClause}
+        `;
+        const countResult = await executeQuery(countQuery, params);
+        const total = countResult[0]?.count || 0;
 
         // Enhanced query with room, subject, and session information (day, time, room)
         const logsQuery = `
@@ -787,29 +819,21 @@ router.get('/attendance', authenticateToken, async (req, res) => {
             LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
             LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
             LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
-            WHERE ar.ARCHIVED_AT IS NULL
+            ${whereClause}
             ORDER BY ar.SCANDATETIME DESC
-            LIMIT 50
+            LIMIT ? OFFSET ?
         `;
 
-        console.log('Executing query:', logsQuery);
-        const logs = await executeQuery(logsQuery, []);
-        console.log('Query executed successfully, found', logs.length, 'records');
-
-        // Debug: Show the latest 3 records
-        if (logs && logs.length > 0) {
-            console.log('📋 Latest 3 records from attendance logs query:');
-            logs.slice(0, 3).forEach((log, index) => {
-                console.log(`  ${index + 1}. ${log.FIRSTNAME} ${log.LASTNAME} - ${log.SCANDATETIME} - ${log.AUTHMETHOD} - Subject: ${log.SUBJECTCODE || 'N/A'} - ScheduleID: ${log.SCHEDULEID || 'N/A'}`);
-            });
-        }
+        console.log('Executing query with pagination');
+        const logs = await executeQuery(logsQuery, [...params, limitNum.toString(), offset.toString()]);
+        console.log('Query executed successfully, found', logs.length, 'records out of', total, 'total');
 
         res.json({
             logs: logs || [],
-            total: logs.length,
-            page: 1,
-            limit: 50,
-            totalPages: 1
+            total: total,
+            page: pageNum,
+            limit: limitNum,
+            totalPages: Math.ceil(total / limitNum)
         });
 
     } catch (error) {

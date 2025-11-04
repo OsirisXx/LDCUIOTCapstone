@@ -424,4 +424,40 @@ router.get('/backups', authenticateToken, requireAdmin, async (req, res) => {
     }
 });
 
+// Unarchive attendance records by archived date
+router.put('/attendance/unarchive', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const { archived_at } = req.body;
+        
+        if (!archived_at) {
+            return res.status(400).json({ message: 'Archive date is required' });
+        }
+
+        // Unarchive records that were archived at the specified timestamp
+        // Use a wider range to capture all records archived within the same operation
+        const targetTimestamp = parseInt(archived_at);
+        // Use a very wide buffer to ensure we catch all records in the same archive batch
+        const startOfSecond = targetTimestamp - 3600; // 1 hour buffer before
+        const endOfSecond = targetTimestamp + 3600;   // 1 hour buffer after
+
+        // Use UNIX_TIMESTAMP for comparison to avoid timezone issues
+        const result = await executeQuery(`
+            UPDATE ATTENDANCERECORDS 
+            SET ARCHIVED_AT = NULL
+            WHERE UNIX_TIMESTAMP(ARCHIVED_AT) BETWEEN ? AND ?
+        `, [startOfSecond.toString(), endOfSecond.toString()]);
+
+        console.log(`Unarchive query: timestamp ${archived_at} (range ${startOfSecond}-${endOfSecond}) affected ${result.affectedRows} rows`);
+
+        res.json({
+            success: true,
+            unarchived: result.affectedRows,
+            message: `Successfully unarchived ${result.affectedRows} attendance records`
+        });
+    } catch (error) {
+        console.error('Unarchive attendance error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
 module.exports = router;

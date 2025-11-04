@@ -581,6 +581,60 @@ void displayNoMatch() {
   turnOnDisplay();
 }
 
+void displayInstructorDenial(String userName, String denialReason, String userType) {
+  if (!displayWorking) {
+    Serial.println("🖥️ Display not working - skipping instructor denial display");
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  
+  // Display user name
+  display.println(userName);
+  display.println("");
+  
+  // Display "Access Denied" header
+  display.println("Access Denied");
+  display.println("");
+  
+  // Display denial reason (try to fit on screen)
+  // Split long messages across multiple lines if needed
+  if (denialReason.length() > 0) {
+    // Check if reason is too long for one line (approximately 21 chars per line)
+    if (denialReason.length() <= 21) {
+      display.println(denialReason);
+    } else {
+      // Split the reason into multiple lines
+      String line1 = denialReason.substring(0, 21);
+      display.println(line1);
+      
+      if (denialReason.length() > 21) {
+        String line2 = denialReason.substring(21);
+        if (line2.length() > 21) {
+          line2 = line2.substring(0, 21);
+        }
+        display.println(line2);
+      }
+    }
+  } else {
+    // Default message if no reason provided
+    if (userType == "instructor") {
+      display.println("No scheduled class");
+      display.println("at this time");
+    } else {
+      display.println("Access not allowed");
+    }
+  }
+  
+  display.display();
+  
+  // Turn on display with timer
+  turnOnDisplay();
+}
+
 void displaySystemStatus() {
   if (!displayWorking) {
     Serial.println("🖥️ Display not working - skipping system status display");
@@ -746,6 +800,7 @@ void handleLockControl() {
     bool awaitingSecondScan = doc["awaitingSecondScan"] | false;
     String firstScanType = doc["firstScanType"] | "";
     String requiredScan = doc["requiredScan"] | "";
+    String denialReason = doc["denialReason"] | "";
     
     Serial.print("🔓 Action: ");
     Serial.println(action);
@@ -762,6 +817,19 @@ void handleLockControl() {
       Serial.println(firstScanType);
       Serial.print("🔍 Required Scan: ");
       Serial.println(requiredScan);
+    }
+    if (denialReason.length() > 0) {
+      Serial.print("❌ Denial Reason: ");
+      Serial.println(denialReason);
+    }
+    
+    // Check if this is a denial message (especially for instructors)
+    if (action == "denied" || denialReason.length() > 0) {
+      Serial.println("❌ DENIAL MESSAGE: Displaying denial on OLED");
+      displayInstructorDenial(user, denialReason, userType);
+      beepError();
+      server.send(200, "application/json", "{\"message\":\"Denial message displayed\",\"action\":\"denied\",\"user\":\"" + user + "\"}");
+      return;
     }
     
     // Check if this is an intermediate status update (waiting for second scan)

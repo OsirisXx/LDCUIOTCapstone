@@ -9,6 +9,7 @@ import {
   ExclamationTriangleIcon,
   XMarkIcon,
   DocumentArrowDownIcon,
+  DocumentArrowUpIcon,
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';
@@ -29,6 +30,15 @@ function Archive() {
   const [archiveSemester, setArchiveSemester] = useState('');
   const [archiveReason, setArchiveReason] = useState('');
   const [archiving, setArchiving] = useState(false);
+  const [unarchiving, setUnarchiving] = useState(false);
+  
+  // Unarchive confirmation modal states
+  const [showUnarchiveModal, setShowUnarchiveModal] = useState(false);
+  const [unarchiveModalAnimation, setUnarchiveModalAnimation] = useState('hidden');
+  const [showSecondConfirmation, setShowSecondConfirmation] = useState(false);
+  const [pendingUnarchiveKey, setPendingUnarchiveKey] = useState(null);
+  const [pendingUnarchiveDate, setPendingUnarchiveDate] = useState(null);
+  const [pendingUnarchiveCount, setPendingUnarchiveCount] = useState(0);
   const [selectedRoomIds, setSelectedRoomIds] = useState([]);
   const [selectedUserIds, setSelectedUserIds] = useState([]);
   const [selectedBackupFiles, setSelectedBackupFiles] = useState([]);
@@ -357,6 +367,62 @@ function Archive() {
     } finally {
       setArchiving(false);
     }
+  };
+
+  const handleUnarchiveClick = (groupKey, groupDate, itemCount) => {
+    setPendingUnarchiveKey(groupKey);
+    setPendingUnarchiveDate(groupDate);
+    setPendingUnarchiveCount(itemCount);
+    setShowSecondConfirmation(false);
+    setShowUnarchiveModal(true);
+    setTimeout(() => setUnarchiveModalAnimation('visible'), 10);
+  };
+
+  const handleUnarchiveConfirm = async () => {
+    if (!showSecondConfirmation) {
+      setShowSecondConfirmation(true);
+      return;
+    }
+
+    try {
+      setUnarchiving(true);
+      const token = localStorage.getItem('token');
+      
+      const response = await axios.put('/api/archive/attendance/unarchive', 
+        { archived_at: pendingUnarchiveKey },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      
+      toast.success(response.data.message);
+      fetchDashboardStats();
+      fetchArchivedData('attendance');
+      
+      // Close modal
+      setUnarchiveModalAnimation('hidden');
+      setTimeout(() => {
+        setShowUnarchiveModal(false);
+        setShowSecondConfirmation(false);
+        setPendingUnarchiveKey(null);
+        setPendingUnarchiveDate(null);
+        setPendingUnarchiveCount(0);
+      }, 300);
+    } catch (error) {
+      console.error('Unarchive error:', error);
+      toast.error(error.response?.data?.message || 'Failed to unarchive records');
+    } finally {
+      setUnarchiving(false);
+    }
+  };
+
+  const handleUnarchiveCancel = () => {
+    setUnarchiveModalAnimation('hidden');
+    setTimeout(() => {
+      setShowUnarchiveModal(false);
+      setShowSecondConfirmation(false);
+      setPendingUnarchiveKey(null);
+      setPendingUnarchiveDate(null);
+      setPendingUnarchiveCount(0);
+    }, 300);
   };
 
   const getCategoryStats = (category) => {
@@ -1042,17 +1108,30 @@ function Archive() {
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
                                     <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
-                                      <button
-                                        onClick={() => toggleGroup('attendance', group.key)}
-                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
-                                        style={{
-                                          background: isGroupExpanded('attendance', group.key)
-                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
-                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
-                                        }}
-                                      >
-                                        {isGroupExpanded('attendance', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
-                                      </button>
+                                      <div className="flex items-center justify-end space-x-2">
+                                        <button
+                                          onClick={() => toggleGroup('attendance', group.key)}
+                                          className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                          style={{
+                                            background: isGroupExpanded('attendance', group.key)
+                                              ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                              : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                          }}
+                                        >
+                                          {isGroupExpanded('attendance', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                        </button>
+                                        <button
+                                          onClick={() => handleUnarchiveClick(group.key, group.date, group.items.length)}
+                                          disabled={unarchiving}
+                                          className="px-3 py-1.5 text-sm font-medium rounded-md text-white flex items-center space-x-1 disabled:opacity-50"
+                                          style={{
+                                            background: 'linear-gradient(135deg, #059669 0%, #047857 100%)'
+                                          }}
+                                        >
+                                          <DocumentArrowUpIcon className="h-4 w-4" />
+                                          <span>Unarchive</span>
+                                        </button>
+                                      </div>
                                     </td>
                                   </tr>
                                   {isGroupExpanded('attendance', group.key) && (
@@ -1562,6 +1641,107 @@ function Archive() {
                     'Archive'
                   )}
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Unarchive Confirmation Modal */}
+      {showUnarchiveModal && createPortal(
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
+          {/* Backdrop with blur and fade animation */}
+          <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
+            unarchiveModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}>
+            <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
+              {/* Modal container with scale and fade animation */}
+              <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
+                unarchiveModalAnimation === 'visible' 
+                  ? 'scale-100 opacity-100 translate-y-0' 
+                  : 'scale-95 opacity-0 translate-y-4'
+              }`}>
+                {/* Gradient header */}
+                <div className="bg-gradient-to-r from-green-50 to-emerald-100 px-6 py-8">
+                  <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-emerald-100 shadow-lg mb-4 animate-pulse">
+                    <DocumentArrowUpIcon className="h-8 w-8 text-green-600" />
+                  </div>
+                  
+                  {!showSecondConfirmation ? (
+                    <>
+                      <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                        Unarchive Attendance Records
+                      </h3>
+                      <p className="text-sm text-gray-600 leading-relaxed">
+                        Are you sure you want to unarchive <strong>{pendingUnarchiveCount} attendance records</strong> from <strong>{formatDate(pendingUnarchiveDate)}</strong>?
+                        This will restore them to active view.
+                      </p>
+                      <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        <p className="text-sm text-blue-800 font-medium">
+                          ℹ️ These records will be restored to active attendance logs and will be visible in regular reports.
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                        Final Confirmation Required
+                      </h3>
+                      <p className="text-sm text-gray-600 leading-relaxed">
+                        You are about to unarchive <strong>{pendingUnarchiveCount} attendance records</strong> archived on <strong>{formatDate(pendingUnarchiveDate)}</strong>.
+                        This will restore them to active view immediately.
+                      </p>
+                      <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                        <p className="text-sm text-green-800 font-medium">
+                          ✅ Confirm to restore these archived attendance records to active status.
+                        </p>
+                      </div>
+                    </>
+                  )}
+                </div>
+                
+                {/* Action buttons */}
+                <div className="bg-gray-50 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-3 space-y-3 space-y-reverse sm:space-y-0">
+                  <button
+                    type="button"
+                    onClick={handleUnarchiveCancel}
+                    disabled={unarchiving}
+                    className="w-full sm:w-auto inline-flex justify-center items-center px-6 py-3 border border-gray-300 shadow-sm text-sm font-medium rounded-xl text-gray-700 bg-white hover:bg-gray-50 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-all duration-200 ease-in-out transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Cancel
+                  </button>
+                  
+                  {!showSecondConfirmation ? (
+                    <button
+                      type="button"
+                      onClick={handleUnarchiveConfirm}
+                      disabled={unarchiving}
+                      className="w-full sm:w-auto inline-flex justify-center items-center px-6 py-3 border border-transparent shadow-sm text-sm font-medium rounded-xl text-white bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all duration-200 ease-in-out transform hover:scale-105 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Continue to Final Confirmation
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleUnarchiveConfirm}
+                      disabled={unarchiving}
+                      className="w-full sm:w-auto inline-flex justify-center items-center px-6 py-3 border border-transparent shadow-sm text-sm font-medium rounded-xl text-white bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition-all duration-200 ease-in-out transform hover:scale-105 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {unarchiving ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                          Unarchiving Records...
+                        </>
+                      ) : (
+                        <>
+                          <DocumentArrowUpIcon className="h-4 w-4 mr-2" />
+                          CONFIRM UNARCHIVE
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>
