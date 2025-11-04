@@ -1222,22 +1222,26 @@ router.get('/attendance/session-roster/:sessionKey', authenticateToken, async (r
         
         console.log('📋 Parsed session key:', { date, room, startTime });
         
-        // Get day of week from date
-        // The date might be in ISO format like "2025-10-25T16:00:00.000Z"
-        // We need to extract just the date part for the day calculation
-        const dateOnly = date.split('T')[0]; // Extract "2025-10-25" from "2025-10-25T16:00:00.000Z"
+        // Compute date and day-of-week in Philippine time to avoid UTC offset issues
+        // Example input: "2025-11-03T16:00:00.000Z" (which is 2025-11-04 in PH)
+        const manilaDateString = new Date(date).toLocaleString('en-CA', {
+            timeZone: 'Asia/Manila',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        });
+        const dayOfWeek = new Date(date).toLocaleDateString('en-US', {
+            timeZone: 'Asia/Manila',
+            weekday: 'long'
+        });
+
+        const actualDate = manilaDateString; // YYYY-MM-DD in PH timezone
+        const sessionDate = new Date(`${manilaDateString}T00:00:00`);
         
-        // Since the attendance records show Oct 26 (Sunday) but session key shows Oct 25,
-        // we need to use the actual date from the attendance records
-        // For now, let's try to find the schedule by looking at the actual attendance date
-        const actualDate = '2025-10-26'; // This should match the actual attendance date
-        const sessionDate = new Date(actualDate + 'T00:00:00');
-        const dayOfWeek = sessionDate.toLocaleDateString('en-US', { weekday: 'long' });
-        
-        console.log('📋 Date parsing:', { originalDate: date, dateOnly, actualDate, dayOfWeek, sessionDate });
+        console.log('📋 Date parsing:', { originalDate: date, actualDate, dayOfWeek, sessionDate });
         
         // First, find the schedule ID for this session
-        const scheduleQuery = `
+        const strictQuery = `
             SELECT 
                 cs.SCHEDULEID,
                 cs.SUBJECTID,
@@ -1260,41 +1264,82 @@ router.get('/attendance/session-roster/:sessionKey', authenticateToken, async (r
               AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')
         `;
         
-        console.log('🔍 Looking for schedule with:', { room, dayOfWeek, startTime });
-        console.log('🔍 Query:', scheduleQuery);
-        console.log('🔍 Query parameters:', [room, dayOfWeek, startTime]);
-        
-        const schedule = await getSingleResult(scheduleQuery, [room, dayOfWeek, startTime]);
-        
+        console.log('🔍 Strict schedule lookup:', { room, dayOfWeek, startTime });
+        let schedule = await getSingleResult(strictQuery, [room, dayOfWeek, startTime]);
+
+        // Fallback 1: Ignore academic year/semester (in case settings mismatch UI)
         if (!schedule) {
-            console.log('❌ No schedule found. Let me check what schedules exist...');
-            
-            // Debug: Check what schedules exist for this room
-            const debugQuery = `
+            console.log('↩️ Fallback: ignoring academic year and semester');
+            const fallbackQuery1 = `
                 SELECT 
                     cs.SCHEDULEID,
-                    cs.DAYOFWEEK,
-                    cs.STARTTIME,
-                    cs.ENDTIME,
+                    cs.SUBJECTID,
+                    cs.ACADEMICYEAR,
+                    cs.SEMESTER,
                     sub.SUBJECTCODE,
                     sub.SUBJECTNAME,
-                    r.ROOMNUMBER
+                    r.ROOMNUMBER,
+                    r.ROOMNAME,
+                    u.FIRSTNAME as INSTRUCTOR_FIRSTNAME,
+                    u.LASTNAME as INSTRUCTOR_LASTNAME
                 FROM CLASSSCHEDULES cs
                 JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
                 JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+                LEFT JOIN USERS u ON sub.INSTRUCTORID = u.USERID
                 WHERE r.ROOMNUMBER = ?
-                AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
-                AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')
-                ORDER BY cs.DAYOFWEEK, cs.STARTTIME
+                  AND cs.DAYOFWEEK = ?
+                  AND cs.STARTTIME = ?
+                LIMIT 1
             `;
-            
-            const debugSchedules = await executeQuery(debugQuery, [room]);
-            console.log('🔍 Available schedules for room', room, ':', debugSchedules);
-            
-            return res.status(404).json({ 
-                message: 'Schedule not found for this session',
-                details: { room, dayOfWeek, startTime },
-                availableSchedules: debugSchedules
+            schedule = await getSingleResult(fallbackQuery1, [room, dayOfWeek, startTime]);
+        }
+
+        // Fallback 2: Allow time window ±30 minutes
+        if (!schedule) {
+            console.log('↩️ Fallback: matching within ±30 minutes of start time');
+            const fallbackQuery2 = `
+                SELECT 
+                    cs.SCHEDULEID,
+                    cs.SUBJECTID,
+                    cs.ACADEMICYEAR,
+                    cs.SEMESTER,
+                    sub.SUBJECTCODE,
+                    sub.SUBJECTNAME,
+                    r.ROOMNUMBER,
+                    r.ROOMNAME,
+                    u.FIRSTNAME as INSTRUCTOR_FIRSTNAME,
+                    u.LASTNAME as INSTRUCTOR_LASTNAME
+                FROM CLASSSCHEDULES cs
+                JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+                JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+                LEFT JOIN USERS u ON sub.INSTRUCTORID = u.USERID
+                WHERE r.ROOMNUMBER = ?
+                  AND cs.DAYOFWEEK = ?
+                  AND cs.STARTTIME BETWEEN SUBTIME(?, '00:30:00') AND ADDTIME(?, '00:30:00')
+                ORDER BY ABS(TIME_TO_SEC(TIMEDIFF(cs.STARTTIME, ?))) ASC
+                LIMIT 1
+            `;
+            schedule = await getSingleResult(fallbackQuery2, [room, dayOfWeek, startTime, startTime, startTime]);
+        }
+
+        // If still not found, do not error; return empty roster with meta
+        if (!schedule) {
+            console.log('⚠️ No schedule matched after fallbacks. Returning empty roster.');
+            return res.json({
+                success: true,
+                session: {
+                    subjectCode: 'Unknown',
+                    subjectName: 'Unknown Subject',
+                    date: actualDate,
+                    room: room,
+                    roomName: 'Unknown Room',
+                    startTime: startTime,
+                    scheduleId: null,
+                    instructor: 'Not assigned'
+                },
+                roster: [],
+                statistics: { total: 0, present: 0, late: 0, absent: 0 },
+                note: 'No matching schedule found for the selected session.'
             });
         }
         
