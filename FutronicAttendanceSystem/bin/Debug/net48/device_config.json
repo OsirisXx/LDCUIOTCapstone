@@ -2,13 +2,13 @@
   "RoomId": "5d3225b6-2235-4434-bda3-fad3ef9fbfbc",
   "RoomName": "WAC-302 - WAC-302 (WAC)",
   "Building": "WAC",
-  "InsideSensor": null,
-  "OutsideSensor": {
+  "InsideSensor": {
     "UsbDevicePath": "USB\\VID_1491&PID_0020\\FS00000000",
-    "DeviceId": "WAC-302_Outside",
+    "DeviceId": "WAC-302_Inside",
     "Enabled": true,
     "SensorIndex": 0
   },
+  "OutsideSensor": null,
   "TestMode": false,
-  "LastUpdated": "2025-11-05T00:22:04.2511029+08:00"
+  "LastUpdated": "2025-11-05T02:15:47.9083271+08:00"
 }

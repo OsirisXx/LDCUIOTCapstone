@@ -844,6 +844,45 @@ void handleLockControl() {
       return;
     }
 
+    // Handle info action (for early arrival and other informational messages)
+    if (action == "info") {
+      String infoMessage = doc["message"] | "";
+      String infoUser = doc["user"] | "";
+      
+      Serial.println("ℹ️ INFO MESSAGE: Displaying informational message on OLED");
+      
+      if (infoMessage.length() > 0) {
+        // Format message for display - split long messages
+        String line1 = infoUser.length() > 0 ? infoUser : "Information";
+        String line2 = "";
+        String line3 = "";
+        String line4 = "";
+        
+        // Split message into lines if it's long
+        if (infoMessage.length() <= 21) {
+          line2 = infoMessage;
+        } else if (infoMessage.length() <= 42) {
+          line2 = infoMessage.substring(0, 21);
+          line3 = infoMessage.substring(21);
+        } else {
+          line2 = infoMessage.substring(0, 21);
+          line3 = infoMessage.substring(21, 42);
+          line4 = infoMessage.substring(42, 63);
+        }
+        
+        displayMessage(line1, line2, line3, line4);
+        beepSuccess();
+        server.send(200, "application/json", "{\"message\":\"Info displayed\",\"action\":\"info\"}");
+        return;
+      } else {
+        // Fallback if no message provided
+        displayMessage(infoUser, "Info received", "", "");
+        beepSuccess();
+        server.send(200, "application/json", "{\"message\":\"Info displayed\",\"action\":\"info\"}");
+        return;
+      }
+    }
+
     // Check if this is a denial message (especially for instructors)
     if (action == "denied" || denialReason.length() > 0) {
       Serial.println("❌ DENIAL MESSAGE: Displaying denial on OLED");
@@ -995,6 +1034,45 @@ void handleLockControl() {
       beepSuccess();
       server.send(200, "application/json", "{\"message\":\"RFID status displayed\",\"action\":\"status\"}");
       return;
+    }
+
+    // Handle info action (for early arrival and other informational messages)
+    if (action == "info") {
+      String infoMessage = doc["message"] | "";
+      String infoUser = doc["user"] | "";
+      
+      Serial.println("ℹ️ INFO MESSAGE: Displaying informational message on OLED");
+      
+      if (infoMessage.length() > 0) {
+        // Format message for display - split long messages
+        String line1 = infoUser.length() > 0 ? infoUser : "Information";
+        String line2 = "";
+        String line3 = "";
+        String line4 = "";
+        
+        // Split message into lines if it's long
+        if (infoMessage.length() <= 21) {
+          line2 = infoMessage;
+        } else if (infoMessage.length() <= 42) {
+          line2 = infoMessage.substring(0, 21);
+          line3 = infoMessage.substring(21);
+        } else {
+          line2 = infoMessage.substring(0, 21);
+          line3 = infoMessage.substring(21, 42);
+          line4 = infoMessage.substring(42, 63);
+        }
+        
+        displayMessage(line1, line2, line3, line4);
+        beepSuccess();
+        server.send(200, "application/json", "{\"message\":\"Info displayed\",\"action\":\"info\"}");
+        return;
+      } else {
+        // Fallback if no message provided
+        displayMessage(infoUser, "Info received", "", "");
+        beepSuccess();
+        server.send(200, "application/json", "{\"message\":\"Info displayed\",\"action\":\"info\"}");
+        return;
+      }
     }
 
     // Check if this is a denial message

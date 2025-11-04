@@ -5557,12 +5557,21 @@ namespace FutronicAttendanceSystem
                 Console.WriteLine($"User: {user.FirstName} {user.LastName} - Type: {user.UserType}");
                 Console.WriteLine($"Current Session State: {currentSessionState}");
 
-                // Check if user should be allowed to open lock
-                if (!ShouldOpenLockForUser(user))
+                // Special handling for early arrivals - allow door access even if session is not active
+                bool isEarlyArrival = !string.IsNullOrEmpty(action) && 
+                    (action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                // Check if user should be allowed to open lock (unless it's an early arrival)
+                if (!isEarlyArrival && !ShouldOpenLockForUser(user))
                 {
                     Console.WriteLine($"⚠️ User {user.FirstName} {user.LastName} ({user.UserType}) - access denied");
                     Console.WriteLine($"⚠️ Session State: {currentSessionState} - Not allowed for this user type");
                     return;
+                }
+
+                if (isEarlyArrival)
+                {
+                    Console.WriteLine($"✅ Early Arrival: Allowing door access for {user.FirstName} {user.LastName}");
                 }
                 
                 Console.WriteLine($"✅ User {user.FirstName} {user.LastName} ({user.UserType}) - access granted");
@@ -7572,6 +7581,30 @@ namespace FutronicAttendanceSystem
                     Console.WriteLine($"   Check if this RFID is registered: SELECT * FROM USERS WHERE RFIDTAG = '{rfidData}'");
                     SetRfidStatusText($"❌ RFID {rfidData} not registered in database. Please register this card first.");
                     AddRfidAttendanceRecord("System", $"RFID {rfidData} Not Registered", "Error");
+                    
+                    // Log unknown RFID scan to ACCESSLOGS table
+                    try
+                    {
+                        if (dbManager != null)
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: null, // NULL for unknown user
+                                roomId: null, // Will use CurrentRoomId from DatabaseManager
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Unknown RFID card: {rfidData}"
+                            );
+                            Console.WriteLine($"📝 Logged unknown RFID scan to ACCESSLOGS: {rfidData}");
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"⚠️ Failed to log unknown RFID scan: {logEx.Message}");
+                        // Continue even if logging fails
+                    }
+                    
                     // Notify ESP32 to show 'No match' on OLED (RFID path)
                     _ = System.Threading.Tasks.Task.Run(async () => {
                         try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
@@ -8150,6 +8183,29 @@ namespace FutronicAttendanceSystem
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
                     AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    
+                    // Log unknown RFID scan to ACCESSLOGS table
+                    try
+                    {
+                        if (dbManager != null)
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: null,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Unknown RFID card: {rfidData}"
+                            );
+                            Console.WriteLine($"📝 Logged unknown RFID scan to ACCESSLOGS: {rfidData}");
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"⚠️ Failed to log unknown RFID scan: {logEx.Message}");
+                    }
+                    
                     // Notify ESP32 to show 'No match' on OLED (RFID path)
                     _ = System.Threading.Tasks.Task.Run(async () => {
                         try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
@@ -8377,6 +8433,29 @@ namespace FutronicAttendanceSystem
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
                     AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    
+                    // Log unknown RFID scan to ACCESSLOGS table
+                    try
+                    {
+                        if (dbManager != null)
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: null,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Unknown RFID card: {rfidData}"
+                            );
+                            Console.WriteLine($"📝 Logged unknown RFID scan to ACCESSLOGS: {rfidData}");
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"⚠️ Failed to log unknown RFID scan: {logEx.Message}");
+                    }
+                    
                     // Notify ESP32 to show 'No match' on OLED (RFID path)
                     _ = System.Threading.Tasks.Task.Run(async () => {
                         try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
@@ -8479,7 +8558,9 @@ namespace FutronicAttendanceSystem
                         System.Threading.Tasks.Task.Run(() => {
                             try
                             {
+                                Console.WriteLine($"🔍 CALLING TryRecordAttendanceByGuid for sign-out: User={userName}, GUID={userGuid}");
                                 var attempt = dbManager?.TryRecordAttendanceByGuid(userGuid, "Student Sign-Out (RFID)", null);
+                                Console.WriteLine($"🔍 TryRecordAttendanceByGuid result: Success={attempt?.Success}, Reason={attempt?.Reason}");
                                 this.Invoke(new Action(() => {
                                     if (attempt != null && attempt.Success)
                                     {

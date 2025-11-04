@@ -1016,12 +1016,31 @@ router.get('/attendance', authenticateToken, async (req, res) => {
             }
         }
 
+        // Build WHERE clause for unknown scans filter
+        let unknownWhereClause = 'WHERE al.USERID IS NULL AND al.ACCESSTYPE = \'attendance_scan\' AND al.RESULT = \'denied\'';
+        const unknownParams = [];
+
+        // Search filter for unknown scans (searches in REASON field for RFID data)
+        if (search) {
+            unknownWhereClause += ' AND al.REASON LIKE ?';
+            const searchTerm = `%${search}%`;
+            unknownParams.push(searchTerm);
+        }
+
+        // Date filter for unknown scans
+        if (date) {
+            unknownWhereClause += ' AND DATE(al.TIMESTAMP) = ?';
+            unknownParams.push(date);
+        }
+
         // Enhanced query with room, subject, and session information (day, time, room)
-        // Also identifies administrative schedules and custodian/dean door access to hide subject and ensure status is Present
+        // Also includes unknown RFID scans from ACCESSLOGS using UNION
         const logsQuery = `
             SELECT
+                ar.ATTENDANCEID as ID,
                 ar.ATTENDANCEID,
                 ar.SCHEDULEID,
+                ar.SCANDATETIME as TIMESTAMP,
                 ar.SCANDATETIME,
                 CASE 
                     WHEN sub.SUBJECTCODE = 'ADMIN-ACCESS' THEN 'Present'
@@ -1052,7 +1071,9 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 cs.DAYOFWEEK,
                 cs.STARTTIME,
                 cs.ENDTIME,
-                DATE(ar.SCANDATETIME) as DATE
+                DATE(ar.SCANDATETIME) as DATE,
+                NULL as REASON,
+                'attendance_record' as RECORD_TYPE
             FROM ATTENDANCERECORDS ar
             JOIN USERS u ON ar.USERID = u.USERID
             LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID        
@@ -1060,26 +1081,69 @@ router.get('/attendance', authenticateToken, async (req, res) => {
             LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
             LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
             ${whereClause}
-            ORDER BY ar.SCANDATETIME DESC
+            
+            UNION ALL
+            
+            SELECT
+                al.LOGID as ID,
+                al.LOGID as ATTENDANCEID,
+                NULL as SCHEDULEID,
+                al.TIMESTAMP as SCANDATETIME,
+                al.TIMESTAMP,
+                'Unknown' as STATUS,
+                al.AUTHMETHOD,
+                'Unknown Scan' as ACTIONTYPE,
+                al.LOCATION,
+                NULL as ACADEMICYEAR,
+                NULL as SEMESTER,
+                'Unknown' as FIRSTNAME,
+                'User' as LASTNAME,
+                NULL as STUDENTID,
+                NULL as USERTYPE,
+                NULL as SUBJECTCODE,
+                NULL as SUBJECTNAME,
+                r.ROOMNUMBER,
+                r.ROOMNAME,
+                NULL as DAYOFWEEK,
+                NULL as STARTTIME,
+                NULL as ENDTIME,
+                DATE(al.TIMESTAMP) as DATE,
+                al.REASON,
+                'unknown_scan' as RECORD_TYPE
+            FROM ACCESSLOGS al
+            LEFT JOIN ROOMS r ON al.ROOMID = r.ROOMID
+            ${unknownWhereClause}
+            
+            ORDER BY TIMESTAMP DESC
             LIMIT ? OFFSET ?
         `;
 
-        // Execute query with pagination
-        const queryParams = [...params, limitNum.toString(), offset.toString()];
+        // Combine params for UNION query
+        const queryParams = [...params, ...unknownParams, limitNum.toString(), offset.toString()];
         const logs = await executeQuery(logsQuery, queryParams);
 
-        // Get total count for pagination (without LIMIT/OFFSET)
+        // Get total count for pagination (combining both tables)
         let countQuery = `
-            SELECT COUNT(*) as total
-            FROM ATTENDANCERECORDS ar
-            JOIN USERS u ON ar.USERID = u.USERID
-            LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID        
-            LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
-            LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
-            LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
-            ${whereClause}
+            SELECT COUNT(*) as total FROM (
+                SELECT ar.ATTENDANCEID
+                FROM ATTENDANCERECORDS ar
+                JOIN USERS u ON ar.USERID = u.USERID
+                LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID        
+                LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+                LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
+                LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+                ${whereClause}
+                
+                UNION ALL
+                
+                SELECT al.LOGID
+                FROM ACCESSLOGS al
+                LEFT JOIN ROOMS r ON al.ROOMID = r.ROOMID
+                ${unknownWhereClause}
+            ) as combined
         `;
-        const totalResult = await getSingleResult(countQuery, params);
+        const countParams = [...params, ...unknownParams];
+        const totalResult = await getSingleResult(countQuery, countParams);
         const total = totalResult?.total || 0;
         const totalPages = Math.ceil(total / limitNum);
 
@@ -1105,6 +1169,7 @@ router.post('/rfid-scan', [
     body('rfid_data').isString().isLength({ min: 4, max: 50 }),
     body('scan_type').optional().isIn(['rfid']).default('rfid'),
     body('location').optional().isIn(['inside', 'outside']).default('inside'),
+    body('room_id').optional().isUUID(),
     body('timestamp').optional().isISO8601()
 ], async (req, res) => {
     console.log('🔖 RFID ENDPOINT HIT - Request received:', req.body);
@@ -1134,9 +1199,52 @@ router.post('/rfid-scan', [
 
         if (!user) {
             console.log(`❌ No user found for RFID: ${rfid_data}`);
+            
+            // Log unknown RFID scan to ACCESSLOGS table
+            try {
+                let effectiveRoomId = req.body.room_id;
+                if (!effectiveRoomId) {
+                    // Try to get a default room ID from the ROOMS table
+                    const defaultRoom = await getSingleResult(
+                        'SELECT ROOMID FROM ROOMS WHERE ARCHIVED_AT IS NULL AND STATUS = "Available" ORDER BY CREATED_AT ASC LIMIT 1'
+                    );
+                    effectiveRoomId = defaultRoom?.ROOMID;
+                }
+                
+                if (effectiveRoomId) {
+                    const { v4: uuidv4 } = require('uuid');
+                    const accessLogId = uuidv4();
+                    const phTime = getPhilippineTime();
+                    
+                    await executeQuery(
+                        `INSERT INTO ACCESSLOGS (
+                            LOGID, USERID, ROOMID, TIMESTAMP, ACCESSTYPE, AUTHMETHOD,
+                            LOCATION, RESULT, REASON, CREATED_AT
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                        [
+                            accessLogId,
+                            null, // NULL USERID for unknown scans
+                            effectiveRoomId,
+                            phTime.dateTime,
+                            'attendance_scan', // Use attendance_scan type
+                            'RFID',
+                            location,
+                            'denied',
+                            `Unknown RFID card: ${rfid_data}`
+                        ]
+                    );
+                    console.log(`📝 Logged unknown RFID scan attempt: ${rfid_data}`);
+                } else {
+                    console.log('⚠️ Cannot log unknown scan - no room_id available');
+                }
+            } catch (logError) {
+                console.error('Error logging unknown scan:', logError);
+            }
+            
             return res.status(404).json({
                 message: 'RFID card not registered or user inactive',
-                rfid_data: rfid_data
+                rfid_data: rfid_data,
+                logged: true
             });
         }
 
@@ -1569,6 +1677,22 @@ router.get('/attendance/session-roster/:sessionKey', authenticateToken, async (r
                    LIMIT 1),
                   'Absent'
                 ) AS STATUS,
+                COALESCE(
+                  (SELECT CASE 
+                    WHEN ar2.STATUS = 'Early Arrival' THEN 'Early Arrival'
+                    WHEN ar2.STATUS LIKE 'Early Scan%' THEN 'Early Arrival'
+                    WHEN ar2.SCANTYPE IN ('early_arrival', 'early_arrival_upgraded') THEN 'Early Arrival'
+                    WHEN ar2.ACTIONTYPE = 'Early Arrival' THEN 'Early Arrival'
+                    ELSE ar2.STATUS
+                   END
+                   FROM ATTENDANCERECORDS ar2 
+                   WHERE ar2.USERID = u.USERID 
+                     AND ar2.SCHEDULEID = ? 
+                     AND DATE(ar2.SCANDATETIME) = ?
+                   ORDER BY ar2.SCANDATETIME DESC 
+                   LIMIT 1),
+                  NULL
+                ) AS DISPLAY_STATUS,
                 (
                   CASE 
                     WHEN EXISTS (
@@ -1598,9 +1722,21 @@ router.get('/attendance/session-roster/:sessionKey', authenticateToken, async (r
                 (SELECT MAX(ar4.SCANDATETIME)
                  FROM ATTENDANCERECORDS ar4
                  WHERE ar4.USERID = u.USERID
-                   AND ar4.SCHEDULEID = ?
                    AND DATE(ar4.SCANDATETIME) = ?
-                   AND ar4.SCANTYPE = 'time_out') AS SIGNOUT
+                   AND ar4.SCANTYPE = 'time_out'
+                   AND (
+                     ar4.SCHEDULEID = ?
+                     OR ar4.SCHEDULEID IS NULL
+                     OR EXISTS (
+                       SELECT 1 FROM ATTENDANCERECORDS ar5
+                       WHERE ar5.USERID = u.USERID
+                         AND ar5.SCHEDULEID = ?
+                         AND DATE(ar5.SCANDATETIME) = ?
+                         AND ar5.SCANTYPE IN ('time_in', 'time_in_confirmation', 'early_arrival', 'early_arrival_upgraded')
+                         AND ar5.SCANDATETIME < ar4.SCANDATETIME
+                     )
+                   )
+                 ) AS SIGNOUT
             FROM SUBJECTENROLLMENT se
             JOIN USERS u ON se.USERID = u.USERID
             WHERE se.SUBJECTID = ?
@@ -1613,12 +1749,17 @@ router.get('/attendance/session-roster/:sessionKey', authenticateToken, async (r
         const roster = await executeQuery(rosterQuery, [
             schedule.SCHEDULEID,
             actualDate,
+            // DISPLAY_STATUS parameters
+            schedule.SCHEDULEID,
+            actualDate,
             // SIGNIN CASE parameters
             schedule.SCHEDULEID, actualDate, // EXISTS early
             schedule.SCHEDULEID, actualDate, // MIN early types
             schedule.SCHEDULEID, actualDate, // MAX regular time_in types
             // SIGNOUT parameters
-            schedule.SCHEDULEID,
+            actualDate,
+            schedule.SCHEDULEID, // Primary schedule match
+            schedule.SCHEDULEID, // For EXISTS check in sign-out
             actualDate,
             // enrollment filters
             schedule.SUBJECTID,
@@ -1632,11 +1773,21 @@ router.get('/attendance/session-roster/:sessionKey', authenticateToken, async (r
         const finalRoster = roster;
         
         // Calculate statistics
+        // Use DISPLAY_STATUS if available, otherwise fall back to STATUS
         const stats = {
             total: finalRoster.length,
-            present: finalRoster.filter(s => s.STATUS === 'Present').length,
-            late: finalRoster.filter(s => s.STATUS === 'Late').length,
-            absent: finalRoster.filter(s => s.STATUS === 'Absent').length
+            present: finalRoster.filter(s => {
+                const status = s.DISPLAY_STATUS || s.STATUS;
+                return status === 'Present' || status === 'Early' || status === 'Early Arrival';
+            }).length,
+            late: finalRoster.filter(s => {
+                const status = s.DISPLAY_STATUS || s.STATUS;
+                return status === 'Late';
+            }).length,
+            absent: finalRoster.filter(s => {
+                const status = s.DISPLAY_STATUS || s.STATUS;
+                return status === 'Absent';
+            }).length
         };
 
         // Determine instructor status for this session/date

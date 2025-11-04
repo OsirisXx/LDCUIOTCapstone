@@ -1,0 +1,157 @@
+-- Manual SQL queries to check sign-out records for HARLEY S. BUSA
+-- Date: Wednesday, Nov 5, 2025
+-- Room: WAC-302
+-- Start Time: 01:35:00
+
+-- Step 1: Find the user ID for HARLEY S. BUSA
+SELECT USERID, FIRSTNAME, LASTNAME, STUDENTID
+FROM USERS
+WHERE STUDENTID = '20202422310'
+   OR (FIRSTNAME LIKE '%HARLEY%' AND LASTNAME LIKE '%BUSA%');
+
+-- Step 2: Find the schedule for this session
+-- Replace the date, room, and time with actual values
+SELECT 
+    cs.SCHEDULEID,
+    cs.SUBJECTID,
+    cs.DAYOFWEEK,
+    cs.STARTTIME,
+    cs.ENDTIME,
+    sub.SUBJECTCODE,
+    sub.SUBJECTNAME,
+    r.ROOMNUMBER,
+    r.ROOMNAME
+FROM CLASSSCHEDULES cs
+LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+WHERE r.ROOMNUMBER = 'WAC-302'
+  AND cs.DAYOFWEEK = 'Wednesday'
+  AND cs.STARTTIME = '01:35:00'
+  AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+  AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester');
+
+-- Step 3: Check ALL attendance records for this user on Nov 5, 2025
+-- Replace USERID with the result from Step 1
+SELECT 
+    ATTENDANCEID,
+    USERID,
+    SCHEDULEID,
+    SCANTYPE,
+    SCANDATETIME,
+    DATE,
+    TIMEIN,
+    STATUS,
+    ACTIONTYPE,
+    AUTHMETHOD,
+    LOCATION,
+    CASE 
+        WHEN SCANTYPE = 'time_in' THEN 'SIGN IN'
+        WHEN SCANTYPE = 'time_out' THEN 'SIGN OUT'
+        WHEN SCANTYPE = 'early_arrival' THEN 'EARLY ARRIVAL'
+        WHEN SCANTYPE = 'early_arrival_upgraded' THEN 'EARLY ARRIVAL (UPGRADED)'
+        WHEN SCANTYPE = 'time_in_confirmation' THEN 'TIME IN CONFIRMATION'
+        ELSE SCANTYPE
+    END AS SCAN_TYPE_DESCRIPTION
+FROM ATTENDANCERECORDS
+WHERE USERID = 'REPLACE_WITH_USERID_FROM_STEP_1'
+  AND DATE(SCANDATETIME) = '2025-11-05'
+ORDER BY SCANDATETIME;
+
+-- Step 4: Check specifically for sign-out records (time_out) for this user on Nov 5
+SELECT 
+    ATTENDANCEID,
+    USERID,
+    SCHEDULEID,
+    SCANTYPE,
+    SCANDATETIME,
+    DATE,
+    STATUS,
+    ACTIONTYPE,
+    AUTHMETHOD,
+    LOCATION,
+    CASE 
+        WHEN SCHEDULEID IS NULL THEN 'NULL SCHEDULEID'
+        ELSE 'HAS SCHEDULEID'
+    END AS SCHEDULE_STATUS
+FROM ATTENDANCERECORDS
+WHERE USERID = 'REPLACE_WITH_USERID_FROM_STEP_1'
+  AND DATE(SCANDATETIME) = '2025-11-05'
+  AND SCANTYPE = 'time_out'
+ORDER BY SCANDATETIME DESC;
+
+-- Step 5: Check sign-in records for comparison
+SELECT 
+    ATTENDANCEID,
+    USERID,
+    SCHEDULEID,
+    SCANTYPE,
+    SCANDATETIME,
+    DATE,
+    STATUS,
+    ACTIONTYPE,
+    AUTHMETHOD,
+    LOCATION
+FROM ATTENDANCERECORDS
+WHERE USERID = 'REPLACE_WITH_USERID_FROM_STEP_1'
+  AND DATE(SCANDATETIME) = '2025-11-05'
+  AND SCANTYPE IN ('time_in', 'time_in_confirmation', 'early_arrival', 'early_arrival_upgraded')
+ORDER BY SCANDATETIME;
+
+-- Step 6: Check if sign-out exists for the specific schedule (if you got SCHEDULEID from Step 2)
+SELECT 
+    ar.ATTENDANCEID,
+    ar.USERID,
+    ar.SCHEDULEID,
+    ar.SCANTYPE,
+    ar.SCANDATETIME,
+    ar.STATUS,
+    ar.ACTIONTYPE,
+    sub.SUBJECTCODE,
+    cs.STARTTIME,
+    r.ROOMNUMBER
+FROM ATTENDANCERECORDS ar
+LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID
+LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+WHERE ar.USERID = 'REPLACE_WITH_USERID_FROM_STEP_1'
+  AND DATE(ar.SCANDATETIME) = '2025-11-05'
+  AND ar.SCANTYPE = 'time_out'
+  AND (
+    ar.SCHEDULEID = 'REPLACE_WITH_SCHEDULEID_FROM_STEP_2'
+    OR ar.SCHEDULEID IS NULL
+  )
+ORDER BY ar.SCANDATETIME DESC
+LIMIT 1;
+
+-- Step 7: Combined view - Sign in and Sign out side by side
+SELECT 
+    u.FIRSTNAME,
+    u.LASTNAME,
+    u.STUDENTID,
+    signin.SCANDATETIME AS SIGNIN_TIME,
+    signin.SCANTYPE AS SIGNIN_TYPE,
+    signin.SCHEDULEID AS SIGNIN_SCHEDULEID,
+    signout.SCANDATETIME AS SIGNOUT_TIME,
+    signout.SCANTYPE AS SIGNOUT_TYPE,
+    signout.SCHEDULEID AS SIGNOUT_SCHEDULEID,
+    CASE 
+        WHEN signout.SCANDATETIME IS NULL THEN 'NO SIGNOUT RECORD'
+        ELSE 'SIGNOUT EXISTS'
+    END AS SIGNOUT_STATUS
+FROM USERS u
+LEFT JOIN ATTENDANCERECORDS signin ON u.USERID = signin.USERID
+    AND DATE(signin.SCANDATETIME) = '2025-11-05'
+    AND signin.SCANTYPE IN ('time_in', 'time_in_confirmation', 'early_arrival', 'early_arrival_upgraded')
+    AND signin.SCHEDULEID = 'REPLACE_WITH_SCHEDULEID_FROM_STEP_2'
+LEFT JOIN ATTENDANCERECORDS signout ON u.USERID = signout.USERID
+    AND DATE(signout.SCANDATETIME) = '2025-11-05'
+    AND signout.SCANTYPE = 'time_out'
+    AND (
+        signout.SCHEDULEID = 'REPLACE_WITH_SCHEDULEID_FROM_STEP_2'
+        OR signout.SCHEDULEID IS NULL
+        OR signout.SCANDATETIME > signin.SCANDATETIME
+    )
+WHERE u.STUDENTID = '20202422310'
+ORDER BY signin.SCANDATETIME DESC
+LIMIT 1;
+

@@ -923,6 +923,64 @@ namespace FutronicAttendanceSystem.Database
             }
         }
 
+        /// <summary>
+        /// Log an access attempt to ACCESSLOGS table (supports NULL USERID for unknown users)
+        /// </summary>
+        public void LogAccessAttempt(string userId, string roomId, string authMethod, 
+            string location, string accessType, string result, string reason = null)
+        {
+            try
+            {
+                if (connection == null || connection.State != System.Data.ConnectionState.Open)
+                {
+                    Console.WriteLine("Database connection not available for logging access attempt");
+                    return;
+                }
+
+                // Use CurrentRoomId if roomId is not provided
+                string effectiveRoomId = string.IsNullOrEmpty(roomId) ? CurrentRoomId : roomId;
+                
+                if (string.IsNullOrEmpty(effectiveRoomId))
+                {
+                    Console.WriteLine("⚠️ Cannot log access attempt - no room ID available");
+                    LogMessage("WARNING", "Cannot log access attempt - no room ID available");
+                    return;
+                }
+
+                string logId = Guid.NewGuid().ToString();
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+
+                var cmd = new MySqlCommand(@"
+                    INSERT INTO ACCESSLOGS (
+                        LOGID, USERID, ROOMID, TIMESTAMP, ACCESSTYPE, AUTHMETHOD,
+                        LOCATION, RESULT, REASON, CREATED_AT
+                    ) VALUES (
+                        @LOGID, @USERID, @ROOMID, @TIMESTAMP, @ACCESSTYPE, @AUTHMETHOD,
+                        @LOCATION, @RESULT, @REASON, NOW()
+                    )", connection);
+
+                cmd.Parameters.AddWithValue("@LOGID", logId);
+                cmd.Parameters.AddWithValue("@USERID", string.IsNullOrEmpty(userId) ? (object)DBNull.Value : userId);
+                cmd.Parameters.AddWithValue("@ROOMID", effectiveRoomId);
+                cmd.Parameters.AddWithValue("@TIMESTAMP", timestamp);
+                cmd.Parameters.AddWithValue("@ACCESSTYPE", accessType);
+                cmd.Parameters.AddWithValue("@AUTHMETHOD", authMethod);
+                cmd.Parameters.AddWithValue("@LOCATION", location);
+                cmd.Parameters.AddWithValue("@RESULT", result);
+                cmd.Parameters.AddWithValue("@REASON", string.IsNullOrEmpty(reason) ? (object)DBNull.Value : reason);
+
+                cmd.ExecuteNonQuery();
+                Console.WriteLine($"✅ Access attempt logged: {accessType} - {result} for room {effectiveRoomId}");
+                LogMessage("INFO", $"Access attempt logged: {accessType} - {result} - {(string.IsNullOrEmpty(userId) ? "Unknown User" : userId)}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Failed to log access attempt: {ex.Message}");
+                LogMessage("ERROR", $"Failed to log access attempt: {ex.Message}");
+                // Don't throw - logging failures shouldn't break the application
+            }
+        }
+
         public bool DeleteUser(int userId)
         {
             try
@@ -1184,25 +1242,134 @@ namespace FutronicAttendanceSystem.Database
             {
                 LogMessage("INFO", $"Recording attendance for user {userGuid}, action {action}, current room: {CurrentRoomId}");                                
 
+                // Check if this is a sign-out action - if so, use more lenient validation
+                bool isSignOut = !string.IsNullOrEmpty(action) && 
+                    (action.IndexOf("sign-out", StringComparison.OrdinalIgnoreCase) >= 0 || 
+                     action.IndexOf("sign out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     action.IndexOf("check-out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     action.IndexOf("check out", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                if (isSignOut)
+                {
+                    LogMessage("INFO", $"🔍 SIGN-OUT DETECTED: Processing sign-out for user {userGuid}, action: {action}");
+                    Console.WriteLine($"🔍 SIGN-OUT DETECTED: Processing sign-out for user {userGuid}, action: {action}");
+                }
+
                 // First, validate if there's a scheduled class for the current time and room                                                                   
                 var scheduleValidation = ValidateScheduleForCurrentTime(userGuid);                                                                              
-                if (!scheduleValidation.IsValid)
+                
+                // For sign-out, allow if validation fails but there's an active session or prior sign-in today
+                if (!scheduleValidation.IsValid && !isSignOut)
                 {
                     LogMessage("WARNING", $"Schedule validation failed: {scheduleValidation.Reason}");                                                          
                     return new AttendanceAttemptResult { Success = false, Reason = scheduleValidation.Reason, SubjectName = scheduleValidation.SubjectName };   
                 }
+                
+                // For sign-out with failed validation, try to find active session or prior sign-in
+                if (!scheduleValidation.IsValid && isSignOut)
+                {
+                    LogMessage("INFO", $"Sign-out action with failed schedule validation - checking for active session or prior sign-in...");
+                    
+                    // Check for active session in this room (any status)
+                    using (var cmdFindSession = new MySqlCommand(@"
+                        SELECT SESSIONID, SCHEDULEID, STATUS
+                        FROM SESSIONS
+                        WHERE SESSIONDATE = CURRENT_DATE
+                          AND ROOMID = @currentRoomId
+                          AND STATUS IN ('active', 'waiting', 'ended')
+                        ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC
+                        LIMIT 1", connection))
+                    {
+                        cmdFindSession.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");
+                        using (var r = cmdFindSession.ExecuteReader())
+                        {
+                            if (r.Read())
+                            {
+                                string foundSessionId = r.GetString(0);
+                                string foundScheduleId = r.IsDBNull(1) ? null : r.GetString(1);
+                                string sessionStatus = r.GetString(2);
+                                
+                                LogMessage("INFO", $"Found active session {foundSessionId} (status: {sessionStatus}) for sign-out");
+                                
+                                // Use the schedule from the session
+                                if (!string.IsNullOrEmpty(foundScheduleId))
+                                {
+                                    scheduleValidation.IsValid = true;
+                                    scheduleValidation.ScheduleId = foundScheduleId;
+                                    scheduleValidation.Reason = "Sign-out allowed - active session found";
+                                }
+                            }
+                        }
+                    }
+                    
+                    // If still invalid, check for prior sign-in today in this room
+                    if (!scheduleValidation.IsValid)
+                    {
+                        using (var cmdFindSignIn = new MySqlCommand(@"
+                            SELECT DISTINCT ar.SCHEDULEID, cs.SUBJECTID, s.SUBJECTNAME
+                            FROM ATTENDANCERECORDS ar
+                            LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID
+                            LEFT JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
+                            WHERE ar.USERID = @userGuid
+                              AND DATE(ar.SCANDATETIME) = CURRENT_DATE
+                              AND ar.SCANTYPE IN ('time_in', 'time_in_confirmation', 'early_arrival', 'early_arrival_upgraded')
+                              AND EXISTS (
+                                  SELECT 1 FROM CLASSSCHEDULES cs2
+                                  WHERE cs2.SCHEDULEID = ar.SCHEDULEID
+                                    AND cs2.ROOMID = @currentRoomId
+                              )
+                            ORDER BY ar.SCANDATETIME DESC
+                            LIMIT 1", connection))
+                        {
+                            cmdFindSignIn.Parameters.AddWithValue("@userGuid", userGuid);
+                            cmdFindSignIn.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");
+                            using (var r = cmdFindSignIn.ExecuteReader())
+                            {
+                                if (r.Read())
+                                {
+                                    string foundScheduleId = r.IsDBNull(0) ? null : r.GetString(0);
+                                    if (!string.IsNullOrEmpty(foundScheduleId))
+                                    {
+                                        scheduleValidation.IsValid = true;
+                                        scheduleValidation.ScheduleId = foundScheduleId;
+                                        scheduleValidation.SubjectName = r.IsDBNull(2) ? "Unknown" : r.GetString(2);
+                                        scheduleValidation.Reason = "Sign-out allowed - prior sign-in found";
+                                        LogMessage("INFO", $"Sign-out allowed - found prior sign-in with schedule {foundScheduleId}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // If still invalid, deny sign-out
+                    if (!scheduleValidation.IsValid)
+                    {
+                        LogMessage("WARNING", $"Sign-out denied - no active session or prior sign-in found: {scheduleValidation.Reason}");
+                        return new AttendanceAttemptResult { Success = false, Reason = "Sign-out denied: No active session or prior sign-in found", SubjectName = scheduleValidation.SubjectName };
+                    }
+                }
 
-                // Try to find an active session for today in the current device's room                                                                         
+                // Try to find an active session for today in the current device's room
+                // For sign-out, also include 'ended' sessions since sign-out can happen after session ends
                 string sessionId = null;
                 string scheduleId = null;
-                using (var cmdFindSession = new MySqlCommand(@"
-                    SELECT SESSIONID, SCHEDULEID
-                    FROM SESSIONS
-                    WHERE SESSIONDATE = CURRENT_DATE
-                      AND STATUS IN ('active','waiting')
-                      AND ROOMID = @currentRoomId
-                    ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
-                    LIMIT 1", connection))
+                string sessionQuery = isSignOut 
+                    ? @"SELECT SESSIONID, SCHEDULEID
+                        FROM SESSIONS
+                        WHERE SESSIONDATE = CURRENT_DATE
+                          AND STATUS IN ('active','waiting','ended')
+                          AND ROOMID = @currentRoomId
+                        ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
+                        LIMIT 1"
+                    : @"SELECT SESSIONID, SCHEDULEID
+                        FROM SESSIONS
+                        WHERE SESSIONDATE = CURRENT_DATE
+                          AND STATUS IN ('active','waiting')
+                          AND ROOMID = @currentRoomId
+                        ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
+                        LIMIT 1";
+                    
+                using (var cmdFindSession = new MySqlCommand(sessionQuery, connection))
                 {
                     cmdFindSession.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");                                                              
                     using (var r = cmdFindSession.ExecuteReader())
@@ -1210,7 +1377,7 @@ namespace FutronicAttendanceSystem.Database
                         if (r.Read())
                         {
                             sessionId = r.GetString(0);
-                            scheduleId = r.GetString(1);
+                            scheduleId = r.IsDBNull(1) ? null : r.GetString(1);
                             LogMessage("INFO", $"Found session {sessionId} for room {CurrentRoomId}");                                                          
                         }
                         else
@@ -1254,11 +1421,17 @@ namespace FutronicAttendanceSystem.Database
                     sessionId = null; // Don't associate with a session
                     LogMessage("INFO", $"Using administrative schedule {scheduleId} for {userType} access");
                 }
-                                // Other roles require a schedule
-                else if (string.IsNullOrWhiteSpace(scheduleId))
+                                // Other roles require a schedule (except sign-out, which can use NULL if no schedule found)
+                else if (string.IsNullOrWhiteSpace(scheduleId) && !isSignOut)
                 {
                     LogMessage("ERROR", "RecordAttendance: No valid schedule available to attach attendance.");
                     return new AttendanceAttemptResult { Success = false, Reason = "No valid schedule available" };
+                }
+                
+                // For sign-out without schedule, allow NULL schedule (will be matched by sign-in schedule in reports)
+                if (string.IsNullOrWhiteSpace(scheduleId) && isSignOut)
+                {
+                    LogMessage("INFO", $"Sign-out record will be created with NULL scheduleId - will be matched by sign-in schedule in reports");
                 }
 
                 // Map action to scan type and status (robust parsing)
@@ -1428,7 +1601,8 @@ namespace FutronicAttendanceSystem.Database
                 }
 
                 // Handle early arrival confirmation - update existing record instead of inserting new
-                if (priorAttendanceId != null && earlyArrivalTime.HasValue)
+                // BUT: Skip this for sign-out actions - sign-out should always create a new record
+                if (priorAttendanceId != null && earlyArrivalTime.HasValue && !isSignOut)
                 {
                     // Update the existing early arrival record to reflect confirmation
                     var updateCmd = new MySqlCommand(@"
@@ -1458,6 +1632,16 @@ namespace FutronicAttendanceSystem.Database
                     Console.WriteLine($"   SessionID: {sessionId ?? "NULL"}");
                     
                     return new AttendanceAttemptResult { Success = true, ScheduleId = scheduleId, SubjectName = scheduleValidation.SubjectName };
+                }
+                
+                // For sign-out, ensure we use the correct action type and scan type
+                if (isSignOut)
+                {
+                    actionType = "Sign Out";
+                    scanType = "time_out";
+                    status = "Present"; // Sign-out is always considered present
+                    LogMessage("INFO", $"Sign-out action: Setting ActionType=Sign Out, SCANTYPE=time_out");
+                    Console.WriteLine($"🔍 SIGN-OUT: Setting ActionType=Sign Out, SCANTYPE=time_out");
                 }
 
                 // For new records, capture the scan time explicitly

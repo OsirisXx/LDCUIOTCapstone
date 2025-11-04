@@ -149,18 +149,36 @@ function AttendanceLogs() {
       ? `${mounted ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-8'} transition-all duration-500 ease-out will-change-transform will-change-opacity transform`
       : '';
 
+        const isUnknownScan = log.RECORD_TYPE === 'unknown_scan' || (log.FIRSTNAME === 'Unknown' && log.LASTNAME === 'User');
+    
+    // Extract RFID data from REASON field if available
+    let rfidData = null;
+    if (isUnknownScan && log.REASON) {
+      const match = log.REASON.match(/Unknown RFID card: (.+)/);
+      if (match) {
+        rfidData = match[1];
+      }
+    }
+
     return (
       <tr className={baseRowClasses + highlightClasses}>
         <td className="px-6 py-4 whitespace-nowrap">
           <div className={`flex items-center ${animateClasses}`}>
-            <UserIcon className="h-8 w-8 text-gray-400 mr-3" />
+            <UserIcon className={`h-8 w-8 mr-3 ${isUnknownScan ? 'text-red-400' : 'text-gray-400'}`} />
             <div>
-              <div className="text-sm font-medium text-gray-900">
-                {log.FIRSTNAME} {log.LASTNAME}
+              <div className={`text-sm font-medium ${isUnknownScan ? 'text-red-600' : 'text-gray-900'}`}>
+                {isUnknownScan ? 'Unknown User' : `${log.FIRSTNAME || ''} ${log.LASTNAME || ''}`.trim()}
               </div>
-              <div className="text-sm text-gray-500">
-                ID: {log.STUDENTID || 'N/A'}
-              </div>
+              {rfidData && (
+                <div className="text-xs text-red-600 font-medium">
+                  RFID: {rfidData}
+                </div>
+              )}
+              {!isUnknownScan && (
+                <div className="text-sm text-gray-500">
+                  ID: {log.STUDENTID || log.FACULTYID || 'N/A'}
+                </div>
+              )}
             </div>
           </div>
         </td>
@@ -169,10 +187,10 @@ function AttendanceLogs() {
             <ClockIcon className="h-5 w-5 text-gray-400 mr-2" />
             <div>
               <div className="text-sm font-medium text-gray-900">
-                {formatDate(log.SCANDATETIME || log.DATE)}
+                {formatDate(log.SCANDATETIME || log.TIMESTAMP || log.DATE)}
               </div>
               <div className="text-sm text-gray-500">
-                {formatTime(log.SCANDATETIME)}
+                {formatTime(log.SCANDATETIME || log.TIMESTAMP)}
               </div>
             </div>
           </div>
@@ -180,7 +198,7 @@ function AttendanceLogs() {
         <td className="px-6 py-4 whitespace-nowrap">
           <div className={`flex items-center ${animateClasses}`}>
             {getStatusIcon(log.STATUS)}
-            <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(log.STATUS)}`}>
+            <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(log.STATUS)}`}>                                    
               {log.STATUS || 'Unknown'}
             </span>
           </div>
@@ -220,13 +238,15 @@ function AttendanceLogs() {
     );
   };
 
-  const getStatusIcon = (status) => {
+    const getStatusIcon = (status) => {
     switch (status?.toLowerCase()) {
       case 'present':
         return <CheckCircleIcon className="h-5 w-5 text-green-500" />;
       case 'late':
-        return <ExclamationTriangleIcon className="h-5 w-5 text-yellow-500" />;
+        return <ExclamationTriangleIcon className="h-5 w-5 text-yellow-500" />; 
       case 'absent':
+        return <XCircleIcon className="h-5 w-5 text-red-500" />;
+      case 'unknown':
         return <XCircleIcon className="h-5 w-5 text-red-500" />;
       default:
         return <ClockIcon className="h-5 w-5 text-gray-500" />;
@@ -240,6 +260,8 @@ function AttendanceLogs() {
       case 'late':
         return 'bg-yellow-100 text-yellow-800';
       case 'absent':
+        return 'bg-red-100 text-red-800';
+      case 'unknown':
         return 'bg-red-100 text-red-800';
       default:
         return 'bg-gray-100 text-gray-800';
