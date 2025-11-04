@@ -72,7 +72,7 @@ bool lockIsOpen = false;
 // Display timing variables for non-blocking operation
 unsigned long displayOnTime = 0;
 bool displayIsOn = false;
-const unsigned long DISPLAY_DURATION = 3000; // Display stays on for 3 seconds
+const unsigned long DISPLAY_DURATION = 5000; // Display stays on for 5 seconds
 
 
 void setup() {

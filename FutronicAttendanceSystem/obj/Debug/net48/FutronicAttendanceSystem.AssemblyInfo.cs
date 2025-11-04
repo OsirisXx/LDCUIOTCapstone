@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("FutronicAttendanceSystem")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("3.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+0da68412fa4766fe6ad9810cc8d505e9535ec6ab")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5f1ea920e8ff0af129651eccc8591b2cb61721f8")]
 [assembly: System.Reflection.AssemblyProductAttribute("FutronicAttendanceSystem")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Futronic Attendance System")]
 [assembly: System.Reflection.AssemblyVersionAttribute("3.0.0.0")]

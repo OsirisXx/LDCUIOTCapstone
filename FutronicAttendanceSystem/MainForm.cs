@@ -137,6 +137,13 @@ namespace FutronicAttendanceSystem
         private DateTime crossVerificationStartTime = DateTime.MinValue;
         private const int CROSS_VERIFICATION_TIMEOUT_SECONDS = 20; // 20 seconds to complete cross-type verification
         
+        // EARLY-ARRIVAL DUAL-AUTHENTICATION (outside sensor, no active session)
+        private bool awaitingEarlyArrivalVerification = false;
+        private string earlyFirstScanType = ""; // "RFID" or "FINGERPRINT"
+        private string earlyPendingUser = "";
+        private string earlyPendingGuid = "";
+        private DateTime earlyVerificationStartTime = DateTime.MinValue;
+        
         // Track student sign-in status to prevent duplicates
         // Track signed-in students by GUID to avoid name collisions and case issues
         private HashSet<string> signedInStudentGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -3772,21 +3779,80 @@ namespace FutronicAttendanceSystem
                         currentSessionState != AttendanceSessionState.ActiveForSignOut &&
                         currentSessionState != AttendanceSessionState.WaitingForInstructorSignOut)
                     {
-                        Console.WriteLine($"❌ No active session - denying door access for student {userName}");
-                        SetStatusText($"❌ No active session. Door access denied for {userName}.");
+                        // No active session - handle EARLY ARRIVAL dual-auth
                         
-                        // Send denial message to ESP32 for OLED display
-                        _ = System.Threading.Tasks.Task.Run(async () => {
-                            try
+                        // Timeout check
+                        if (awaitingEarlyArrivalVerification)
+                        {
+                            var elapsed = DateTime.Now - earlyVerificationStartTime;
+                            if (elapsed.TotalSeconds > CROSS_VERIFICATION_TIMEOUT_SECONDS)
                             {
-                                await RequestLockControlDenial(userGuid, userName, "No active session. Instructor must start the session first.", "student");
+                                Console.WriteLine($"⏱️ EARLY ARRIVAL VERIFICATION TIMEOUT: {earlyPendingUser} took too long");
+                                SetStatusText($"⏱️ Verification timeout for {earlyPendingUser}. Starting over...");
+                                awaitingEarlyArrivalVerification = false;
+                                earlyFirstScanType = "";
+                                earlyPendingUser = "";
+                                earlyPendingGuid = "";
                             }
-                            catch (Exception ex)
+                        }
+
+                            if (awaitingEarlyArrivalVerification && earlyFirstScanType == "RFID")
                             {
-                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                // RFID was scanned first, now verifying with fingerprint
+                                if (userName == earlyPendingUser && userGuid == earlyPendingGuid)
+                                {
+                                    Console.WriteLine($"✅ EARLY ARRIVAL VERIFIED: {userName} (RFID + Fingerprint)");
+                                    SetStatusText($"✅ Verified: {userName}. Recording early arrival...");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+
+                                    System.Threading.Tasks.Task.Run(async () => {
+                                        try { await RecordEarlyArrivalFingerprint(userName, userGuid); } catch (Exception ex) { Console.WriteLine($"Early arrival record failed: {ex.Message}"); }
+                                    });
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"❌ EARLY ARRIVAL VERIFICATION FAILED: RFID={earlyPendingUser}, Fingerprint={userName}");
+                                    SetStatusText($"❌ Verification failed! RFID: {earlyPendingUser}, Fingerprint: {userName}. Please try again.");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+                                }
                             }
-                        });
-                        
+                        else if (awaitingEarlyArrivalVerification && earlyFirstScanType == "FINGERPRINT")
+                        {
+                            // Already waiting for RFID - ignore this fingerprint scan
+                            Console.WriteLine($"⏳ Early arrival: Waiting for RFID for {earlyPendingUser}. Ignoring duplicate fingerprint scan.");
+                            SetStatusText($"Waiting for RFID scan. Please scan your RFID card to complete early arrival.");
+                            
+                            // Remind user on OLED to scan RFID
+                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                try { await RequestInfoDisplay(userGuid, userName, "Waiting for RFID scan..."); } catch { }
+                            });
+                            
+                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                            return;
+                        }
+                        else if (!awaitingEarlyArrivalVerification)
+                        {
+                            // Start early-arrival verification with fingerprint first
+                            awaitingEarlyArrivalVerification = true;
+                            earlyFirstScanType = "FINGERPRINT";
+                            earlyPendingUser = userName;
+                            earlyPendingGuid = userGuid;
+                            earlyVerificationStartTime = DateTime.Now;
+                            Console.WriteLine($"🧭 EARLY ARRIVAL: Fingerprint captured for {userName}. Awaiting RFID...");
+                            SetStatusText($"Fingerprint OK. Please scan RFID to complete early arrival.");
+
+                            // Show first scan acceptance on OLED
+                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                try { await RequestInfoDisplay(userGuid, userName, "Fingerprint OK. Scan RFID now."); } catch { }
+                            });
+                        }
+
                         ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                         return;
                     }
@@ -5522,13 +5588,19 @@ namespace FutronicAttendanceSystem
                 Console.WriteLine($"Sending to ESP32: {esp32Url}");
 
                 // Create payload for ESP32
+                string displayMessage = null;
+                if (!string.IsNullOrEmpty(action) && action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    displayMessage = "Early Arrival recorded. Scan inside at start.";
+                }
                 var payload = new
                 {
                     action = lockAction,
                     user = $"{user.FirstName} {user.LastName}",
                     userType = user.UserType?.ToLower(),
                     sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
-                                   currentSessionState == AttendanceSessionState.ActiveForSignOut
+                                   currentSessionState == AttendanceSessionState.ActiveForSignOut,
+                    message = displayMessage
                 };
 
                 var json = JsonSerializer.Serialize(payload);
@@ -5782,6 +5854,177 @@ namespace FutronicAttendanceSystem
             }
         }
 
+        // Display informational message on OLED (fingerprint path)
+        private async Task RequestInfoDisplay(string userGuid, string userName, string message)
+        {
+            try
+            {
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                var payload = new { action = "info", user = userName, message };
+                var json = JsonSerializer.Serialize(payload);
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await client.PostAsync(esp32Url, content);
+                }
+            }
+            catch { }
+        }
+
+        // Display informational message on OLED (RFID path)
+        private async Task RequestRfidInfoDisplay(string userGuid, string userName, string message, string rfidData)
+        {
+            try
+            {
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+
+                string esp32Url = $"http://{esp32Ip}/api/rfid-scan";
+                var payload = new { action = "info", rfid_data = rfidData, user = userName, message };
+                var json = JsonSerializer.Serialize(payload);
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await client.PostAsync(esp32Url, content);
+                }
+            }
+            catch { }
+        }
+
+        // Record early arrival using direct database access for fingerprint
+        private async Task RecordEarlyArrivalFingerprint(string userName, string userGuid)
+        {
+            try
+            {
+                Console.WriteLine("=== EARLY ARRIVAL FINGERPRINT SCAN START ===");
+                Console.WriteLine($"Student: {userName}");
+                Console.WriteLine($"User GUID: {userGuid}");
+
+                if (dbManager == null)
+                {
+                    Console.WriteLine("❌ Database manager not available");
+                    SetStatusText("❌ System error - database not available");
+                    return;
+                }
+
+                // Call database manager to record early arrival
+                var result = dbManager.TryRecordAttendanceByGuid(userGuid, "Early Arrival (Fingerprint)", "outside");
+
+                if (result.Success)
+                {
+                    Console.WriteLine($"✅ Early arrival recorded for {result.SubjectName}");
+                    
+                    this.Invoke(new Action(() => {
+                        SetStatusText($"⏰ Early arrival: {userName} for {result.SubjectName}. Scan inside when class starts.");
+                        
+                        // Create early arrival record
+                        var earlyArrivalRecord = new Database.Models.AttendanceRecord
+                        {
+                            UserId = 0,
+                            Username = userName,
+                            Timestamp = DateTime.Now,
+                            Action = "Early Arrival",
+                            Status = $"Awaiting Confirmation - {result.SubjectName}"
+                        };
+                        attendanceRecords.Add(earlyArrivalRecord);
+                        UpdateAttendanceDisplay(earlyArrivalRecord);
+                    }));
+
+                    // Show final success message on OLED (will display for 5 seconds)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestInfoDisplay(userGuid, userName, "Early Arrival Recorded!"); } catch { }
+                    });
+
+                    // Trigger door access for early arrivals
+                    await RequestLockControl(userGuid, "Student Early Arrival (Fingerprint)");
+                }
+                else
+                {
+                    Console.WriteLine($"❌ Early arrival denied: {result.Reason}");
+                    
+                    this.Invoke(new Action(() => {
+                        string statusMessage;
+                        string recordStatus;
+                        
+                        if (result.Reason.Contains("No class starting"))
+                        {
+                            statusMessage = $"❌ Too early. {result.Reason}";
+                            recordStatus = "Too Early";
+                        }
+                        else if (result.Reason.Contains("Not enrolled"))
+                        {
+                            statusMessage = $"❌ Not enrolled. {result.Reason}";
+                            recordStatus = "Not Enrolled";
+                        }
+                        else if (result.Reason.Contains("Already recorded"))
+                        {
+                            statusMessage = $"❌ Already scanned. {result.Reason}";
+                            recordStatus = "Duplicate";
+                        }
+                        else
+                        {
+                            statusMessage = $"❌ {result.Reason}";
+                            recordStatus = "Error";
+                        }
+                        
+                        SetStatusText(statusMessage);
+                        
+                        // Create denial record
+                        var denialRecord = new Database.Models.AttendanceRecord
+                        {
+                            UserId = 0,
+                            Username = userName,
+                            Timestamp = DateTime.Now,
+                            Action = "Early Arrival Denied",
+                            Status = recordStatus
+                        };
+                        attendanceRecords.Add(denialRecord);
+                        UpdateAttendanceDisplay(denialRecord);
+                    }));
+                    
+                    // Send denial message to ESP32 for OLED display
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try
+                        {
+                            await RequestLockControlDenial(userGuid, userName, result.Reason ?? "Early arrival denied", "student");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not send early arrival denial to ESP32: {ex.Message}");
+                        }
+                    });
+                }
+                
+                Console.WriteLine("=== EARLY ARRIVAL FINGERPRINT SCAN END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error recording early arrival: {ex.Message}");
+                this.Invoke(new Action(() => {
+                    SetStatusText($"❌ Early arrival error: {ex.Message}");
+                    
+                    // Create error record
+                    var errorRecord = new Database.Models.AttendanceRecord
+                    {
+                        UserId = 0,
+                        Username = userName,
+                        Timestamp = DateTime.Now,
+                        Action = "Early Arrival Error",
+                        Status = ex.Message
+                    };
+                    attendanceRecords.Add(errorRecord);
+                    UpdateAttendanceDisplay(errorRecord);
+                }));
+            }
+        }
+
         // Record early arrival using direct database access
         private async Task RecordEarlyArrivalRfid(string userName, string userGuid, string rfidTag)
         {
@@ -5810,6 +6053,11 @@ namespace FutronicAttendanceSystem
                         SetRfidStatusText($"⏰ Early arrival: {userName} for {result.SubjectName}. Scan inside when class starts.");
                         AddRfidAttendanceRecord(userName, "Early Arrival", $"Awaiting Confirmation - {result.SubjectName}");
                     }));
+
+                    // Show final success message on OLED (will display for 5 seconds)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestRfidInfoDisplay(userGuid, userName, "Early Arrival Recorded!", rfidTag); } catch { }
+                    });
 
                     // Trigger door access for early arrivals
                     await RequestRfidLockControl(userGuid, "Student Early Arrival (RFID)", rfidTag);
@@ -5922,13 +6170,19 @@ namespace FutronicAttendanceSystem
                 Console.WriteLine($"Sending RFID scan to ESP32: {esp32Url}");
 
                 // Create payload for ESP32 RFID endpoint
+                string displayMessage = null;
+                if (!string.IsNullOrEmpty(action) && action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    displayMessage = "Early Arrival recorded. Scan inside at start.";
+                }
                 var payload = new
                 {
                     rfid_data = rfidData,
                     user = $"{user.FirstName} {user.LastName}",
                     userType = user.UserType?.ToLower(),
                     sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
-                                   currentSessionState == AttendanceSessionState.ActiveForSignOut
+                                   currentSessionState == AttendanceSessionState.ActiveForSignOut,
+                    message = displayMessage
                 };
 
                 var json = JsonSerializer.Serialize(payload);
@@ -7234,8 +7488,8 @@ namespace FutronicAttendanceSystem
                 {
                     var trimmed = rfidBuffer.Trim();
                     
-                    // RFID should be exactly 10 digits
-                    if (trimmed.Length == 10 && trimmed.All(char.IsDigit))
+                    // RFID should be numeric; most readers send 10 digits, but allow 8-12 to be safe
+                    if (trimmed.All(char.IsDigit) && trimmed.Length >= 8 && trimmed.Length <= 12)
                     {
                         // Valid RFID format - process it
                         ProcessRfidScan(trimmed);
@@ -7774,19 +8028,81 @@ namespace FutronicAttendanceSystem
                         // Check if this is an outside sensor scan - try early arrival
                         if (isDualSensorMode && currentScanLocation == "outside")
                         {
-                            Console.WriteLine($"⏰ No active session - attempting early arrival for {userInfo.Username}");
-                            
-                            // Call early arrival API
-                            System.Threading.Tasks.Task.Run(async () => {
-                                try
+                            Console.WriteLine($"⏰ No active session - handling early arrival (dual-auth) for {userInfo.Username}");
+                            Console.WriteLine($"   Current early arrival state: awaiting={awaitingEarlyArrivalVerification}, firstType={earlyFirstScanType}, pendingUser={earlyPendingUser}");
+
+                            // Timeout check
+                            if (awaitingEarlyArrivalVerification)
+                            {
+                                var elapsed = DateTime.Now - earlyVerificationStartTime;
+                                if (elapsed.TotalSeconds > CROSS_VERIFICATION_TIMEOUT_SECONDS)
                                 {
-                                    await RecordEarlyArrivalRfid(userInfo.Username, userInfo.EmployeeId, rfidData);
+                                    Console.WriteLine($"⏱️ EARLY ARRIVAL VERIFICATION TIMEOUT: {earlyPendingUser} took too long");
+                                    SetRfidStatusText($"⏱️ Verification timeout for {earlyPendingUser}. Starting over...");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
                                 }
-                                catch (Exception ex)
+                            }
+
+                            if (awaitingEarlyArrivalVerification && earlyFirstScanType == "FINGERPRINT")
+                            {
+                                // Fingerprint was scanned first, now verifying with RFID
+                                Console.WriteLine($"   Checking verification: RFID user={userInfo.Username}, GUID={userInfo.EmployeeId}");
+                                Console.WriteLine($"   Against pending: user={earlyPendingUser}, GUID={earlyPendingGuid}");
+                                if (userInfo.Username == earlyPendingUser && userInfo.EmployeeId == earlyPendingGuid)
                                 {
-                                    Console.WriteLine($"Early arrival scan failed: {ex.Message}");
+                                    Console.WriteLine($"✅ EARLY ARRIVAL VERIFIED: {userInfo.Username} (Fingerprint + RFID)");
+                                    SetRfidStatusText($"✅ Verified: {userInfo.Username}. Recording early arrival...");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+
+                                    System.Threading.Tasks.Task.Run(async () => {
+                                        try { await RecordEarlyArrivalRfid(userInfo.Username, userInfo.EmployeeId, rfidData); } catch (Exception ex) { Console.WriteLine($"Early arrival record failed: {ex.Message}"); }
+                                    });
                                 }
-                            });
+                                else
+                                {
+                                    Console.WriteLine($"❌ EARLY ARRIVAL VERIFICATION FAILED: Fingerprint={earlyPendingUser}, RFID={userInfo.Username}");
+                                    SetRfidStatusText($"❌ Verification failed! Fingerprint: {earlyPendingUser}, RFID: {userInfo.Username}. Please try again.");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+                                }
+                            }
+                            else if (awaitingEarlyArrivalVerification && earlyFirstScanType == "RFID")
+                            {
+                                // Already waiting for fingerprint - ignore this RFID scan
+                                Console.WriteLine($"⏳ Early arrival: Waiting for fingerprint for {earlyPendingUser}. Ignoring duplicate RFID scan.");
+                                SetRfidStatusText($"Waiting for fingerprint scan. Please scan your fingerprint to complete early arrival.");
+                                
+                                // Remind user on OLED to scan fingerprint
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try { await RequestRfidInfoDisplay(userInfo.EmployeeId, userInfo.Username, "Waiting for fingerprint...", rfidData); } catch { }
+                                });
+                                
+                                return;
+                            }
+                            else if (!awaitingEarlyArrivalVerification)
+                            {
+                                // Start early-arrival verification with RFID first
+                                awaitingEarlyArrivalVerification = true;
+                                earlyFirstScanType = "RFID";
+                                earlyPendingUser = userInfo.Username;
+                                earlyPendingGuid = userInfo.EmployeeId;
+                                earlyVerificationStartTime = DateTime.Now;
+                                Console.WriteLine($"🧭 EARLY ARRIVAL: RFID captured for {userInfo.Username}. Awaiting fingerprint...");
+                                SetRfidStatusText($"RFID OK. Please scan fingerprint to complete early arrival.");
+
+                                // Show first scan acceptance on OLED
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try { await RequestRfidInfoDisplay(userInfo.EmployeeId, userInfo.Username, "RFID OK. Scan fingerprint now.", rfidData); } catch { }
+                                });
+                            }
                         }
                         else
                         {
