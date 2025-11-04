@@ -1000,19 +1000,26 @@ router.get('/attendance', authenticateToken, async (req, res) => {
         }
 
         // Status filter
+        let filterUnknownScans = true; // By default, include unknown scans when no status filter
         if (status) {
-            // Filter by status - for Present, we need to include ADMIN-ACCESS and custodian/dean door access
-            if (status === 'Present') {
+            if (status === 'Unknown') {
+                // When filtering for Unknown, only show unknown scans (exclude attendance records)
+                filterUnknownScans = true;
+                whereClause += ' AND 1=0'; // This will exclude all attendance records
+            } else if (status === 'Present') {
+                // Filter by status - for Present, we need to include ADMIN-ACCESS and custodian/dean door access
                 whereClause += ' AND (';
                 whereClause += '  ar.STATUS = ? OR'; // Normal Present status
                 whereClause += '  sub.SUBJECTCODE = ? OR'; // ADMIN-ACCESS maps to Present
                 whereClause += '  (LOWER(u.USERTYPE) IN (?, ?) AND ar.ACTIONTYPE = ?)'; // custodian/dean door access
                 whereClause += ')';
                 params.push('Present', 'ADMIN-ACCESS', 'custodian', 'dean', 'Door Access');
+                filterUnknownScans = false; // Don't include unknown scans when filtering for Present
             } else {
                 // For Late or Absent, only check ar.STATUS directly (ADMIN-ACCESS and door access are always Present)
                 whereClause += ' AND ar.STATUS = ?';
                 params.push(status);
+                filterUnknownScans = false; // Don't include unknown scans when filtering for Late/Absent
             }
         }
 
@@ -1034,8 +1041,8 @@ router.get('/attendance', authenticateToken, async (req, res) => {
         }
 
         // Enhanced query with room, subject, and session information (day, time, room)
-        // Also includes unknown RFID scans from ACCESSLOGS using UNION
-        const logsQuery = `
+        // Also includes unknown RFID scans from ACCESSLOGS using UNION (when filterUnknownScans is true)
+        let logsQuery = `
             SELECT
                 ar.ATTENDANCEID as ID,
                 ar.ATTENDANCEID,
@@ -1080,7 +1087,11 @@ router.get('/attendance', authenticateToken, async (req, res) => {
             LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
             LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
             LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
-            ${whereClause}
+            ${whereClause}`;
+
+        // Add UNION ALL for unknown scans only if filterUnknownScans is true
+        if (filterUnknownScans) {
+            logsQuery += `
             
             UNION ALL
             
@@ -1112,17 +1123,22 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 'unknown_scan' as RECORD_TYPE
             FROM ACCESSLOGS al
             LEFT JOIN ROOMS r ON al.ROOMID = r.ROOMID
-            ${unknownWhereClause}
+            ${unknownWhereClause}`;
+        }
+        
+        logsQuery += `
             
             ORDER BY TIMESTAMP DESC
             LIMIT ? OFFSET ?
         `;
 
-        // Combine params for UNION query
-        const queryParams = [...params, ...unknownParams, limitNum.toString(), offset.toString()];
+        // Combine params for UNION query (only include unknownParams if filterUnknownScans is true)
+        const queryParams = filterUnknownScans 
+            ? [...params, ...unknownParams, limitNum.toString(), offset.toString()]
+            : [...params, limitNum.toString(), offset.toString()];
         const logs = await executeQuery(logsQuery, queryParams);
 
-        // Get total count for pagination (combining both tables)
+        // Get total count for pagination (combining both tables if filterUnknownScans is true)
         let countQuery = `
             SELECT COUNT(*) as total FROM (
                 SELECT ar.ATTENDANCEID
@@ -1132,17 +1148,23 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
                 LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
                 LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
-                ${whereClause}
+                ${whereClause}`;
+        
+        if (filterUnknownScans) {
+            countQuery += `
                 
                 UNION ALL
                 
                 SELECT al.LOGID
                 FROM ACCESSLOGS al
                 LEFT JOIN ROOMS r ON al.ROOMID = r.ROOMID
-                ${unknownWhereClause}
+                ${unknownWhereClause}`;
+        }
+        
+        countQuery += `
             ) as combined
         `;
-        const countParams = [...params, ...unknownParams];
+        const countParams = filterUnknownScans ? [...params, ...unknownParams] : [...params];
         const totalResult = await getSingleResult(countQuery, countParams);
         const total = totalResult?.total || 0;
         const totalPages = Math.ceil(total / limitNum);

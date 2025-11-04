@@ -120,6 +120,10 @@ namespace FutronicAttendanceSystem
         private string lastProcessedUser = "";
         private DateTime lastProcessedTime = DateTime.MinValue;
         private const int DEBOUNCE_INTERVAL_MS = 1000; // 1 second between same user processing
+        
+        // Debouncing for unknown scans to prevent spam
+        private DateTime lastUnknownScanLogTime = DateTime.MinValue;
+        private const int UNKNOWN_SCAN_DEBOUNCE_MS = 5000; // 5 seconds between unknown scan logs
 
         // INSTRUCTOR SCAN BLOCKING: Prevent spam during 5-second delays
         private bool isProcessingInstructorScan = false;
@@ -321,6 +325,17 @@ namespace FutronicAttendanceSystem
         // THREAD SAFETY: Prevent concurrent SDK calls
         private bool isGetBaseTemplateInProgress = false;
         private readonly object getBaseTemplateLock = new object();
+        
+        // Finger detection state: Prevent repeated scans while finger is on scanner
+        private bool isFingerOnScanner = false;
+        private bool isFingerOnInsideSensor = false;
+        private bool isFingerOnOutsideSensor = false;
+        
+        // Quality-based validation: Track valid finger placement before accepting scans
+        // Only process scans if OnPutOn was called first (valid finger placement detected)
+        private bool hasValidFingerPlacement = false;
+        private DateTime lastValidPutOnTime = DateTime.MinValue;
+        private const int VALID_PLACEMENT_TIMEOUT_MS = 2000; // Valid placement expires after 2 seconds
         
         // Background timers
         private System.Windows.Forms.Timer heartbeatTimer;
@@ -3153,9 +3168,13 @@ namespace FutronicAttendanceSystem
                     return;
                 }
                 
-                // Update debouncing variables
+                // Update debouncing variables (only after successful processing)
                 lastProcessedUser = userName;
                 lastProcessedTime = DateTime.Now;
+                
+                // Reset finger-on flag after processing to allow next scan
+                // This ensures we don't block subsequent scans unnecessarily
+                isFingerOnScanner = false;
                 
                 // Console.WriteLine($"Processing attendance scan for: {userName}");
                 
@@ -4683,10 +4702,35 @@ namespace FutronicAttendanceSystem
                     ExitIdleMode();
                 }
                 
-                if (success)
+                // QUALITY VALIDATION: Only process SUCCESSFUL scans if we had a valid finger placement
+                // Failed scans (retCode != 0) don't require valid placement - they're errors that need to be handled
+                bool placementStillValid = hasValidFingerPlacement && 
+                                         (DateTime.Now - lastValidPutOnTime).TotalMilliseconds < VALID_PLACEMENT_TIMEOUT_MS;
+                
+                // For failed scans, always show error message and reset flags
+                if (!success)
+                {
+                    // Reset flags on failure to allow retry
+                    hasValidFingerPlacement = false;
+                    isFingerOnScanner = false;
+                    
+                    // Show appropriate error message based on retCode
+                    string errorMsg = retCode == 0 ? "No finger detected" : $"Template capture failed: {retCode}";
+                    SetStatusText($"{errorMsg}. Please try again.");
+                    Console.WriteLine($"⚠️ {errorMsg}");
+                    ScheduleNextGetBaseTemplate(1000);
+                    return;
+                }
+                
+                // For successful template capture, require valid finger placement
+                if (success && placementStillValid)
                 {
                     lastScanTime = DateTime.Now;
                     SetStatusText("Processing identification...");
+                    
+                    // Reset valid placement flag since we're processing the scan
+                    hasValidFingerPlacement = false;
+                    isFingerOnScanner = false;
                     
                     // Take a snapshot to avoid concurrent modifications
                     var users = m_IdentificationUsers != null ? new List<UserRecord>(m_IdentificationUsers) : null;
@@ -4838,33 +4882,119 @@ namespace FutronicAttendanceSystem
                                 SetStatusText($"Error processing scan: {ex.Message}");
                             }
                             
-                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
-                        }
-                        else
-                        {
-                            SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
-                            // Notify ESP32 to show 'No match' on OLED
-                            _ = System.Threading.Tasks.Task.Run(async () => {
-                                try { await RequestNoMatchDisplay(); } catch { }
-                            });
-                            ScheduleNextGetBaseTemplate(1000);
-                        }
-                    }
-                    else
-                    {
-                        SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
-                        // Notify ESP32 to show 'No match' on OLED
-                        _ = System.Threading.Tasks.Task.Run(async () => {
-                            try { await RequestNoMatchDisplay(); } catch { }
-                        });
-                        ScheduleNextGetBaseTemplate(1000);
-                    }
+                                                          ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                                    }
+                            else
+                            {
+                              // Don't log unknown scans while finger is still on scanner (prevents spam)
+                              if (!isFingerOnScanner)
+                              {
+                                  // Debounce unknown scan logging to prevent spam
+                                  var timeSinceLastUnknownLog = DateTime.Now - lastUnknownScanLogTime;
+                                  if (timeSinceLastUnknownLog.TotalMilliseconds >= UNKNOWN_SCAN_DEBOUNCE_MS)
+                                  {
+                                      // Log unknown fingerprint scan to ACCESSLOGS table
+                                      try
+                                      {
+                                          if (dbManager != null)
+                                          {
+                                              dbManager.LogAccessAttempt(
+                                                  userId: null, // NULL for unknown user
+                                                  roomId: null, // Will use CurrentRoomId from DatabaseManager
+                                                  authMethod: "Fingerprint",
+                                                  location: currentScanLocation ?? "inside",
+                                                  accessType: "attendance_scan",
+                                                  result: "denied",
+                                                  reason: $"Unknown fingerprint - no match found (matchIndex: {matchIndex}, users count: {users.Count})"
+                                              );
+                                              Console.WriteLine($"📝 Logged unknown fingerprint scan to ACCESSLOGS: {currentScanLocation ?? "inside"}");
+                                              lastUnknownScanLogTime = DateTime.Now;
+                                          }
+                                      }
+                                      catch (Exception logEx)
+                                      {
+                                          Console.WriteLine($"⚠️ Failed to log unknown fingerprint scan: {logEx.Message}");
+                                          // Continue even if logging fails
+                                      }
+                                  }
+                                  else
+                                  {
+                                      Console.WriteLine($"⏳ Unknown scan debounced - waiting {Math.Ceiling((UNKNOWN_SCAN_DEBOUNCE_MS - timeSinceLastUnknownLog.TotalMilliseconds) / 1000)}s before logging again");
+                                  }
+                              }
+                              else
+                              {
+                                  Console.WriteLine("⏸️ Skipping unknown scan log - finger still on scanner");
+                              }
+                              
+                              SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
+                              // Notify ESP32 to show 'No match' on OLED        
+                              _ = System.Threading.Tasks.Task.Run(async () => { 
+                                  try { await RequestNoMatchDisplay(); } catch { }
+                              });
+                              ScheduleNextGetBaseTemplate(1000);
+                          }
+                      }
+                      else
+                      {
+                          // Don't log unknown scans while finger is still on scanner (prevents spam)
+                          if (!isFingerOnScanner)
+                          {
+                              // Debounce unknown scan logging to prevent spam
+                              var timeSinceLastUnknownLog = DateTime.Now - lastUnknownScanLogTime;
+                              if (timeSinceLastUnknownLog.TotalMilliseconds >= UNKNOWN_SCAN_DEBOUNCE_MS)
+                              {
+                                  // Log unknown fingerprint scan to ACCESSLOGS table (identification failed)
+                                  try
+                                  {
+                                      if (dbManager != null)
+                                      {
+                                          dbManager.LogAccessAttempt(
+                                              userId: null, // NULL for unknown user
+                                              roomId: null, // Will use CurrentRoomId from DatabaseManager
+                                              authMethod: "Fingerprint",
+                                              location: currentScanLocation ?? "inside",
+                                              accessType: "attendance_scan",
+                                              result: "denied",
+                                              reason: $"Unknown fingerprint - identification failed (result: {result})"
+                                          );
+                                          Console.WriteLine($"📝 Logged unknown fingerprint scan to ACCESSLOGS: {currentScanLocation ?? "inside"}");
+                                          lastUnknownScanLogTime = DateTime.Now;
+                                      }
+                                  }
+                                  catch (Exception logEx)
+                                  {
+                                      Console.WriteLine($"⚠️ Failed to log unknown fingerprint scan: {logEx.Message}");
+                                      // Continue even if logging fails
+                                  }
+                              }
+                              else
+                              {
+                                  Console.WriteLine($"⏳ Unknown scan debounced - waiting {Math.Ceiling((UNKNOWN_SCAN_DEBOUNCE_MS - timeSinceLastUnknownLog.TotalMilliseconds) / 1000)}s before logging again");
+                              }
+                          }
+                          else
+                          {
+                              Console.WriteLine("⏸️ Skipping unknown scan log - finger still on scanner");
+                          }
+                          
+                          SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
+                          // Notify ESP32 to show 'No match' on OLED
+                          _ = System.Threading.Tasks.Task.Run(async () => {     
+                              try { await RequestNoMatchDisplay(); } catch { }  
+                          });
+                          ScheduleNextGetBaseTemplate(1000);
+                      }
                 }
-                else
+                else if (success && !placementStillValid)
                 {
-                    // Handle template capture failure
-                    SetStatusText($"Template capture failed: {retCode}. Please try again.");
-                    ScheduleNextGetBaseTemplate(2000);
+                    // Template capture succeeded but no valid finger placement was detected
+                    // This prevents processing scans when OnPutOn wasn't called (false positives)
+                    Console.WriteLine("⚠️ Template capture succeeded but no valid finger placement detected - ignoring scan");
+                    hasValidFingerPlacement = false;
+                    isFingerOnScanner = false;
+                    SetStatusText("Please place your finger on the scanner.");
+                    ScheduleNextGetBaseTemplate(1000);
                 }
             }
             catch (System.AccessViolationException ex)
@@ -5050,6 +5180,13 @@ namespace FutronicAttendanceSystem
                 if (isPausedForInstructorAction)
                 {
                     Console.WriteLine("⏸️ Scanner paused for instructor action - skipping schedule");
+                    return;
+                }
+                
+                // NEW: Don't schedule if finger is still on scanner (prevents repeated scans)
+                if (isFingerOnScanner)
+                {
+                    Console.WriteLine("⏸️ Finger still on scanner - skipping schedule to prevent repeated scans");
                     return;
                 }
                 
@@ -6656,13 +6793,32 @@ namespace FutronicAttendanceSystem
             // Filter out false positive detections
             if (!IsValidFingerDetection())
                 return;
-                
+            
+            // QUALITY CHECK: Track valid finger placement
+            // Accept OnPutOn as valid finger detection (SDK filters low-quality detections internally)
+            hasValidFingerPlacement = true;
+            lastValidPutOnTime = DateTime.Now;
+            isFingerOnScanner = true;
+            Console.WriteLine("👆 Finger detected on scanner - preventing repeated scans");
             SetStatusText("Attendance: Finger detected. Processing...");
         }
 
         private void OnAttendanceTakeOff(FTR_PROGRESS progress)
         {
-            SetStatusText("Attendance: Finger removed. Please scan again.");
+            // Only process if we had a valid finger placement first
+            // This prevents false positives from repeated OnTakeOff events
+            if (hasValidFingerPlacement && isFingerOnScanner)
+            {
+                // Add a small delay before allowing next scan to prevent immediate re-scanning
+                System.Threading.Tasks.Task.Delay(300).ContinueWith(_ =>
+                {
+                    isFingerOnScanner = false;
+                    hasValidFingerPlacement = false; // Reset valid placement flag
+                    Console.WriteLine("👆 Finger removed from scanner - ready for next scan");
+                });
+                SetStatusText("Attendance: Finger removed. Please scan again.");
+            }
+            // If no valid placement, silently ignore OnTakeOff (it's a false positive)
         }
 
         private void OnAttendanceUpdateScreenImage(Bitmap bitmap)
@@ -9593,14 +9749,31 @@ namespace FutronicAttendanceSystem
                     // The first available device will be used for inside sensor
                     Console.WriteLine($"Inside sensor configured (device index: {deviceConfig?.InsideSensor?.SensorIndex ?? 0})");
                     
-                    // Wire up events
-                    m_InsideSensorOperation.OnPutOn += (progress) =>
-                    {
-                        this.Invoke(new Action(() =>
-                        {
-                            dualSensorPanel?.UpdateInsideStatus("Scanning...");
-                        }));
-                    };
+                                          // Wire up events
+                      m_InsideSensorOperation.OnPutOn += (progress) =>
+                      {
+                                                     // Track valid finger placement on inside sensor
+                           isFingerOnInsideSensor = true;
+                           Console.WriteLine("👆 Finger detected on inside sensor - preventing repeated scans");
+                           this.Invoke(new Action(() =>
+                           {
+                               dualSensorPanel?.UpdateInsideStatus("Scanning...");
+                           }));
+                      };
+                      
+                      m_InsideSensorOperation.OnTakeOff += (progress) =>
+                      {
+                          // Only mark as removed if we actually had a finger on
+                          // Add delay to prevent false positives
+                          if (isFingerOnInsideSensor)
+                          {
+                              System.Threading.Tasks.Task.Delay(300).ContinueWith(_ =>
+                              {
+                                  isFingerOnInsideSensor = false;
+                                  Console.WriteLine("👆 Finger removed from inside sensor - ready for next scan");
+                              });
+                          }
+                      };
                     
                     m_InsideSensorOperation.UpdateScreenImage += (bitmap) =>
                     {
@@ -9623,18 +9796,25 @@ namespace FutronicAttendanceSystem
                         dualSensorPanel?.UpdateInsideStatus("Active");
                     }));
                     
-                    // Start continuous identification
-                    while (!m_bExit && m_InsideSensorEnabled)
-                    {
-                        int matchIndex = -1;
-                        try
-                        {
-                            // Check if operation is still valid
-                            if (m_InsideSensorOperation == null)
-                            {
-                                Console.WriteLine("❌ Inside sensor operation is null, stopping...");
-                                break;
-                            }
+                                          // Start continuous identification
+                      while (!m_bExit && m_InsideSensorEnabled)
+                      {
+                          // Skip scan if finger is still on scanner (prevents repeated scans)
+                          if (isFingerOnInsideSensor)
+                          {
+                              System.Threading.Thread.Sleep(200); // Short sleep while finger is on
+                              continue;
+                          }
+                          
+                          int matchIndex = -1;
+                          try
+                          {
+                              // Check if operation is still valid
+                              if (m_InsideSensorOperation == null)
+                              {
+                                  Console.WriteLine("❌ Inside sensor operation is null, stopping...");
+                                  break;
+                              }
                             
                             // Convert UserRecord list to FtrIdentifyRecord array
                             var records = new FtrIdentifyRecord[m_IdentificationUsers.Count];
@@ -9646,15 +9826,23 @@ namespace FutronicAttendanceSystem
                             var result = m_InsideSensorOperation.Identification(records, ref matchIndex);
                             if (result == FutronicSdkBase.RETCODE_OK)
                             {
+                                // Reset finger-on flag after successful identification
+                                isFingerOnInsideSensor = false;
+                                
                                 this.Invoke(new Action(() =>
                                 {
                                     HandleSensorScan(true, matchIndex, "inside");
                                 }));
                             }
-                            else
+                            else if (!isFingerOnInsideSensor)
                             {
-                                // Log non-OK results but don't spam
+                                // Only log non-OK results if finger is not detected
+                                // This prevents spam when no finger is present
                                 Console.WriteLine($"Inside sensor result: {result}");
+                                this.Invoke(new Action(() =>
+                                {
+                                    HandleSensorScan(false, matchIndex, "inside");
+                                }));
                             }
                         }
                         catch (InvalidOperationException ex)
@@ -9708,14 +9896,31 @@ namespace FutronicAttendanceSystem
                     // When multiple devices are present, SDK manages device access
                     Console.WriteLine($"Outside sensor configured (device index: {deviceConfig?.OutsideSensor?.SensorIndex ?? 1})");
                     
-                    // Wire up events
-                    m_OutsideSensorOperation.OnPutOn += (progress) =>
-                    {
-                        this.Invoke(new Action(() =>
-                        {
-                            dualSensorPanel?.UpdateOutsideStatus("Scanning...");
-                        }));
-                    };
+                                          // Wire up events
+                      m_OutsideSensorOperation.OnPutOn += (progress) =>
+                      {
+                                                     // Track valid finger placement on outside sensor
+                           isFingerOnOutsideSensor = true;
+                           Console.WriteLine("👆 Finger detected on outside sensor - preventing repeated scans");
+                           this.Invoke(new Action(() =>
+                           {
+                               dualSensorPanel?.UpdateOutsideStatus("Scanning...");
+                           }));
+                      };
+                      
+                      m_OutsideSensorOperation.OnTakeOff += (progress) =>
+                      {
+                          // Only mark as removed if we actually had a finger on
+                          // Add delay to prevent false positives
+                          if (isFingerOnOutsideSensor)
+                          {
+                              System.Threading.Tasks.Task.Delay(300).ContinueWith(_ =>
+                              {
+                                  isFingerOnOutsideSensor = false;
+                                  Console.WriteLine("👆 Finger removed from outside sensor - ready for next scan");
+                              });
+                          }
+                      };
                     
                     m_OutsideSensorOperation.UpdateScreenImage += (bitmap) =>
                     {
@@ -9738,18 +9943,25 @@ namespace FutronicAttendanceSystem
                         dualSensorPanel?.UpdateOutsideStatus("Active");
                     }));
                     
-                    // Start continuous identification
-                    while (!m_bExit && m_OutsideSensorEnabled)
-                    {
-                        int matchIndex = -1;
-                        try
-                        {
-                            // Check if operation is still valid
-                            if (m_OutsideSensorOperation == null)
-                            {
-                                Console.WriteLine("❌ Outside sensor operation is null, stopping...");
-                                break;
-                            }
+                                          // Start continuous identification
+                      while (!m_bExit && m_OutsideSensorEnabled)
+                      {
+                          // Skip scan if finger is still on scanner (prevents repeated scans)
+                          if (isFingerOnOutsideSensor)
+                          {
+                              System.Threading.Thread.Sleep(200); // Short sleep while finger is on
+                              continue;
+                          }
+                          
+                          int matchIndex = -1;
+                          try
+                          {
+                              // Check if operation is still valid
+                              if (m_OutsideSensorOperation == null)
+                              {
+                                  Console.WriteLine("❌ Outside sensor operation is null, stopping...");
+                                  break;
+                              }
                             
                             // Convert UserRecord list to FtrIdentifyRecord array
                             var records = new FtrIdentifyRecord[m_IdentificationUsers.Count];
@@ -9758,19 +9970,26 @@ namespace FutronicAttendanceSystem
                                 records[i] = m_IdentificationUsers[i].GetRecord();
                             }
                             
-                            var result = m_OutsideSensorOperation.Identification(records, ref matchIndex);
-                            if (result == FutronicSdkBase.RETCODE_OK)
-                            {
-                                this.Invoke(new Action(() =>
-                                {
-                                    HandleSensorScan(true, matchIndex, "outside");
-                                }));
-                            }
-                            else
-                            {
-                                // Log non-OK results but don't spam
-                                Console.WriteLine($"Outside sensor result: {result}");
-                            }
+                                                          var result = m_OutsideSensorOperation.Identification(records, ref matchIndex);
+                              if (result == FutronicSdkBase.RETCODE_OK)
+                              {
+                                  // Reset finger-on flag after successful identification
+                                  isFingerOnOutsideSensor = false;
+                                  
+                                  this.Invoke(new Action(() =>
+                                  {
+                                      HandleSensorScan(true, matchIndex, "outside");
+                                  }));
+                              }
+                              else if (!isFingerOnOutsideSensor) // Only handle no-match if finger is not still on
+                              {
+                                  // Log non-OK results but don't spam
+                                  Console.WriteLine($"Outside sensor result: {result}");
+                                  this.Invoke(new Action(() =>
+                                  {
+                                      HandleSensorScan(false, matchIndex, "outside");
+                                  }));
+                              }
                         }
                         catch (InvalidOperationException ex)
                         {
@@ -9870,6 +10089,28 @@ namespace FutronicAttendanceSystem
                     {
                         var matchedUser = users[matchIndex];
                         string userName = matchedUser.UserName ?? "Unknown User";
+                        
+                        // Debouncing: Prevent processing the same scan multiple times
+                        var timeSinceLastProcess = DateTime.Now - lastProcessedTime;
+                        if (userName == lastProcessedUser && timeSinceLastProcess.TotalMilliseconds < DEBOUNCE_INTERVAL_MS)
+                        {
+                            Console.WriteLine($"⏳ Debouncing {userName} scan - skipping duplicate processing");
+                            return; // Skip duplicate processing
+                        }
+                        
+                        // Update debouncing variables for successful match
+                        lastProcessedUser = userName;
+                        lastProcessedTime = DateTime.Now;
+                        
+                        // Reset finger-on flag after successful match
+                        if (location == "inside")
+                        {
+                            isFingerOnInsideSensor = false;
+                        }
+                        else if (location == "outside")
+                        {
+                            isFingerOnOutsideSensor = false;
+                        }
 
                         // ENHANCED DEBUGGING: Track detailed match information
                         Console.WriteLine($"🔍 FINGERPRINT MATCH DEBUG:");
@@ -10047,9 +10288,58 @@ namespace FutronicAttendanceSystem
                     {
                         Console.WriteLine($"   ⚠️ Match index is negative - possible poor fingerprint quality");
                     }
-                    else if (matchIndex >= users.Count)
+                                          else if (matchIndex >= users.Count)
+                      {
+                          Console.WriteLine($"   ⚠️ Match index ({matchIndex}) >= users count ({users.Count}) - SDK returned invalid index");
+                      }
+                      
+                    // Reset valid placement on failure
+                    hasValidFingerPlacement = false;
+                      
+                    // Don't log unknown scans while finger is still on scanner (prevents spam)
+                    // Check the appropriate sensor based on location
+                    bool fingerOnThisSensor = (location == "inside") ? isFingerOnInsideSensor : 
+                                             (location == "outside") ? isFingerOnOutsideSensor : 
+                                             isFingerOnScanner;
+                    
+                    if (!fingerOnThisSensor)
                     {
-                        Console.WriteLine($"   ⚠️ Match index ({matchIndex}) >= users count ({users.Count}) - SDK returned invalid index");
+                        // Debounce unknown scan logging to prevent spam
+                        var timeSinceLastUnknownLog = DateTime.Now - lastUnknownScanLogTime;
+                        if (timeSinceLastUnknownLog.TotalMilliseconds >= UNKNOWN_SCAN_DEBOUNCE_MS)
+                        {
+                            // Log unknown fingerprint scan to ACCESSLOGS table
+                            try
+                            {
+                                if (dbManager != null)
+                                {
+                                    dbManager.LogAccessAttempt(
+                                        userId: null, // NULL for unknown user
+                                        roomId: null, // Will use CurrentRoomId from DatabaseManager
+                                        authMethod: "Fingerprint",
+                                        location: location ?? "inside",
+                                        accessType: "attendance_scan",
+                                        result: "denied",
+                                        reason: $"Unknown fingerprint - no match found (matchIndex: {matchIndex}, success: {success})"
+                                    );
+                                    Console.WriteLine($"📝 Logged unknown fingerprint scan to ACCESSLOGS: {location} sensor");
+                                    lastUnknownScanLogTime = DateTime.Now;
+                                }
+                            }
+                            catch (Exception logEx)
+                            {
+                                Console.WriteLine($"⚠️ Failed to log unknown fingerprint scan: {logEx.Message}");
+                                // Continue even if logging fails
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine($"⏳ Unknown scan debounced - waiting {Math.Ceiling((UNKNOWN_SCAN_DEBOUNCE_MS - timeSinceLastUnknownLog.TotalMilliseconds) / 1000)}s before logging again");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("⏸️ Skipping unknown scan log - finger still on scanner");
                     }
                     
                     if (location == "inside")
