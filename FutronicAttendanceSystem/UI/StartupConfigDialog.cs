@@ -23,12 +23,14 @@ namespace FutronicAttendanceSystem.UI
         private List<Room> availableRooms;
         private List<UsbDeviceInfo> availableDevices;
         private DatabaseManager dbManager;
+        private DeviceConfiguration currentConfig;
 
         public DeviceConfiguration SelectedConfiguration { get; private set; }
 
-        public StartupConfigDialog(DatabaseManager db)
+        public StartupConfigDialog(DatabaseManager db, DeviceConfiguration existingConfig = null)
         {
             this.dbManager = db;
+            this.currentConfig = existingConfig;
             InitializeDialog();
             LoadRoomsAndDevices();
         }
@@ -240,7 +242,21 @@ namespace FutronicAttendanceSystem.UI
                 }
                 cmbRoom.DisplayMember = "DisplayName";
 
-                if (cmbRoom.Items.Count > 0)
+                // Preselect current room if available
+                if (currentConfig != null && !string.IsNullOrEmpty(currentConfig.RoomId))
+                {
+                    var matchRoom = availableRooms?.FirstOrDefault(r => r.RoomId == currentConfig.RoomId);
+                    if (matchRoom != null)
+                    {
+                        cmbRoom.SelectedItem = matchRoom;
+                    }
+                    else if (cmbRoom.Items.Count > 0)
+                    {
+                        // Fallback to first item
+                        cmbRoom.SelectedIndex = 0;
+                    }
+                }
+                else if (cmbRoom.Items.Count > 0)
                 {
                     cmbRoom.SelectedIndex = 0;
                 }
@@ -270,23 +286,68 @@ namespace FutronicAttendanceSystem.UI
                     cmbOutsideSensor.Items.Add(device);
                 }
 
-                // Select first real device for inside, None for outside by default
-                if (cmbInsideSensor.Items.Count > 1)
+                // Preselect sensors based on existing configuration (or sensible defaults)
+                int GetIndexForSensor(SensorConfig sensor)
                 {
-                    cmbInsideSensor.SelectedIndex = 1;  // First real device
+                    if (sensor == null)
+                    {
+                        return 0; // None
+                    }
+
+                    // Try by DeviceIndex first
+                    var byIndex = availableDevices?.FirstOrDefault(d => d.DeviceIndex == sensor.SensorIndex);
+                    if (byIndex != null)
+                    {
+                        // +1 because index 0 is the None option we inserted
+                        var idx = 1 + availableDevices.IndexOf(byIndex);
+                        return idx >= 0 ? idx : 0;
+                    }
+
+                    // Fallback by device path
+                    var byPath = availableDevices?.FirstOrDefault(d => string.Equals(d.DevicePath, sensor.UsbDevicePath, StringComparison.OrdinalIgnoreCase));
+                    if (byPath != null)
+                    {
+                        var idx = 1 + availableDevices.IndexOf(byPath);
+                        return idx >= 0 ? idx : 0;
+                    }
+
+                    return 0; // None if not found
+                }
+
+                // Inside sensor selection
+                if (currentConfig != null)
+                {
+                    cmbInsideSensor.SelectedIndex = GetIndexForSensor(currentConfig.InsideSensor);
                 }
                 else
                 {
-                    cmbInsideSensor.SelectedIndex = 0;  // None if no devices
+                    // Default: first real device if any
+                    cmbInsideSensor.SelectedIndex = cmbInsideSensor.Items.Count > 1 ? 1 : 0;
                 }
 
-                if (cmbOutsideSensor.Items.Count > 2)
+                // Outside sensor selection
+                if (currentConfig != null)
                 {
-                    cmbOutsideSensor.SelectedIndex = 1; // Select second device by default
+                    cmbOutsideSensor.SelectedIndex = GetIndexForSensor(currentConfig.OutsideSensor);
                 }
-                else if (cmbOutsideSensor.Items.Count > 0)
+                else
                 {
-                    cmbOutsideSensor.SelectedIndex = 0; // Same device (test mode)
+                    // Default: None if only one device; otherwise second device when available
+                    if (cmbOutsideSensor.Items.Count > 2)
+                    {
+                        cmbOutsideSensor.SelectedIndex = 2 - 1; // second real device -> index 2 overall, but safer to leave as default behavior
+                        cmbOutsideSensor.SelectedIndex = 1;
+                    }
+                    else if (cmbOutsideSensor.Items.Count > 0)
+                    {
+                        cmbOutsideSensor.SelectedIndex = 0;
+                    }
+                }
+
+                // Test mode checkbox from current config
+                if (currentConfig != null)
+                {
+                    chkTestMode.Checked = currentConfig.TestMode;
                 }
 
                 lblStatus.Text = $"✓ Found {cmbRoom.Items.Count} room(s) and {availableDevices.Count} sensor(s)";

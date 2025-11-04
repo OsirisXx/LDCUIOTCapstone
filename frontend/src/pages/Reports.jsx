@@ -92,22 +92,128 @@ function Reports() {
     }
   };
 
+  // Helper function to normalize date to YYYY-MM-DD format
+  const normalizeDate = (dateValue) => {
+    if (!dateValue) return '';
+    // If it's already in YYYY-MM-DD format, return as is
+    if (typeof dateValue === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
+      return dateValue;
+    }
+    // If it's an ISO string, extract just the date part
+    if (typeof dateValue === 'string' && dateValue.includes('T')) {
+      return dateValue.split('T')[0];
+    }
+    // Otherwise, try to parse and format
+    const date = new Date(dateValue);
+    return date.toISOString().split('T')[0];
+  };
+
+  // Helper function to format date from YYYY-MM-DD string without timezone issues
+  const formatDateString = (dateString) => {
+    if (!dateString) return '';
+    // Parse YYYY-MM-DD as local date to avoid timezone conversion issues
+    const [year, month, day] = dateString.split('-').map(Number);
+    const date = new Date(year, month - 1, day); // month is 0-indexed
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric'
+    });
+  };
+
+  // Helper function to normalize time to HH:MM:SS format
+  const normalizeTime = (timeValue) => {
+    if (!timeValue) return '';
+    
+    // Convert to string and trim whitespace
+    const timeStr = String(timeValue).trim();
+    
+    // If it's already in HH:MM:SS format, return as is
+    if (/^\d{2}:\d{2}:\d{2}$/.test(timeStr)) {
+      return timeStr;
+    }
+    
+    // Extract HH:MM:SS from various formats
+    // Handles: HH:MM:SS, HH:MM:SS.microseconds, HH:MM, HH:MM:SS:extra, etc.
+    const match = timeStr.match(/^(\d{2}):(\d{2})(?::(\d{2}))?(?:\.|:|\s|$)/);
+    if (match) {
+      const hours = match[1].padStart(2, '0');
+      const minutes = match[2].padStart(2, '0');
+      const seconds = (match[3] || '00').padStart(2, '0');
+      return `${hours}:${minutes}:${seconds}`;
+    }
+    
+    // If it's a Date object, extract time part
+    if (timeValue instanceof Date) {
+      const hours = String(timeValue.getHours()).padStart(2, '0');
+      const minutes = String(timeValue.getMinutes()).padStart(2, '0');
+      const seconds = String(timeValue.getSeconds()).padStart(2, '0');
+      return `${hours}:${minutes}:${seconds}`;
+    }
+    
+    console.warn('Could not normalize time:', timeValue);
+    return timeStr;
+  };
+
   const groupReports = useCallback((reports) => {
     if (groupBy === 'subject') {
       // Create hierarchical structure: Subject -> Sessions
       const hierarchicalGrouped = {};
       
       reports.forEach(report => {
-        // Use local date to avoid timezone issues
-        const attendanceDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toLocaleDateString('en-CA'); // YYYY-MM-DD format
-        const dayOfWeek = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
-        const roomNumber = report.ROOMNUMBER || 'Unknown Room';
+        // Use ATTENDANCE_DATE from database, or extract date from SCANDATETIME
+        // Handle DATE field which might be a Date object or string
+        let dateValue = report.ATTENDANCE_DATE;
+        if (!dateValue && report.SCANDATETIME) {
+          // If SCANDATETIME is a string like "2025-11-04 21:55:00", extract just the date part
+          if (typeof report.SCANDATETIME === 'string') {
+            dateValue = report.SCANDATETIME.split(' ')[0] || report.SCANDATETIME.split('T')[0];
+          } else {
+            // If it's a Date object, format it as YYYY-MM-DD in local timezone
+            const date = new Date(report.SCANDATETIME);
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            dateValue = `${year}-${month}-${day}`;
+          }
+        }
+        const attendanceDate = normalizeDate(dateValue);
+        // Get day of week from the normalized date to avoid timezone issues
+        let dayOfWeek = report.DAYOFWEEK;
+        if (!dayOfWeek && attendanceDate) {
+          const [year, month, day] = attendanceDate.split('-').map(Number);
+          const date = new Date(year, month - 1, day);
+          dayOfWeek = date.toLocaleDateString('en-US', { weekday: 'long' });
+        }
         
+        // Debug log for date issues
+        if (attendanceDate && attendanceDate.includes('2025-11-03')) {
+          console.log('⚠️ Date issue detected:', {
+            attendanceDate,
+            ATTENDANCE_DATE: report.ATTENDANCE_DATE,
+            SCANDATETIME: report.SCANDATETIME,
+            dayOfWeek,
+            DAYOFWEEK: report.DAYOFWEEK
+          });
+        }
+        const roomNumber = report.ROOMNUMBER || 'Unknown Room';
+        const startTime = normalizeTime(report.STARTTIME);
+        
+        // Debug log for time issues
+        if (startTime && startTime.includes(':')) {
+          const parts = startTime.split(':');
+          if (parts.length > 3) {
+            console.warn('⚠️ Time normalization issue:', {
+              original: report.STARTTIME,
+              normalized: startTime,
+              parts
+            });
+          }
+        }
         
         // Subject key
         const subjectKey = `${report.SUBJECTCODE}-${report.SUBJECTNAME}`;
-        // Session key within subject
-        const sessionKey = `${attendanceDate}-${roomNumber}-${report.STARTTIME}`;
+        // Session key within subject - use normalized date and time
+        const sessionKey = `${attendanceDate}-${roomNumber}-${startTime}`;
         
         // Initialize subject if not exists
         if (!hierarchicalGrouped[subjectKey]) {
@@ -120,16 +226,20 @@ function Reports() {
               present: 0,
               late: 0,
               absent: 0
+            },
+            // Internal sets for unique counting at subject level
+            __sets: {
+              totalUsers: new Set(),
+              presentUsers: new Set(),
+              lateUsers: new Set(),
+              absentUsers: new Set()
             }
           };
         }
         
         // Initialize session if not exists
         if (!hierarchicalGrouped[subjectKey].sessions[sessionKey]) {
-          const sessionTitle = `${dayOfWeek || 'Unknown Day'}, ${new Date(attendanceDate).toLocaleDateString('en-US', { 
-            month: 'short', 
-            day: 'numeric' 
-          })}`;
+          const sessionTitle = `${dayOfWeek || 'Unknown Day'}, ${formatDateString(attendanceDate)}`;
           const sessionSubtitle = `Room ${roomNumber || 'Unknown Room'} • ${formatTime(report.STARTTIME) || 'Unknown Time'} - ${formatTime(report.ENDTIME) || 'Unknown Time'}`;
           
           
@@ -142,25 +252,59 @@ function Reports() {
               present: 0,
               late: 0,
               absent: 0
+            },
+            // Internal sets for unique counting at session level
+            __sets: {
+              totalUsers: new Set(),
+              presentUsers: new Set(),
+              lateUsers: new Set(),
+              absentUsers: new Set()
             }
           };
         }
         
         // Add report to session
         hierarchicalGrouped[subjectKey].sessions[sessionKey].reports.push(report);
-        hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.total++;
         const displayStatus = report.DISPLAY_STATUS || report.STATUS;
-        if (displayStatus === 'Present' || displayStatus === 'Early') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.present++;
-        else if (displayStatus === 'Late') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.late++;
-        else if (displayStatus === 'Absent') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.absent++;
-        
-        // Update subject totals
-        hierarchicalGrouped[subjectKey].stats.total++;
-        if (displayStatus === 'Present' || displayStatus === 'Early') hierarchicalGrouped[subjectKey].stats.present++;
-        else if (displayStatus === 'Late') hierarchicalGrouped[subjectKey].stats.late++;
-        else if (displayStatus === 'Absent') hierarchicalGrouped[subjectKey].stats.absent++;
+        // Use STUDENTID only for counting to exclude instructors
+        const userId = report.STUDENTID;
+
+        // Update session unique sets
+        if (userId) {
+          const sessionSets = hierarchicalGrouped[subjectKey].sessions[sessionKey].__sets;
+          sessionSets.totalUsers.add(userId);
+          if (displayStatus === 'Present' || displayStatus === 'Early') sessionSets.presentUsers.add(userId);
+          else if (displayStatus === 'Late') sessionSets.lateUsers.add(userId);
+          else if (displayStatus === 'Absent') sessionSets.absentUsers.add(userId);
+        }
+
+        // Update subject unique sets
+        if (userId) {
+          const subjectSets = hierarchicalGrouped[subjectKey].__sets;
+          subjectSets.totalUsers.add(userId);
+          if (displayStatus === 'Present' || displayStatus === 'Early') subjectSets.presentUsers.add(userId);
+          else if (displayStatus === 'Late') subjectSets.lateUsers.add(userId);
+          else if (displayStatus === 'Absent') subjectSets.absentUsers.add(userId);
+        }
       });
       
+      // Finalize counts from sets
+      Object.values(hierarchicalGrouped).forEach(subject => {
+        // Subject-level totals
+        subject.stats.total = subject.__sets.totalUsers.size;
+        subject.stats.present = subject.__sets.presentUsers.size;
+        subject.stats.late = subject.__sets.lateUsers.size;
+        subject.stats.absent = subject.__sets.absentUsers.size;
+        
+        // Sessions under this subject
+        Object.values(subject.sessions).forEach(session => {
+          session.stats.total = session.__sets.totalUsers.size;
+          session.stats.present = session.__sets.presentUsers.size;
+          session.stats.late = session.__sets.lateUsers.size;
+          session.stats.absent = session.__sets.absentUsers.size;
+        });
+      });
+
       setGroupedReports(hierarchicalGrouped);
     } else {
       // Original flat grouping for other modes
@@ -185,16 +329,32 @@ function Reports() {
             break;
           case 'session':
             // Enhanced session grouping with day and room
-            // Use local date to avoid timezone issues
-            const sessionDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toLocaleDateString('en-CA'); // YYYY-MM-DD format
-            const sessionDay = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
+            // Use ATTENDANCE_DATE from database, or extract date from SCANDATETIME
+            let sessionDateValue = report.ATTENDANCE_DATE;
+            if (!sessionDateValue && report.SCANDATETIME) {
+              if (typeof report.SCANDATETIME === 'string') {
+                sessionDateValue = report.SCANDATETIME.split(' ')[0] || report.SCANDATETIME.split('T')[0];
+              } else {
+                const date = new Date(report.SCANDATETIME);
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                sessionDateValue = `${year}-${month}-${day}`;
+              }
+            }
+            const sessionDate = normalizeDate(sessionDateValue);
+            // Get day of week from the normalized date to avoid timezone issues
+            let sessionDay = report.DAYOFWEEK;
+            if (!sessionDay && sessionDate) {
+              const [year, month, day] = sessionDate.split('-').map(Number);
+              const date = new Date(year, month - 1, day);
+              sessionDay = date.toLocaleDateString('en-US', { weekday: 'long' });
+            }
             const sessionRoom = report.ROOMNUMBER || 'Unknown Room';
-            key = `${report.SUBJECTCODE}-${sessionDate}-${sessionRoom}-${report.STARTTIME}`;
+            const sessionStartTime = normalizeTime(report.STARTTIME);
+            key = `${report.SUBJECTCODE}-${sessionDate}-${sessionRoom}-${sessionStartTime}`;
             title = `${report.SUBJECTCODE} - ${sessionDay}`;
-            subtitle = `${new Date(sessionDate).toLocaleDateString('en-US', { 
-              month: 'short', 
-              day: 'numeric' 
-            })} • Room ${sessionRoom} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`;
+            subtitle = `${formatDateString(sessionDate)} • Room ${sessionRoom} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`;
             break;
           default:
             key = 'all';
@@ -277,7 +437,8 @@ function Reports() {
       
       // Calculate statistics
       const stats = {
-        totalStudents: new Set(reports.map(r => r.USERID || r.STUDENTID)).size,
+        // Count only students (identified by STUDENTID)
+        totalStudents: new Set(reports.map(r => r.STUDENTID).filter(Boolean)).size,
         presentCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Present' || (r.DISPLAY_STATUS || r.STATUS) === 'Early').length,
         lateCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Late').length,
         absentCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Absent').length
@@ -340,7 +501,9 @@ function Reports() {
         if (response.data.session?.instructor) {
           setSelectedGroup(prev => ({
             ...prev,
-            instructor: response.data.session.instructor
+            instructor: response.data.session.instructor,
+            instructorStatus: response.data.session.instructorStatus,
+            instructorScanTime: response.data.session.instructorScanTime
           }));
         }
       } else {
@@ -573,6 +736,12 @@ function Reports() {
                   <span className="text-lg font-bold text-blue-900">
                     {selectedGroup?.instructor || (rosterLoading ? 'Loading...' : 'Not assigned')}
                   </span>
+                  {selectedGroup?.instructor && (
+                    <span className={`ml-3 inline-flex items-center px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(selectedGroup?.instructorStatus)}`}>
+                      {getStatusIcon(selectedGroup?.instructorStatus)}
+                      <span className="ml-1">{selectedGroup?.instructorStatus || 'Unknown'}</span>
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -644,9 +813,8 @@ function Reports() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Status
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Time Scanned
-                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sign In</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sign Out</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -679,12 +847,18 @@ function Reports() {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="text-sm text-gray-900">
-                          {student.TIME_SCANNED 
-                            ? formatTime(student.TIME_SCANNED)
-                            : student.SCANDATETIME 
-                              ? formatDateTime(student.SCANDATETIME)
-                              : <span className="text-gray-400">—</span>
-                          }
+                          {student.SIGNIN
+                            ? formatTime(new Date(student.SIGNIN).toTimeString().slice(0,5) + ':00')
+                            : (student.SCANDATETIME
+                              ? formatTime(new Date(student.SCANDATETIME).toTimeString().slice(0,5) + ':00')
+                              : <span className="text-gray-400">—</span>)}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {student.SIGNOUT
+                            ? formatTime(new Date(student.SIGNOUT).toTimeString().slice(0,5) + ':00')
+                            : <span className="text-gray-400">—</span>}
                         </div>
                       </td>
                     </tr>
@@ -862,6 +1036,12 @@ function Reports() {
                   <span className="text-lg font-bold text-blue-900">
                     {selectedGroup?.instructor || (rosterLoading ? 'Loading...' : 'Not assigned')}
                   </span>
+                  {selectedGroup?.instructor && (
+                    <span className={`ml-3 inline-flex items-center px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(selectedGroup?.instructorStatus)}`}>
+                      {getStatusIcon(selectedGroup?.instructorStatus)}
+                      <span className="ml-1">{selectedGroup?.instructorStatus || 'Unknown'}</span>
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -977,9 +1157,8 @@ function Reports() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Status
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Time Scanned
-                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sign In</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sign Out</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -1012,12 +1191,18 @@ function Reports() {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="text-sm text-gray-900">
-                          {student.TIME_SCANNED 
-                            ? formatTime(student.TIME_SCANNED)
-                            : student.SCANDATETIME 
-                              ? formatDateTime(student.SCANDATETIME)
-                              : <span className="text-gray-400">—</span>
-                          }
+                          {student.SIGNIN
+                            ? formatTime(new Date(student.SIGNIN).toTimeString().slice(0,5) + ':00')
+                            : (student.SCANDATETIME
+                              ? formatTime(new Date(student.SCANDATETIME).toTimeString().slice(0,5) + ':00')
+                              : <span className="text-gray-400">—</span>)}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {student.SIGNOUT
+                            ? formatTime(new Date(student.SIGNOUT).toTimeString().slice(0,5) + ':00')
+                            : <span className="text-gray-400">—</span>}
                         </div>
                       </td>
                     </tr>

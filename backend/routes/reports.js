@@ -36,11 +36,11 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 s.SUBJECTCODE,
                 r.ROOMNUMBER,
                 cs.DAYOFWEEK,
-                cs.STARTTIME,
-                cs.ENDTIME,
+                TIME_FORMAT(cs.STARTTIME, '%H:%i:%s') as STARTTIME,
+                TIME_FORMAT(cs.ENDTIME, '%H:%i:%s') as ENDTIME,
                 cs.ACADEMICYEAR,
                 cs.SEMESTER,
-                ar.DATE as ATTENDANCE_DATE
+                DATE_FORMAT(ar.DATE, '%Y-%m-%d') as ATTENDANCE_DATE
             FROM ATTENDANCERECORDS ar
             JOIN USERS u ON ar.USERID = u.USERID
             LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID

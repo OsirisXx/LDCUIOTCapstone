@@ -67,7 +67,8 @@ function AttendanceLogs() {
       });
 
       setLogs(response.data.logs || []);
-      setTotalPages(Math.ceil((response.data.total || 0) / logsPerPage));
+      // Use totalPages from response if available, otherwise calculate from total
+      setTotalPages(response.data.totalPages || Math.ceil((response.data.total || 0) / logsPerPage));
       setLastUpdated(new Date());
     } catch (error) {
       console.error('Error fetching attendance logs:', error);
@@ -103,10 +104,11 @@ function AttendanceLogs() {
         return id && !currentIds.has(id);
       });
 
-      if (newItems.length > 0) {
+              if (newItems.length > 0) {
         const merged = [...newItems, ...logs].slice(0, logsPerPage);
         setLogs(merged);
-        setTotalPages(Math.ceil((response.data.total || 0) / logsPerPage));
+        // Use totalPages from response if available, otherwise calculate from total
+        setTotalPages(response.data.totalPages || Math.ceil((response.data.total || 0) / logsPerPage));
         setLastUpdated(new Date());
 
         // Animate only once per ID: pick the top-most unseen new ID
@@ -166,11 +168,11 @@ function AttendanceLogs() {
           <div className={`flex items-center ${animateClasses}`}>
             <ClockIcon className="h-5 w-5 text-gray-400 mr-2" />
             <div>
-              <div className="text-sm text-gray-900">
-                {formatDateTime(log.SCANDATETIME)}
+              <div className="text-sm font-medium text-gray-900">
+                {formatDate(log.SCANDATETIME || log.DATE)}
               </div>
               <div className="text-sm text-gray-500">
-                {log.DATE}
+                {formatTime(log.SCANDATETIME)}
               </div>
             </div>
           </div>
@@ -188,12 +190,7 @@ function AttendanceLogs() {
             {log.ACTIONTYPE || 'N/A'}
           </div>
         </td>
-        <td className="px-6 py-4 whitespace-nowrap">
-          <div className={`flex items-center ${animateClasses}`}>
-            <FingerPrintIcon className="h-5 w-5 text-purple-500 mr-2" />
-            <span className="text-sm text-gray-900">{log.AUTHMETHOD || 'Fingerprint'}</span>
-          </div>
-        </td>
+        {/* Methods column removed */}
         <td className="px-6 py-4 whitespace-nowrap">
           <div className={`flex items-center ${animateClasses}`}>
             <MapPinIcon className="h-5 w-5 text-gray-400 mr-2" />
@@ -262,7 +259,35 @@ function AttendanceLogs() {
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
-      second: '2-digit'
+      second: '2-digit',
+      hour12: true
+    });
+  };
+
+  const formatDate = (dateValue) => {
+    if (!dateValue) return '';
+    
+    // Handle both date strings and datetime strings
+    const date = new Date(dateValue);
+    
+    // Format as a simple date: "Nov 3, 2025"
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    });
+  };
+
+  const formatTime = (dateTime) => {
+    if (!dateTime) return '';
+    
+    const date = new Date(dateTime);
+    
+    // Format as time only: "08:14 PM"
+    return date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
     });
   };
 
@@ -381,7 +406,7 @@ function AttendanceLogs() {
         ) : (
           <>
             <div className="overflow-x-auto">
-              <div className="max-h-96 overflow-y-auto">
+              <div>
                 <table className="min-w-full divide-y divide-gray-200 transition-opacity duration-300">
                 <thead className="bg-gray-50">
                   <tr>
@@ -397,9 +422,7 @@ function AttendanceLogs() {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Action Type
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Method
-                    </th>
+                    {/* Methods column header removed */}
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Location
                     </th>

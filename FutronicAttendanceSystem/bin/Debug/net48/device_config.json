@@ -1,14 +1,14 @@
 {
-  "RoomId": "9fa2ebc6-9e6f-40f6-8a23-37bbda782571",
-  "RoomName": "WAC-201 - WAC-201 (WAC)",
+  "RoomId": "04131251-7cf9-405f-9680-086845bffc29",
+  "RoomName": "WAC-203 - WAC-203 (WAC)",
   "Building": "WAC",
-  "InsideSensor": null,
-  "OutsideSensor": {
+  "InsideSensor": {
     "UsbDevicePath": "USB\\VID_1491&PID_0020\\FS00000000",
-    "DeviceId": "WAC-201_Outside",
+    "DeviceId": "WAC-203_Inside",
     "Enabled": true,
     "SensorIndex": 0
   },
+  "OutsideSensor": null,
   "TestMode": false,
-  "LastUpdated": "2025-11-04T15:20:54.6847096+08:00"
+  "LastUpdated": "2025-11-04T23:21:13.4138418+08:00"
 }

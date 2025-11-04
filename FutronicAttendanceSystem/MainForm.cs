@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -878,7 +878,7 @@ namespace FutronicAttendanceSystem
             { 
                 Dock = DockStyle.Top, 
                 Height = 45, 
-                Text = "🔑 RFID Card:\n• Select a user from the table\n• Click 'Assign RFID' in Actions column\n• Scan RFID card when prompted", 
+                Text = "🔑 RFID Card:\n• Double-click a user from the table\n• Click 'Assign RFID' in Actions column\n• Scan RFID card when prompted", 
                 Font = new Font("Segoe UI", 9, FontStyle.Regular),
                 ForeColor = Color.FromArgb(60, 90, 140),
                 Padding = new Padding(0, 5, 0, 0)
@@ -889,7 +889,7 @@ namespace FutronicAttendanceSystem
             { 
                 Dock = DockStyle.Top, 
                 Height = 60, 
-                Text = "📷 Fingerprint:\n• Select a user from the table\n• Click 'Start Enrollment'\n• Place thumb on sensor 3-4 times until complete", 
+                Text = "📷 Fingerprint:\n• Double-click a user from the table\n• Click 'Start Enrollment'\n• Place thumb on sensor 3-4 times until complete", 
                 Font = new Font("Segoe UI", 9, FontStyle.Regular),
                 ForeColor = Color.FromArgb(60, 90, 140),
                 Padding = new Padding(0, 5, 0, 0)
@@ -1782,6 +1782,21 @@ namespace FutronicAttendanceSystem
                     if (string.IsNullOrEmpty(rfidTag))
                     {
                         MessageBox.Show("Please enter an RFID tag code.", "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    // Check if RFID tag is already assigned to another user
+                    var existingUser = dbManager.GetUserByRfidTag(rfidTag);
+                    if (existingUser != null && existingUser.EmployeeId != user.EmployeeId)
+                    {
+                        var assignedTo = (!string.IsNullOrWhiteSpace(existingUser.FirstName) || !string.IsNullOrWhiteSpace(existingUser.LastName))
+                            ? ($"{existingUser.FirstName} {existingUser.LastName}".Trim())
+                            : (!string.IsNullOrWhiteSpace(existingUser.Username) ? existingUser.Username : "another user");
+                        MessageBox.Show(
+                            $"RFID tag '{rfidTag}' is already assigned to {assignedTo}.\n\nPlease use a different RFID tag or remove it from the existing user first.",
+                            "Duplicate RFID Tag",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
                         return;
                     }
 
@@ -3668,6 +3683,9 @@ namespace FutronicAttendanceSystem
                     }
                 });
                 
+                // Also record attendance so it appears in web logs
+                RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                
                 ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
             }
             catch (Exception ex)
@@ -3713,6 +3731,9 @@ namespace FutronicAttendanceSystem
                     };
                     attendanceRecords.Add(doorAccessRecord);
                     UpdateAttendanceDisplay(doorAccessRecord);
+
+                    // Also record administrative access as attendance for visibility
+                    RecordAttendance(userName, "Door Access", true, currentScanLocation);
                 }
                 
                 // Always trigger door access for deans
@@ -8650,49 +8671,7 @@ namespace FutronicAttendanceSystem
             btnReconfigure.Click += BtnReconfigure_Click;
             actionPanel.Controls.Add(btnReconfigure);
             
-            var btnChangeRoom = new Button
-            {
-                Text = "🏫 Change Room",
-                Location = new Point(205, 40),
-                Size = new Size(150, 35),
-                BackColor = Color.FromArgb(108, 117, 125),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                Cursor = Cursors.Hand
-            };
-            btnChangeRoom.FlatAppearance.BorderSize = 0;
-            btnChangeRoom.Click += (s, e) =>
-            {
-                var result = MessageBox.Show(
-                    "Changing the room will restart the configuration.\n\nContinue?",
-                    "Change Room",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question);
-                
-                if (result == DialogResult.Yes)
-                {
-                    DeviceConfigManager.Instance.DeleteConfiguration();
-                    Application.Restart();
-                }
-            };
-            actionPanel.Controls.Add(btnChangeRoom);
-            
-            // Fix Room Assignment button
-            var btnFixRoomAssignment = new Button
-            {
-                Text = "🔧 Fix Room Assignment",
-                Location = new Point(365, 40),
-                Size = new Size(180, 35),
-                BackColor = Color.FromArgb(220, 53, 69),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                Cursor = Cursors.Hand
-            };
-            btnFixRoomAssignment.FlatAppearance.BorderSize = 0;
-            btnFixRoomAssignment.Click += BtnFixRoomAssignment_Click;
-            actionPanel.Controls.Add(btnFixRoomAssignment);
+            // Removed Change Room and Fix Room buttons as requested
             
             mainPanel.Controls.Add(actionPanel);
             
@@ -8700,7 +8679,7 @@ namespace FutronicAttendanceSystem
             var helpPanel = new Panel
             {
                 Location = new Point(30, actionPanel.Bottom + 20),
-                Size = new Size(800, 120),
+                Size = new Size(800, 180),
                 BackColor = Color.FromArgb(230, 244, 255),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
@@ -8726,9 +8705,9 @@ namespace FutronicAttendanceSystem
                 Text = "• Click 'Reconfigure Sensors' to reassign fingerprint devices\n" +
                        "• Sensors can be set to 'None' if you only need one scanner\n" +
                        "• Changes take effect immediately without restarting the application\n" +
-                       "• Use 'Change Room' if you need to select a different room",
+                       "• If you have only one physical device, enable Test Mode to simulate dual sensors",
                 Location = new Point(15, 40),
-                Size = new Size(760, 70),
+                Size = new Size(760, 130),
                 Font = new Font("Segoe UI", 9),
                 ForeColor = Color.FromArgb(52, 58, 64)
             };
@@ -8929,8 +8908,8 @@ namespace FutronicAttendanceSystem
                 System.Threading.Thread.Sleep(500);
                 Application.DoEvents();
                 
-                // Show configuration dialog
-                var dialog = new StartupConfigDialog(dbManager);
+                // Show configuration dialog with current configuration preselected
+                var dialog = new StartupConfigDialog(dbManager, deviceConfig);
                 var result = dialog.ShowDialog();
                 
                 if (result == DialogResult.OK && dialog.SelectedConfiguration != null)

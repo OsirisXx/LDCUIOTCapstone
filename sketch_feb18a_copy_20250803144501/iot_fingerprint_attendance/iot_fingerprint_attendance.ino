@@ -832,6 +832,18 @@ void handleLockControl() {
       return;
     }
     
+    // Custom status display (confirmation/notifications)
+    if (action == "status") {
+      String line1 = doc["line1"] | "Status";
+      String line2 = doc["line2"] | "";
+      String line3 = doc["line3"] | "";
+      String line4 = doc["line4"] | "";
+      displayMessage(line1, line2, line3, line4);
+      beepSuccess();
+      server.send(200, "application/json", "{\"message\":\"Status displayed\",\"action\":\"status\"}");
+      return;
+    }
+
     // Check if this is a denial message (especially for instructors)
     if (action == "denied" || denialReason.length() > 0) {
       Serial.println("❌ DENIAL MESSAGE: Displaying denial on OLED");
@@ -964,7 +976,7 @@ void handleLockControl() {
        Serial.println(denialReason);
      }
      
-     // Handle no-match (unrecognized) RFID scans
+    // Handle no-match (unrecognized) RFID scans
      if (action == "no_match") {
        Serial.println("❌ RFID NO MATCH: Displaying 'No match found' on OLED");
        displayNoMatch();
@@ -973,7 +985,19 @@ void handleLockControl() {
        return;
      }
      
-     // Check if this is a denial message
+    // Custom status display (confirmation/notifications)
+    if (action == "status") {
+      String line1 = doc["line1"] | "Status";
+      String line2 = doc["line2"] | "";
+      String line3 = doc["line3"] | "";
+      String line4 = doc["line4"] | "";
+      displayMessage(line1, line2, line3, line4);
+      beepSuccess();
+      server.send(200, "application/json", "{\"message\":\"RFID status displayed\",\"action\":\"status\"}");
+      return;
+    }
+
+    // Check if this is a denial message
      if (denialReason.length() > 0) {
        Serial.println("❌ RFID DENIAL MESSAGE: Displaying denial on OLED");
        displayInstructorDenial(user, denialReason, userType);
