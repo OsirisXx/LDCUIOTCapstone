@@ -3753,6 +3753,19 @@ namespace FutronicAttendanceSystem
                     {
                         Console.WriteLine($"❌ No active session - denying door access for student {userName}");
                         SetStatusText($"❌ No active session. Door access denied for {userName}.");
+                        
+                        // Send denial message to ESP32 for OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestLockControlDenial(userGuid, userName, "No active session. Instructor must start the session first.", "student");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                            }
+                        });
+                        
                         ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                         return;
                     }
@@ -4230,15 +4243,51 @@ namespace FutronicAttendanceSystem
                     case AttendanceSessionState.Inactive:
                     case AttendanceSessionState.WaitingForInstructor:
                         SetStatusText("❌ No active session. Instructor must start the session first.");
+                        
+                        // Send denial message to ESP32 for OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestLockControlDenial(userGuid, userName, "No active session. Instructor must start the session first.", "student");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                            }
+                        });
                         break;
                         
                     case AttendanceSessionState.WaitingForInstructorSignOut:
                     case AttendanceSessionState.WaitingForInstructorClose:
                         SetStatusText("❌ Session not ready for student actions. Please wait for instructor.");
+                        
+                        // Send denial message to ESP32 for OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestLockControlDenial(userGuid, userName, "Session not ready for student actions. Please wait for instructor.", "student");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                            }
+                        });
                         break;
                         
                     default:
                         SetStatusText("❌ Invalid session state for student action.");
+                        
+                        // Send denial message to ESP32 for OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestLockControlDenial(userGuid, userName, "Invalid session state for student action.", "student");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                            }
+                        });
                         break;
                 }
             }
@@ -4295,28 +4344,16 @@ namespace FutronicAttendanceSystem
                                 };
                                 attendanceRecords.Add(local);
                                 UpdateAttendanceDisplay(local);
-                                
-                                // Request lock control for successful student sign-in
-                                System.Threading.Tasks.Task.Run(async () => {
-                                    try
-                                    {
-                                        await RequestLockControl(user.EmployeeId, "Student Sign-In");
-                                    }
-                                    catch (Exception lockEx)
-                                    {
-                                        Console.WriteLine($"Lock control request failed: {lockEx.Message}");
-                                    }
-                                });
                             }
                             else
                             {
+                                // Student validation failed - send denial message to ESP32
                                 // DENIED: Ensure not marked as signed-in
                                 signedInStudentGuids.Remove(userGuid);
-                                SetStatusText($"❌ {userName}: {attempt.Reason}");
-                                Console.WriteLine($"❌ STUDENT {userName} DENIED: {attempt.Reason}");
+                                SetStatusText($"❌ Student {userName}: {attempt.Reason}");
+                                Console.WriteLine($"❌ STUDENT {userName} SIGN-IN DENIED: {attempt.Reason}");
                                 
-                                // Record denial for display
-                                var local = new Database.Models.AttendanceRecord
+                                var denialRecord = new Database.Models.AttendanceRecord
                                 {
                                     UserId = user.Id,
                                     Username = userName,
@@ -4324,10 +4361,37 @@ namespace FutronicAttendanceSystem
                                     Action = "Student Sign-In",
                                     Status = $"Denied: {attempt.Reason}"
                                 };
-                                attendanceRecords.Add(local);
-                                UpdateAttendanceDisplay(local);
+                                attendanceRecords.Add(denialRecord);
+                                UpdateAttendanceDisplay(denialRecord);
+                                
+                                // Send denial message to ESP32 for OLED display
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestLockControlDenial(userGuid, userName, attempt.Reason ?? "Validation failed", "student");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                    }
+                                });
                             }
                         }));
+                        
+                        // Request lock control for successful student sign-in (only if successful, outside UI thread)
+                        if (attempt.Success)
+                        {
+                            System.Threading.Tasks.Task.Run(async () => {
+                                try
+                                {
+                                    await RequestLockControl(user.EmployeeId, "Student Sign-In");
+                                }
+                                catch (Exception lockEx)
+                                {
+                                    Console.WriteLine($"Lock control request failed: {lockEx.Message}");
+                                }
+                            });
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -4692,12 +4756,20 @@ namespace FutronicAttendanceSystem
                         else
                         {
                             SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
+                            // Notify ESP32 to show 'No match' on OLED
+                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                try { await RequestNoMatchDisplay(); } catch { }
+                            });
                             ScheduleNextGetBaseTemplate(1000);
                         }
                     }
                     else
                     {
                         SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
+                        // Notify ESP32 to show 'No match' on OLED
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try { await RequestNoMatchDisplay(); } catch { }
+                        });
                         ScheduleNextGetBaseTemplate(1000);
                     }
                 }
@@ -5572,6 +5644,123 @@ namespace FutronicAttendanceSystem
             }
         }
 
+        // Display 'No match' on OLED for fingerprint path
+        private async Task RequestNoMatchDisplay()
+        {
+            try
+            {
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                var payload = new { action = "no_match" };
+                var json = JsonSerializer.Serialize(payload);
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await client.PostAsync(esp32Url, content);
+                }
+            }
+            catch { }
+        }
+
+        // Display 'No match' on OLED for RFID path
+        private async Task RequestRfidNoMatchDisplay(string rfidData)
+        {
+            try
+            {
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+
+                string esp32Url = $"http://{esp32Ip}/api/rfid-scan";
+                var payload = new { action = "no_match", rfid_data = rfidData };
+                var json = JsonSerializer.Serialize(payload);
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await client.PostAsync(esp32Url, content);
+                }
+            }
+            catch { }
+        }
+
+        // Request RFID lock control denial message for ESP32 OLED display
+        private async Task RequestRfidLockControlDenial(string userGuid, string userName, string denialReason, string userType, string rfidData)
+        {
+            try
+            {
+                Console.WriteLine("=== RFID LOCK CONTROL DENIAL REQUEST START ===");
+                Console.WriteLine($"User GUID: {userGuid}");
+                Console.WriteLine($"User Name: {userName}");
+                Console.WriteLine($"Denial Reason: {denialReason}");
+                Console.WriteLine($"User Type: {userType}");
+                Console.WriteLine($"RFID Data: {rfidData}");
+
+                // Auto-discover ESP32 on the network
+                string esp32Ip = await DiscoverESP32();
+                
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network - cannot display RFID denial message");
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}/api/rfid-scan";
+                Console.WriteLine($"Sending RFID denial to ESP32: {esp32Url}");
+
+                // Create payload for ESP32 RFID endpoint with denial information
+                var payload = new
+                {
+                    rfid_data = rfidData,
+                    user = userName,
+                    userType = userType?.ToLower(),
+                    sessionActive = false,
+                    denialReason = denialReason
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"RFID Denial Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    
+                    // Add API key to request header for security
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
+                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+                    
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    Console.WriteLine($"ESP32 RFID Denial Response Status: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"ESP32 RFID Denial Response: {responseContent}");
+                        Console.WriteLine($"✅ RFID denial message sent to ESP32 for display");
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"❌ ESP32 RFID denial request failed: {response.StatusCode}");
+                        Console.WriteLine($"Error: {errorContent}");
+                    }
+                }
+                
+                Console.WriteLine("=== RFID LOCK CONTROL DENIAL REQUEST END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending RFID denial to ESP32: {ex.Message}");
+            }
+        }
+
         // Record early arrival using direct database access
         private async Task RecordEarlyArrivalRfid(string userName, string userGuid, string rfidTag)
         {
@@ -5630,6 +5819,18 @@ namespace FutronicAttendanceSystem
                             AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Error");
                         }
                     }));
+                    
+                    // Send denial message to ESP32 for OLED display (RFID)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try
+                        {
+                            await RequestRfidLockControlDenial(userGuid, userName, result.Reason ?? "Early arrival denied", "student", rfidTag);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not send RFID early arrival denial to ESP32: {ex.Message}");
+                        }
+                    });
                 }
                 
                 Console.WriteLine("=== EARLY ARRIVAL RFID SCAN END ===");
@@ -7096,6 +7297,10 @@ namespace FutronicAttendanceSystem
                     Console.WriteLine($"   Check if this RFID is registered: SELECT * FROM USERS WHERE RFIDTAG = '{rfidData}'");
                     SetRfidStatusText($"❌ RFID {rfidData} not registered in database. Please register this card first.");
                     AddRfidAttendanceRecord("System", $"RFID {rfidData} Not Registered", "Error");
+                    // Notify ESP32 to show 'No match' on OLED (RFID path)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
+                    });
                     return;
                 }
                 
@@ -7569,6 +7774,18 @@ namespace FutronicAttendanceSystem
                             Console.WriteLine("   Instructor must start a session first!");
                             SetRfidStatusText($"❌ No active session. Instructor must start attendance session first.");
                             AddRfidAttendanceRecord(userInfo.Username, "Session Not Active", currentSessionState.ToString());
+                            
+                            // Send denial message to ESP32 for OLED display (RFID)
+                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                try
+                                {
+                                    await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, "No active session. Instructor must start the session first.", "student", rfidData);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Warning: Could not send RFID denial to ESP32: {ex.Message}");
+                                }
+                            });
                         }
                     }
                 }
@@ -7596,6 +7813,10 @@ namespace FutronicAttendanceSystem
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
                     AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    // Notify ESP32 to show 'No match' on OLED (RFID path)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
+                    });
                     return;
                 }
                 
@@ -7608,12 +7829,47 @@ namespace FutronicAttendanceSystem
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} belongs to {userName} ({userType}). Only students can sign in during active session.");
                     AddRfidAttendanceRecord(userName, "Access Denied", $"Not Student ({userType})");
+                    
+                    // Send denial message to ESP32 for OLED display (RFID)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try
+                        {
+                            await RequestRfidLockControlDenial(userGuid, userName, $"Access denied. Only students can sign in during active session.", userType, rfidData);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not send RFID denial to ESP32: {ex.Message}");
+                        }
+                    });
                     return;
                 }
                 
                 // Check if student is scanning at outside sensor - door access only, no attendance
                 if (isDualSensorMode && currentScanLocation == "outside")
                 {
+                    // Check if session is active for students (same logic as fingerprint)
+                    if (currentSessionState != AttendanceSessionState.ActiveForStudents &&
+                        currentSessionState != AttendanceSessionState.ActiveForSignOut &&
+                        currentSessionState != AttendanceSessionState.WaitingForInstructorSignOut)
+                    {
+                        Console.WriteLine($"❌ No active session - denying door access for student {userName} (RFID)");
+                        SetRfidStatusText($"❌ No active session. Door access denied for {userName}.");
+                        AddRfidAttendanceRecord(userName, "Door Access Denied", "No Active Session");
+                        
+                        // Send denial message to ESP32 for OLED display (RFID)
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestRfidLockControlDenial(userGuid, userName, "No active session. Instructor must start the session first.", "student", rfidData);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send RFID denial to ESP32: {ex.Message}");
+                            }
+                        });
+                        return;
+                    }
+                    
                     // Outside sensor - door access only, no attendance
                     Console.WriteLine($"🚪 OUTSIDE SENSOR (RFID): {userName} - Door access only (no attendance)");
                     SetRfidStatusText($"🚪 Door access granted: {userName}. Attendance not recorded (outside sensor).");
@@ -7784,6 +8040,10 @@ namespace FutronicAttendanceSystem
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
                     AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    // Notify ESP32 to show 'No match' on OLED (RFID path)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
+                    });
                     return;
                 }
                 

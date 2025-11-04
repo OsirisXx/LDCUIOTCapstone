@@ -44,6 +44,7 @@ function Archive() {
   const [selectedBackupFiles, setSelectedBackupFiles] = useState([]);
   const [availableStudents, setAvailableStudents] = useState([]);
   const [loadingStudents, setLoadingStudents] = useState(false);
+  const [selectedUserType, setSelectedUserType] = useState('all');
   const [availableRooms, setAvailableRooms] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(false);
   const [availableBackups, setAvailableBackups] = useState([]);
@@ -201,7 +202,8 @@ function Archive() {
     
     // Fetch data based on category
     if (category === 'users') {
-      await fetchStudents();
+      setSelectedUserType('all'); // Reset to 'all' when opening modal
+      await fetchUsers('all');
     } else if (category === 'rooms') {
       await fetchRooms();
     } else if (category === 'backups') {
@@ -225,20 +227,29 @@ function Archive() {
     }
   };
 
-  const fetchStudents = async () => {
+  const fetchUsers = async (userType = selectedUserType) => {
     try {
       setLoadingStudents(true);
       const token = localStorage.getItem('token');
-      const response = await axios.get('/api/users?type=student&limit=1000', {
+      const url = userType === 'all' 
+        ? '/api/users?limit=1000'
+        : `/api/users?type=${userType}&limit=1000`;
+      const response = await axios.get(url, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setAvailableStudents(response.data.users || []);
     } catch (error) {
-      console.error('Error fetching students:', error);
-      toast.error('Failed to load students');
+      console.error('Error fetching users:', error);
+      toast.error('Failed to load users');
     } finally {
       setLoadingStudents(false);
     }
+  };
+
+  const handleUserTypeChange = async (newType) => {
+    setSelectedUserType(newType);
+    setSelectedUserIds([]); // Clear selections when changing type
+    await fetchUsers(newType);
   };
 
   const fetchRooms = async () => {
@@ -328,7 +339,12 @@ function Archive() {
           break;
         case 'users':
           if (selectedUserIds.length === 0) {
-            toast.error('Please select at least one student to archive');
+            const userTypeLabel = selectedUserType === 'all' ? 'user' : 
+              selectedUserType === 'student' ? 'student' :
+              selectedUserType === 'instructor' ? 'instructor' :
+              selectedUserType === 'custodian' ? 'custodian' :
+              selectedUserType === 'dean' ? 'dean' : 'user';
+            toast.error(`Please select at least one ${userTypeLabel} to archive`);
             return;
           }
           payload.user_ids = selectedUserIds;
@@ -356,6 +372,7 @@ function Archive() {
       setSelectedUserIds([]);
       setAvailableStudents([]);
       setAvailableRooms([]);
+      setSelectedUserType('all');
       fetchDashboardStats();
       
       if (activeTab === archiveCategory) {
@@ -536,7 +553,7 @@ function Archive() {
               <UsersIcon className="h-8 w-8 text-yellow-500" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">Archived Students</p>
+              <p className="text-sm font-medium text-gray-500">Archived Users</p>
               <p className="text-2xl font-semibold text-gray-900">{getCategoryStats('users')}</p>
             </div>
           </div>
@@ -617,7 +634,7 @@ function Archive() {
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              Archived Students
+              Archived Users
             </button>
             <button
               onClick={() => setActiveTab('attendance')}
@@ -704,20 +721,20 @@ function Archive() {
                   </button>
                 </div>
 
-                {/* Archive Students */}
+                {/* Archive Users */}
                 <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6">
                   <div className="flex items-center justify-between mb-4">
                     <UsersIcon className="h-8 w-8 text-yellow-600" />
-                    <span className="text-sm font-medium text-yellow-800">Students</span>
+                    <span className="text-sm font-medium text-yellow-800">Users</span>
                   </div>
                   <p className="text-sm text-gray-600 mb-4">
-                    Archive students (admins and instructors excluded). Related enrollments and attendance will be archived.
+                    Archive users by type (All, Students, Instructors, Custodians, Deans). Related enrollments and attendance will be archived.
                   </p>
                   <button
                     onClick={() => handleArchiveClick('users')}
                     className="w-full px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 transition-colors"
                   >
-                    Archive Students
+                    Archive Users
                   </button>
                 </div>
 
@@ -1007,12 +1024,12 @@ function Archive() {
                   {/* Archived Users View (Grouped) */}
                   {activeTab === 'users' && (
                     <div className="space-y-4">
-                      <h3 className="text-lg font-semibold text-gray-900">Archived Students</h3>
+                      <h3 className="text-lg font-semibold text-gray-900">Archived Users</h3>
                       {archivedUsers.length === 0 ? (
                         <div className="text-center py-12">
                           <UsersIcon className="mx-auto h-12 w-12 text-gray-400" />
-                          <h3 className="mt-2 text-sm font-medium text-gray-900">No archived students</h3>
-                          <p className="mt-1 text-sm text-gray-500">No students have been archived yet.</p>
+                          <h3 className="mt-2 text-sm font-medium text-gray-900">No archived users</h3>
+                          <p className="mt-1 text-sm text-gray-500">No users have been archived yet.</p>
                         </div>
                       ) : (
                         <div className="overflow-x-auto">
@@ -1324,7 +1341,7 @@ function Archive() {
             <div className="mt-3">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-medium text-gray-900">
-                  Archive {archiveCategory.charAt(0).toUpperCase() + archiveCategory.slice(1)}
+                  {archiveCategory === 'users' ? 'Archive Users' : `Archive ${archiveCategory.charAt(0).toUpperCase() + archiveCategory.slice(1)}`}
                 </h3>
                 <button
                   onClick={() => setShowArchiveModal(false)}
@@ -1446,9 +1463,27 @@ function Archive() {
 
               {archiveCategory === 'users' && (
                 <div className="mb-4">
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Archive User Type</label>
+                    <select
+                      value={selectedUserType}
+                      onChange={(e) => handleUserTypeChange(e.target.value)}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2"
+                    >
+                      <option value="all">Archive All</option>
+                      <option value="student">Archive Students</option>
+                      <option value="instructor">Archive Instructors</option>
+                      <option value="custodian">Archive Custodians</option>
+                      <option value="dean">Archive Deans</option>
+                    </select>
+                  </div>
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-sm text-gray-600">
-                      Select students to archive:
+                      Select {selectedUserType === 'all' ? 'users' : 
+                        selectedUserType === 'student' ? 'students' :
+                        selectedUserType === 'instructor' ? 'instructors' :
+                        selectedUserType === 'custodian' ? 'custodians' :
+                        selectedUserType === 'dean' ? 'deans' : 'users'} to archive:
                     </p>
                     {availableStudents.length > 0 && (
                       <button
@@ -1476,9 +1511,6 @@ function Archive() {
                       </button>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 mb-3">
-                    Note: Only students can be archived. Admins and instructors are excluded.
-                  </p>
                   
                   {loadingStudents ? (
                     <div className="flex items-center justify-center py-8">
@@ -1488,27 +1520,31 @@ function Archive() {
                     <div className="border border-gray-300 rounded-md max-h-64 overflow-y-auto">
                       {availableStudents.length === 0 ? (
                         <div className="text-center py-8 text-gray-500">
-                          No students found
+                          No {selectedUserType === 'all' ? 'users' : 
+                            selectedUserType === 'student' ? 'students' :
+                            selectedUserType === 'instructor' ? 'instructors' :
+                            selectedUserType === 'custodian' ? 'custodians' :
+                            selectedUserType === 'dean' ? 'deans' : 'users'} found
                         </div>
                       ) : (
                         <div className="divide-y divide-gray-200">
-                          {availableStudents.map((student) => (
+                          {availableStudents.map((user) => (
                             <label
-                              key={student.USERID}
+                              key={user.USERID}
                               className="flex items-center px-4 py-3 hover:bg-gray-50 cursor-pointer"
                             >
                               <input
                                 type="checkbox"
-                                checked={selectedUserIds.includes(student.USERID)}
-                                onChange={() => toggleStudentSelection(student.USERID)}
+                                checked={selectedUserIds.includes(user.USERID)}
+                                onChange={() => toggleStudentSelection(user.USERID)}
                                 className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                               />
                               <div className="ml-3 flex-1">
                                 <div className="text-sm font-medium text-gray-900">
-                                  {student.FIRSTNAME} {student.LASTNAME}
+                                  {user.FIRSTNAME} {user.LASTNAME}
                                 </div>
                                 <div className="text-sm text-gray-500">
-                                  {student.STUDENTID}
+                                  {user.STUDENTID || user.FACULTYID || 'N/A'} • {user.USERTYPE}
                                 </div>
                               </div>
                             </label>
@@ -1520,7 +1556,11 @@ function Archive() {
                   
                   {selectedUserIds.length > 0 && (
                     <p className="mt-2 text-sm text-blue-600">
-                      {selectedUserIds.length} student{selectedUserIds.length > 1 ? 's' : ''} selected
+                      {selectedUserIds.length} {selectedUserType === 'all' ? 'user' : 
+                        selectedUserType === 'student' ? 'student' :
+                        selectedUserType === 'instructor' ? 'instructor' :
+                        selectedUserType === 'custodian' ? 'custodian' :
+                        selectedUserType === 'dean' ? 'dean' : 'user'}{selectedUserIds.length > 1 ? 's' : ''} selected
                     </p>
                   )}
                 </div>

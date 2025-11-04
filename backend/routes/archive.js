@@ -113,7 +113,7 @@ router.post('/schedules', authenticateToken, requireAdmin, async (req, res) => {
     }
 });
 
-// Archive students (users with USERTYPE = 'student')
+// Archive users (all user types)
 router.post('/users', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { user_ids, reason } = req.body;
@@ -127,14 +127,13 @@ router.post('/users', authenticateToken, requireAdmin, async (req, res) => {
             UPDATE USERS 
             SET ARCHIVED_AT = NOW(), ARCHIVED_BY = ?, ARCHIVE_REASON = ?
             WHERE USERID IN (${user_ids.map(() => '?').join(',')}) 
-            AND USERTYPE = 'student' 
             AND ARCHIVED_AT IS NULL
         `, [adminId, reason || null, ...user_ids]);
 
         res.json({
             success: true,
             archived: result.affectedRows,
-            message: `Successfully archived ${result.affectedRows} students`
+            message: `Successfully archived ${result.affectedRows} user${result.affectedRows !== 1 ? 's' : ''}`
         });
     } catch (error) {
         console.error('Archive users error:', error);

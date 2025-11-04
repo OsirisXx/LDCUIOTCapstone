@@ -823,6 +823,15 @@ void handleLockControl() {
       Serial.println(denialReason);
     }
     
+    // Handle no-match (unrecognized) scans
+    if (action == "no_match") {
+      Serial.println("❌ NO MATCH: Displaying 'No match found' on OLED");
+      displayNoMatch();
+      beepError();
+      server.send(200, "application/json", "{\"message\":\"No match displayed\",\"action\":\"no_match\"}");
+      return;
+    }
+    
     // Check if this is a denial message (especially for instructors)
     if (action == "denied" || denialReason.length() > 0) {
       Serial.println("❌ DENIAL MESSAGE: Displaying denial on OLED");
@@ -924,40 +933,64 @@ void handleLockControl() {
        return;
      }
      
-    String rfidData = doc["rfid_data"];
-    String user = doc["user"];
-    String userType = doc["userType"] | "";
-    bool sessionActive = doc["sessionActive"] | false;
-    bool awaitingSecondScan = doc["awaitingSecondScan"] | false;
-    String firstScanType = doc["firstScanType"] | "";
-    String requiredScan = doc["requiredScan"] | "";
-    
-    Serial.print("🔖 RFID Data: ");
-    Serial.println(rfidData);
-    Serial.print("👤 User: ");
-    Serial.println(user);
-    Serial.print("👤 User Type: ");
-    Serial.println(userType);
-    Serial.print("📅 Session Active: ");
-    Serial.println(sessionActive ? "Yes" : "No");
-    Serial.print("⏳ Awaiting Second Scan: ");
-    Serial.println(awaitingSecondScan ? "Yes" : "No");
-    if (awaitingSecondScan) {
-      Serial.print("🔍 First Scan Type: ");
-      Serial.println(firstScanType);
-      Serial.print("🔍 Required Scan: ");
-      Serial.println(requiredScan);
-    }
-    
-    // Check if this is an intermediate status update (waiting for second scan)
-    if (awaitingSecondScan) {
-      Serial.println("⏳ INTERMEDIATE STATUS: Displaying waiting message for second scan");
-      displayWaitingForSecondScan(user, firstScanType, requiredScan, userType);
-      
-      // Send response for intermediate status
-      server.send(200, "application/json", "{\"message\":\"Intermediate status displayed\",\"awaitingSecondScan\":true,\"requiredScan\":\"" + requiredScan + "\"}");
-      return;
-    }
+         String rfidData = doc["rfid_data"];
+     String user = doc["user"];
+     String userType = doc["userType"] | "";
+     bool sessionActive = doc["sessionActive"] | false;
+     bool awaitingSecondScan = doc["awaitingSecondScan"] | false;
+     String firstScanType = doc["firstScanType"] | "";
+     String requiredScan = doc["requiredScan"] | "";
+     String denialReason = doc["denialReason"] | "";
+     String action = doc["action"] | "";
+     
+     Serial.print("🔖 RFID Data: ");
+     Serial.println(rfidData);
+     Serial.print("👤 User: ");
+     Serial.println(user);
+     Serial.print("👤 User Type: ");
+     Serial.println(userType);
+     Serial.print("📅 Session Active: ");
+     Serial.println(sessionActive ? "Yes" : "No");
+     Serial.print("⏳ Awaiting Second Scan: ");
+     Serial.println(awaitingSecondScan ? "Yes" : "No");
+     if (awaitingSecondScan) {
+       Serial.print("🔍 First Scan Type: ");
+       Serial.println(firstScanType);
+       Serial.print("🔍 Required Scan: ");
+       Serial.println(requiredScan);
+     }
+     if (denialReason.length() > 0) {
+       Serial.print("❌ Denial Reason: ");
+       Serial.println(denialReason);
+     }
+     
+     // Handle no-match (unrecognized) RFID scans
+     if (action == "no_match") {
+       Serial.println("❌ RFID NO MATCH: Displaying 'No match found' on OLED");
+       displayNoMatch();
+       beepError();
+       server.send(200, "application/json", "{\"message\":\"RFID no match displayed\",\"action\":\"no_match\"}");
+       return;
+     }
+     
+     // Check if this is a denial message
+     if (denialReason.length() > 0) {
+       Serial.println("❌ RFID DENIAL MESSAGE: Displaying denial on OLED");
+       displayInstructorDenial(user, denialReason, userType);
+       beepError();
+       server.send(200, "application/json", "{\"message\":\"RFID denial message displayed\",\"action\":\"denied\",\"user\":\"" + user + "\"}");
+       return;
+     }
+     
+     // Check if this is an intermediate status update (waiting for second scan)
+     if (awaitingSecondScan) {
+       Serial.println("⏳ INTERMEDIATE STATUS: Displaying waiting message for second scan");
+       displayWaitingForSecondScan(user, firstScanType, requiredScan, userType);
+       
+       // Send response for intermediate status
+       server.send(200, "application/json", "{\"message\":\"Intermediate status displayed\",\"awaitingSecondScan\":true,\"requiredScan\":\"" + requiredScan + "\"}");
+       return;
+     }
      
      // Determine if lock should open based on user type and session state
      bool shouldOpenLock = false;
