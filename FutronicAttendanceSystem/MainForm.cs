@@ -3269,6 +3269,9 @@ namespace FutronicAttendanceSystem
 
                 Console.WriteLine($"✅ VERIFIED: {userName} is confirmed as instructor ({userInfo.UserType})");
 
+                // Note: Security check for session ownership is now handled within each session state
+                // to allow door access for instructors with no scheduled class while preventing session control interference
+
                 // Set flag to block additional instructor scans during processing
                 isProcessingInstructorScan = true;
                 isPausedForInstructorAction = true; // NEW: Stop all scanning
@@ -3594,6 +3597,55 @@ namespace FutronicAttendanceSystem
                         }
                         else if (!IsDualAuthRequired)
                         {
+                            // SECURITY CHECK: Only session owner can open sign-out
+                            if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
+                            {
+                                string sessionOwnerName = userName;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                {
+                                    sessionOwnerName = sessionOwner.Username;
+                                }
+                                
+                                Console.WriteLine($"⚠️ SECURITY: Instructor {userName} attempted to open sign-out for session owned by {sessionOwnerName}");
+                                SetStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can open sign-out.");
+                                
+                                // Log security event
+                                if (dbManager != null)
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: userGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: $"Attempted to open sign-out for session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                        );
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                    }
+                                }
+                                
+                                // Create denial record
+                                var denialRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Access Denied",
+                                    Status = $"Session owned by {sessionOwnerName}"
+                                };
+                                attendanceRecords.Add(denialRecord);
+                                UpdateAttendanceDisplay(denialRecord);
+                                
+                                ScheduleNextGetBaseTemplate(1000);
+                                return;
+                            }
+                            
                             Console.WriteLine($"✅ Fingerprint-only mode - opening sign-out for {userName}");
 
                             awaitingCrossTypeVerification = false;
@@ -3616,6 +3668,50 @@ namespace FutronicAttendanceSystem
                             // RFID was scanned first, now verifying with fingerprint
                             if (userName == pendingCrossVerificationUser && userGuid == pendingCrossVerificationGuid)
                             {
+                                // SECURITY CHECK: Only session owner can open sign-out
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
+                                {
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} attempted to open sign-out for session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can open sign-out.");
+                                    
+                                    // Reset verification state
+                                    awaitingCrossTypeVerification = false;
+                                    firstScanType = "";
+                                    pendingCrossVerificationUser = "";
+                                    pendingCrossVerificationGuid = "";
+                                    crossVerificationStartTime = DateTime.MinValue;
+                                    
+                                    // Log security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to open sign-out for session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                
                                 // Verified! Reset state and proceed with sign-out
                                 Console.WriteLine($"✅ INSTRUCTOR VERIFIED FOR SIGN-OUT: {userName} (RFID + Fingerprint match)");
                                 SetStatusText($"✅ Verified: {userName}. Opening sign-out...");
@@ -3654,37 +3750,260 @@ namespace FutronicAttendanceSystem
                         }
                         else if (!awaitingCrossTypeVerification)
                         {
-                            // Fingerprint scanned first - wait for RFID
-                            Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID to open sign-out");
-                            SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to open sign-out.");
-                            
-                            // Add record to show "Waiting for RFID" status
-                            var waitingRecord = new Database.Models.AttendanceRecord
+                            // SECURITY CHECK: If not session owner, check if door access is allowed
+                            if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
                             {
-                                UserId = 0,
-                                Username = userName,
-                                Timestamp = DateTime.Now,
-                                Action = "Waiting for RFID",
-                                Status = "Fingerprint First"
-                            };
-                            attendanceRecords.Add(waitingRecord);
-                            UpdateAttendanceDisplay(waitingRecord);
-                            
-                            awaitingCrossTypeVerification = true;
-                            firstScanType = "FINGERPRINT";
-                            pendingCrossVerificationUser = userName;
-                            pendingCrossVerificationGuid = userGuid;
-                            crossVerificationStartTime = DateTime.Now;
-                            
-                            // Send intermediate status to ESP32
-                            User user;
-                            if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
-                            {
-                                _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                                // Different instructor - check if they have scheduled class
+                                var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userGuid);
+                                bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                
+                                if (hasScheduledClass)
+                                {
+                                    // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                    
+                                    // Log this security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                            Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Create denial record
+                                    var denialRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Access Denied",
+                                        Status = $"Session owned by {sessionOwnerName}"
+                                    };
+                                    attendanceRecords.Add(denialRecord);
+                                    UpdateAttendanceDisplay(denialRecord);
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                {
+                                    // No scheduled class but door access enabled - allow door access only
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint): {userName} - Door access granted (no schedule, different session active)");
+                                    SetStatusText($"🚪 Instructor {userName} - Door access granted. Session remains active for students.");
+                                    
+                                    // Create door access record
+                                    var doorAccessRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Door Access",
+                                        Status = "Instructor Door Access (No Schedule)"
+                                    };
+                                    attendanceRecords.Add(doorAccessRecord);
+                                    UpdateAttendanceDisplay(doorAccessRecord);
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted (no scheduled class, different session active)"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without changing session state
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestLockControl(userGuid, "Instructor Door Access (No Schedule)");
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                    return;
+                                }
+                                else
+                                {
+                                    // No scheduled class and door access not enabled - deny
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                    
+                                    // Log denied access
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled."
+                                            );
+                                            Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
                             }
                             
-                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
-                            return;
+                            // Session owner or no active session - proceed with normal flow
+                            // NEW LOGIC: During active session, single scan grants door access without changing state
+                            if (IsDualAuthRequired)
+                            {
+                                Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint): {userName} - Door access granted, session remains active");
+                                SetStatusText($"🚪 Instructor {userName} - Door access granted. Session remains active for students.");
+                                
+                                // Create door access record
+                                var doorAccessRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Door Access",
+                                    Status = "Instructor Door Access (Session Active)"
+                                };
+                                attendanceRecords.Add(doorAccessRecord);
+                                UpdateAttendanceDisplay(doorAccessRecord);
+                                
+                                // Log door access to ACCESSLOGS
+                                if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: userGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "success",
+                                            reason: "Instructor door access granted during active session"
+                                        );
+                                        Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                    }
+                                }
+                                
+                                // Record attendance for door access
+                                RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                
+                                // Trigger door access without changing session state
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestLockControl(userGuid, "Instructor Door Access (Session Active)");
+                                    }
+                                    catch (Exception lockEx)
+                                    {
+                                        Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                    }
+                                });
+                                
+                                // Start waiting for second scan to open sign-out
+                                awaitingCrossTypeVerification = true;
+                                firstScanType = "FINGERPRINT";
+                                pendingCrossVerificationUser = userName;
+                                pendingCrossVerificationGuid = userGuid;
+                                crossVerificationStartTime = DateTime.Now;
+                                
+                                ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                return;
+                            }
+                            else
+                            {
+                                // Fingerprint-only mode: This shouldn't happen in ActiveForStudents state with single auth
+                                // but keeping original logic as fallback
+                                Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID to open sign-out");
+                                SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to open sign-out.");
+                                
+                                // Add record to show "Waiting for RFID" status
+                                var waitingRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Waiting for RFID",
+                                    Status = "Fingerprint First"
+                                };
+                                attendanceRecords.Add(waitingRecord);
+                                UpdateAttendanceDisplay(waitingRecord);
+                                
+                                awaitingCrossTypeVerification = true;
+                                firstScanType = "FINGERPRINT";
+                                pendingCrossVerificationUser = userName;
+                                pendingCrossVerificationGuid = userGuid;
+                                crossVerificationStartTime = DateTime.Now;
+                                
+                                // Send intermediate status to ESP32
+                                User user;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                                }
+                                
+                                ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                return;
+                            }
                         }
                         
                         // If we reach here, we're still awaiting verification from first scan
@@ -3712,6 +4031,55 @@ namespace FutronicAttendanceSystem
                         }
                         else if (!IsDualAuthRequired)
                         {
+                            // SECURITY CHECK: Only session owner can end session
+                            if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
+                            {
+                                string sessionOwnerName = userName;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                {
+                                    sessionOwnerName = sessionOwner.Username;
+                                }
+                                
+                                Console.WriteLine($"⚠️ SECURITY: Instructor {userName} attempted to end session owned by {sessionOwnerName}");
+                                SetStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can end the session.");
+                                
+                                // Log security event
+                                if (dbManager != null)
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: userGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: $"Attempted to end session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                        );
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                    }
+                                }
+                                
+                                // Create denial record
+                                var denialRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Access Denied",
+                                    Status = $"Session owned by {sessionOwnerName}"
+                                };
+                                attendanceRecords.Add(denialRecord);
+                                UpdateAttendanceDisplay(denialRecord);
+                                
+                                ScheduleNextGetBaseTemplate(1000);
+                                return;
+                            }
+                            
                             Console.WriteLine($"✅ Fingerprint-only mode - ending session for {userName}");
 
                             awaitingCrossTypeVerification = false;
@@ -3753,6 +4121,50 @@ namespace FutronicAttendanceSystem
                             // RFID was scanned first, now verifying with fingerprint
                             if (userName == pendingCrossVerificationUser && userGuid == pendingCrossVerificationGuid)
                             {
+                                // SECURITY CHECK: Only session owner can end session
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
+                                {
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} attempted to end session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can end the session.");
+                                    
+                                    // Reset verification state
+                                    awaitingCrossTypeVerification = false;
+                                    firstScanType = "";
+                                    pendingCrossVerificationUser = "";
+                                    pendingCrossVerificationGuid = "";
+                                    crossVerificationStartTime = DateTime.MinValue;
+                                    
+                                    // Log security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to end session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                
                                 // Verified! Reset state and proceed with session-end
                                 Console.WriteLine($"✅ INSTRUCTOR VERIFIED FOR SESSION-END: {userName} (RFID + Fingerprint match)");
                                 SetStatusText($"✅ Verified: {userName}. Ending session...");
@@ -3810,37 +4222,260 @@ namespace FutronicAttendanceSystem
                         }
                         else if (!awaitingCrossTypeVerification)
                         {
-                            // Fingerprint scanned first - wait for RFID
-                            Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID to end session");
-                            SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to end session.");
-                            
-                            // Add record to show "Waiting for RFID" status
-                            var waitingRecord = new Database.Models.AttendanceRecord
+                            // SECURITY CHECK: If not session owner, check if door access is allowed
+                            if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
                             {
-                                UserId = 0,
-                                Username = userName,
-                                Timestamp = DateTime.Now,
-                                Action = "Waiting for RFID",
-                                Status = "Fingerprint First"
-                            };
-                            attendanceRecords.Add(waitingRecord);
-                            UpdateAttendanceDisplay(waitingRecord);
-                            
-                            awaitingCrossTypeVerification = true;
-                            firstScanType = "FINGERPRINT";
-                            pendingCrossVerificationUser = userName;
-                            pendingCrossVerificationGuid = userGuid;
-                            crossVerificationStartTime = DateTime.Now;
-                            
-                            // Send intermediate status to ESP32
-                            User user;
-                            if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
-                            {
-                                _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                                // Different instructor - check if they have scheduled class
+                                var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userGuid);
+                                bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                
+                                if (hasScheduledClass)
+                                {
+                                    // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                    
+                                    // Log this security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                            Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Create denial record
+                                    var denialRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Access Denied",
+                                        Status = $"Session owned by {sessionOwnerName}"
+                                    };
+                                    attendanceRecords.Add(denialRecord);
+                                    UpdateAttendanceDisplay(denialRecord);
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                {
+                                    // No scheduled class but door access enabled - allow door access only
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint): {userName} - Door access granted (no schedule, different session active)");
+                                    SetStatusText($"🚪 Instructor {userName} - Door access granted. Sign-out session remains active.");
+                                    
+                                    // Create door access record
+                                    var doorAccessRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Door Access",
+                                        Status = "Instructor Door Access (No Schedule)"
+                                    };
+                                    attendanceRecords.Add(doorAccessRecord);
+                                    UpdateAttendanceDisplay(doorAccessRecord);
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted (no scheduled class, different session active)"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without ending session
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestLockControl(userGuid, "Instructor Door Access (No Schedule)");
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                    return;
+                                }
+                                else
+                                {
+                                    // No scheduled class and door access not enabled - deny
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                    
+                                    // Log denied access
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled."
+                                            );
+                                            Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
                             }
                             
-                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
-                            return;
+                            // Session owner or no active session - proceed with normal flow
+                            // NEW LOGIC: During active sign-out session, single scan grants door access without ending session
+                            if (IsDualAuthRequired)
+                            {
+                                Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint): {userName} - Door access granted, session remains active");
+                                SetStatusText($"🚪 Instructor {userName} - Door access granted. Sign-out session remains active.");
+                                
+                                // Create door access record
+                                var doorAccessRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Door Access",
+                                    Status = "Instructor Door Access (Sign-Out Active)"
+                                };
+                                attendanceRecords.Add(doorAccessRecord);
+                                UpdateAttendanceDisplay(doorAccessRecord);
+                                
+                                // Log door access to ACCESSLOGS
+                                if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: userGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "success",
+                                            reason: "Instructor door access granted during sign-out session"
+                                        );
+                                        Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                    }
+                                }
+                                
+                                // Record attendance for door access
+                                RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                
+                                // Trigger door access without ending session
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestLockControl(userGuid, "Instructor Door Access (Sign-Out Active)");
+                                    }
+                                    catch (Exception lockEx)
+                                    {
+                                        Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                    }
+                                });
+                                
+                                // Start waiting for second scan to end session
+                                awaitingCrossTypeVerification = true;
+                                firstScanType = "FINGERPRINT";
+                                pendingCrossVerificationUser = userName;
+                                pendingCrossVerificationGuid = userGuid;
+                                crossVerificationStartTime = DateTime.Now;
+                                
+                                ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                return;
+                            }
+                            else
+                            {
+                                // Fingerprint-only mode: This shouldn't happen in ActiveForSignOut state with single auth
+                                // but keeping original logic as fallback
+                                Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID to end session");
+                                SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to end session.");
+                                
+                                // Add record to show "Waiting for RFID" status
+                                var waitingRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Waiting for RFID",
+                                    Status = "Fingerprint First"
+                                };
+                                attendanceRecords.Add(waitingRecord);
+                                UpdateAttendanceDisplay(waitingRecord);
+                                
+                                awaitingCrossTypeVerification = true;
+                                firstScanType = "FINGERPRINT";
+                                pendingCrossVerificationUser = userName;
+                                pendingCrossVerificationGuid = userGuid;
+                                crossVerificationStartTime = DateTime.Now;
+                                
+                                // Send intermediate status to ESP32
+                                User user;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                                }
+                                
+                                ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                return;
+                            }
                         }
                         
                         // If we reach here, we're still awaiting verification from first scan
@@ -8454,6 +9089,9 @@ namespace FutronicAttendanceSystem
                 // Route based on user type and session state (same logic as fingerprint system)
                 if (userType == "instructor")
                 {
+                    // Note: Security check for session ownership is now handled within each session state
+                    // to allow door access for instructors with no scheduled class while preventing session control interference
+                    
                     // Instructor actions based on unified session state
                     switch (currentSessionState)
                     {
@@ -8839,6 +9477,55 @@ namespace FutronicAttendanceSystem
                             }
                             else if (!IsDualAuthRequired)
                             {
+                                // SECURITY CHECK: Only session owner can open sign-out
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                {
+                                    string sessionOwnerName = userInfo.Username;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} attempted to open sign-out for session owned by {sessionOwnerName}");
+                                    SetRfidStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can open sign-out.");
+                                    AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                    
+                                    // Log security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userInfo.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "RFID",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to open sign-out for session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Notify ESP32 of denial
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                        }
+                                    });
+                                    
+                                    return;
+                                }
+                                
                                 Console.WriteLine($"✅ RFID-only mode active - opening sign-out for {userInfo.Username}");
 
                                 awaitingCrossTypeVerification = false;
@@ -8860,6 +9547,62 @@ namespace FutronicAttendanceSystem
                                 // Fingerprint was scanned first, now verifying with RFID
                                 if (userInfo.Username == pendingCrossVerificationUser && userInfo.EmployeeId == pendingCrossVerificationGuid)
                                 {
+                                    // SECURITY CHECK: Only session owner can open sign-out
+                                    if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                    {
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} attempted to open sign-out for session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can open sign-out.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Reset verification state
+                                        awaitingCrossTypeVerification = false;
+                                        firstScanType = "";
+                                        pendingCrossVerificationUser = "";
+                                        pendingCrossVerificationGuid = "";
+                                        crossVerificationStartTime = DateTime.MinValue;
+                                        
+                                        // Log security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to open sign-out for session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    
                                     // Verified! Reset state and proceed with sign-out
                                     Console.WriteLine($"✅ INSTRUCTOR VERIFIED FOR SIGN-OUT: {userInfo.Username} (Fingerprint + RFID match)");
                                     SetRfidStatusText($"✅ Verified: {userInfo.Username}. Opening sign-out...");
@@ -8896,22 +9639,238 @@ namespace FutronicAttendanceSystem
                             }
                             else
                             {
-                                // Start dual-auth: RFID first, wait for fingerprint
-                                Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint to open sign-out");
-                                SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to open sign-out.");
-                                
-                                awaitingCrossTypeVerification = true;
-                                firstScanType = "RFID";
-                                pendingCrossVerificationUser = userInfo.Username;
-                                pendingCrossVerificationGuid = userInfo.EmployeeId;
-                                crossVerificationStartTime = DateTime.Now;
-                                AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
-                                
-                                // Send intermediate status to ESP32
-                                User user;
-                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                // SECURITY CHECK: If not session owner, check if door access is allowed
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
                                 {
-                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    // Different instructor - check if they have scheduled class
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                    
+                                    if (hasScheduledClass)
+                                    {
+                                        // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log this security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                                Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                    {
+                                        // No scheduled class but door access enabled - allow door access only
+                                        Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - Door access granted (no schedule, different session active)");
+                                        SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Session remains active for students.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                        
+                                        // Log door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class, different session active)"
+                                                );
+                                                Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Record attendance for door access
+                                        RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                        
+                                        // Trigger door access without changing session state
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (No Schedule)", rfidData);
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        // No scheduled class and door access not enabled - deny
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log denied access
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled."
+                                                );
+                                                Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                }
+                                
+                                // Session owner or no active session - proceed with normal flow
+                                // NEW LOGIC: During active session, single scan grants door access without changing state
+                                if (IsDualAuthRequired)
+                                {
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - Door access granted, session remains active");
+                                    SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Session remains active for students.");
+                                    AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (Session Active)");
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userInfo.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "RFID",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted during active session"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without changing session state
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (Session Active)", rfidData);
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    // Start waiting for second scan to open sign-out
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
+                                }
+                                else
+                                {
+                                    // RFID-only mode: This shouldn't happen in ActiveForStudents state with single auth
+                                    // but keeping original logic as fallback
+                                    Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint to open sign-out");
+                                    SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to open sign-out.");
+                                    
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
                                 }
                             }
                             break;
@@ -8937,6 +9896,55 @@ namespace FutronicAttendanceSystem
                             }
                             else if (!IsDualAuthRequired)
                             {
+                                // SECURITY CHECK: Only session owner can end session
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                {
+                                    string sessionOwnerName = userInfo.Username;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} attempted to end session owned by {sessionOwnerName}");
+                                    SetRfidStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can end the session.");
+                                    AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                    
+                                    // Log security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userInfo.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "RFID",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to end session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Notify ESP32 of denial
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                        }
+                                    });
+                                    
+                                    return;
+                                }
+                                
                                 Console.WriteLine($"✅ RFID-only mode active - ending session for {userInfo.Username}");
 
                                 awaitingCrossTypeVerification = false;
@@ -8996,6 +10004,62 @@ namespace FutronicAttendanceSystem
                                 // Fingerprint was scanned first, now verifying with RFID
                                 if (userInfo.Username == pendingCrossVerificationUser && userInfo.EmployeeId == pendingCrossVerificationGuid)
                                 {
+                                    // SECURITY CHECK: Only session owner can end session
+                                    if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                    {
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} attempted to end session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can end the session.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Reset verification state
+                                        awaitingCrossTypeVerification = false;
+                                        firstScanType = "";
+                                        pendingCrossVerificationUser = "";
+                                        pendingCrossVerificationGuid = "";
+                                        crossVerificationStartTime = DateTime.MinValue;
+                                        
+                                        // Log security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to end session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    
                                     // Verified! Reset state and proceed with session-end
                                     Console.WriteLine($"✅ INSTRUCTOR VERIFIED FOR SESSION-END: {userInfo.Username} (Fingerprint + RFID match)");
                                     SetRfidStatusText($"✅ Verified: {userInfo.Username}. Ending session...");
@@ -9076,22 +10140,238 @@ namespace FutronicAttendanceSystem
                             }
                             else
                             {
-                                // Start dual-auth: RFID first, wait for fingerprint
-                                Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint to end session");
-                                SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to end session.");
-                                
-                                awaitingCrossTypeVerification = true;
-                                firstScanType = "RFID";
-                                pendingCrossVerificationUser = userInfo.Username;
-                                pendingCrossVerificationGuid = userInfo.EmployeeId;
-                                crossVerificationStartTime = DateTime.Now;
-                                AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
-                                
-                                // Send intermediate status to ESP32
-                                User user;
-                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                // SECURITY CHECK: If not session owner, check if door access is allowed
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
                                 {
-                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    // Different instructor - check if they have scheduled class
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                    
+                                    if (hasScheduledClass)
+                                    {
+                                        // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log this security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                                Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                    {
+                                        // No scheduled class but door access enabled - allow door access only
+                                        Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - Door access granted (no schedule, different session active)");
+                                        SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Sign-out session remains active.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                        
+                                        // Log door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class, different session active)"
+                                                );
+                                                Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Record attendance for door access
+                                        RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                        
+                                        // Trigger door access without ending session
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (No Schedule)", rfidData);
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        // No scheduled class and door access not enabled - deny
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log denied access
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled."
+                                                );
+                                                Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                }
+                                
+                                // Session owner or no active session - proceed with normal flow
+                                // NEW LOGIC: During active sign-out session, single scan grants door access without ending session
+                                if (IsDualAuthRequired)
+                                {
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - Door access granted, session remains active");
+                                    SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Sign-out session remains active.");
+                                    AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (Sign-Out Active)");
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userInfo.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "RFID",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted during sign-out session"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without ending session
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (Sign-Out Active)", rfidData);
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    // Start waiting for second scan to end session
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
+                                }
+                                else
+                                {
+                                    // RFID-only mode: This shouldn't happen in ActiveForSignOut state with single auth
+                                    // but keeping original logic as fallback
+                                    Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint to end session");
+                                    SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to end session.");
+                                    
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
                                 }
                             }
                             break;
