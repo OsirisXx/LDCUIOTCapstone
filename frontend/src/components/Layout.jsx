@@ -15,6 +15,7 @@ import {
   ChartBarIcon,
   ArchiveBoxIcon,
   ArrowDownTrayIcon,
+  ShieldCheckIcon
 } from '@heroicons/react/24/outline';
 
 const navigation = [
@@ -24,6 +25,7 @@ const navigation = [
   { name: 'Reports', href: '/reports', icon: ChartBarIcon },
   { name: 'Sessions', href: '/sessions', icon: ClockIcon },
   { name: 'Users', href: '/users', icon: UsersIcon },
+  { name: 'Super Admin', href: '/superadmin', icon: ShieldCheckIcon, superAdminOnly: true },
   { name: 'Archive', href: '/archive', icon: ArchiveBoxIcon, adminOnly: true },
   { name: 'Backup & Export', href: '/backup', icon: ArrowDownTrayIcon, adminOnly: true },
 ];
@@ -35,6 +37,9 @@ function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const userMenuRef = useRef(null);
+
+  const isSuperAdmin = user?.role === 'superadmin';
+  const isAdmin = isSuperAdmin || user?.role === 'admin';
 
   const isActive = (href) => location.pathname === href;
 
@@ -88,8 +93,8 @@ function Layout() {
             </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
             {navigation.map((item) => {
-              // Only show Archive for admins
-              if (item.adminOnly && user?.role !== 'admin') return null;
+              if (item.superAdminOnly && !isSuperAdmin) return null;
+              if (item.adminOnly && !isAdmin) return null;
               
               return (
                 <Link
@@ -145,8 +150,8 @@ function Layout() {
           </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
             {navigation.map((item) => {
-              // Only show Archive for admins
-              if (item.adminOnly && user?.role !== 'admin') return null;
+              if (item.superAdminOnly && !isSuperAdmin) return null;
+              if (item.adminOnly && !isAdmin) return null;
               
               return (
                 <Link

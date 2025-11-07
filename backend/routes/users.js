@@ -2,11 +2,12 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
 const { executeQuery, getSingleResult, getResults, transaction } = require('../config/database');
-const { authenticateToken, requireAdmin, requireInstructor } = require('../middleware/auth');
+const { authenticateToken, requireAdmin, requireInstructor, requireSuperAdmin } = require('../middleware/auth');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const path = require('path');
 const fs = require('fs');
+const roleService = require('../services/roleService');
 
 const router = express.Router();
 
@@ -921,7 +922,7 @@ router.put('/:id', [
         }
         return require('validator').isEmail(value);
     }).normalizeEmail(),
-    body('user_type').optional().isIn(['student', 'instructor', 'admin', 'custodian', 'dean']),
+    body('user_type').optional().isIn(['student', 'instructor', 'admin', 'custodian', 'dean', 'superadmin']),
     body('status').optional().custom((value) => {
         if (!value) return true; // Allow empty/null status
         const validStatuses = ['active', 'inactive', 'Active', 'Inactive'];
@@ -943,7 +944,13 @@ router.put('/:id', [
         }
 
         const { id } = req.params;
-        const updateFields = req.body;
+        const updateFields = { ...req.body };
+        const requestedRole = updateFields.user_type;
+        const hasRoleChange = typeof requestedRole !== 'undefined';
+
+        if (hasRoleChange && req.user?.role !== 'superadmin') {
+            return res.status(403).json({ message: 'Only super administrators can modify roles.' });
+        }
 
         // Remove undefined fields and convert empty strings to null for optional fields
         Object.keys(updateFields).forEach(key => {
@@ -961,12 +968,17 @@ router.put('/:id', [
             }
         });
 
-        if (Object.keys(updateFields).length === 0) {
+        if (hasRoleChange) {
+            delete updateFields.user_type;
+        }
+
+        const remainingFieldKeys = Object.keys(updateFields);
+        if (!hasRoleChange && remainingFieldKeys.length === 0) {
             return res.status(400).json({ message: 'No fields to update' });
         }
 
         // Check if user exists
-        const existingUser = await getSingleResult('SELECT USERID FROM USERS WHERE USERID = ?', [id]);
+        const existingUser = await getSingleResult('SELECT USERID, EMAIL FROM USERS WHERE USERID = ?', [id]);
         if (!existingUser) {
             return res.status(404).json({ message: 'User not found' });
         }
@@ -998,7 +1010,6 @@ router.put('/:id', [
             first_name: 'FIRSTNAME',
             last_name: 'LASTNAME',
             email: 'EMAIL',
-            user_type: 'USERTYPE',
             year_level: 'YEARLEVEL',
             department: 'DEPARTMENT',
             status: 'STATUS',
@@ -1008,33 +1019,59 @@ router.put('/:id', [
         };
 
         // Filter out fields that don't have a mapping
-        const validFields = Object.keys(updateFields).filter(key => fieldMap[key]);
+        const validFields = remainingFieldKeys.filter(key => fieldMap[key]);
 
-        if (validFields.length === 0) {
+        if (!hasRoleChange && validFields.length === 0) {
             return res.status(400).json({ message: 'No valid fields to update' });
         }
 
         console.log('Valid fields to update:', validFields);
         console.log('Field mappings:', validFields.map(key => `${key} -> ${fieldMap[key]}`));
 
-        const setClause = validFields.map(key => `${fieldMap[key]} = ?`).join(', ');
-        const values = validFields.map(key => updateFields[key]);
-        values.push(id);
+        if (validFields.length > 0) {
+            const setClause = validFields.map(key => `${fieldMap[key]} = ?`).join(', ');
+            const values = validFields.map(key => updateFields[key]);
+            values.push(id);
 
-        console.log('SQL Update:', `UPDATE USERS SET ${setClause}, UPDATED_AT = CURRENT_TIMESTAMP WHERE USERID = ?`);
-        console.log('Values:', values);
+            console.log('SQL Update:', `UPDATE USERS SET ${setClause}, UPDATED_AT = CURRENT_TIMESTAMP WHERE USERID = ?`);
+            console.log('Values:', values);
 
-        await executeQuery(
-            `UPDATE USERS SET ${setClause}, UPDATED_AT = CURRENT_TIMESTAMP WHERE USERID = ?`,
-            values
-        );
+            await executeQuery(
+                `UPDATE USERS SET ${setClause}, UPDATED_AT = CURRENT_TIMESTAMP WHERE USERID = ?`,
+                values
+            );
+        }
 
-        const updatedUser = await getSingleResult(
-            `SELECT USERID, STUDENTID, FACULTYID, FIRSTNAME, LASTNAME, USERTYPE,
-                    YEARLEVEL, DEPARTMENT, STATUS, RFIDTAG, CREATED_AT, UPDATED_AT
-             FROM USERS WHERE USERID = ?`,
-            [id]
-        );
+        let updatedUser;
+
+        if (hasRoleChange) {
+            const latestUser = await getSingleResult('SELECT EMAIL FROM USERS WHERE USERID = ?', [id]);
+
+            try {
+                updatedUser = await roleService.updateUserRole({
+                    targetUserId: id,
+                    email: latestUser ? (latestUser.email || latestUser.EMAIL) : existingUser.EMAIL,
+                    newRole: requestedRole,
+                    actorId: req.user?.id,
+                    ipAddress: req.ip
+                });
+            } catch (roleError) {
+                console.error('Role synchronization error:', roleError);
+                if (roleError.statusCode) {
+                    return res.status(roleError.statusCode).json({ message: roleError.message });
+                }
+                return res.status(500).json({ message: 'Failed to synchronize role with Supabase', error: roleError.message });
+            }
+        }
+
+        if (!updatedUser) {
+            updatedUser = await getSingleResult(
+                `SELECT USERID, STUDENTID, FACULTYID, FIRSTNAME, LASTNAME, USERTYPE,
+                        YEARLEVEL, DEPARTMENT, STATUS, RFIDTAG, CREATED_AT, UPDATED_AT
+                 FROM USERS WHERE USERID = ?`,
+                [id]
+            );
+        }
 
         res.json({
             message: 'User updated successfully',
@@ -1059,6 +1096,61 @@ router.put('/:id', [
             message: 'Internal server error',
             error: error.message,
             details: error.sql || 'No SQL details available'
+        });
+    }
+});
+
+router.patch('/:id/role', [
+    authenticateToken,
+    requireSuperAdmin,
+    body('role').isIn(['student', 'instructor', 'admin', 'custodian', 'dean', 'superadmin'])
+], async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ message: 'Validation failed', errors: errors.array() });
+        }
+
+        const { id } = req.params;
+        const { role } = req.body;
+
+        const userRecord = await getSingleResult('SELECT USERID, EMAIL FROM USERS WHERE USERID = ?', [id]);
+        if (!userRecord) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const updatedUser = await roleService.updateUserRole({
+            targetUserId: id,
+            email: userRecord.EMAIL,
+            newRole: role,
+            actorId: req.user?.id,
+            ipAddress: req.ip
+        });
+
+        res.json({
+            message: 'Role updated successfully',
+            user: updatedUser
+        });
+    } catch (error) {
+        console.error('Role update error:', error);
+        console.error('Error details:', {
+            message: error.message,
+            code: error.code,
+            statusCode: error.statusCode,
+            stack: error.stack
+        });
+        if (error.statusCode) {
+            return res.status(error.statusCode).json({ 
+                message: error.message,
+                ...(process.env.NODE_ENV === 'development' && { error: error.message })
+            });
+        }
+        res.status(500).json({ 
+            message: 'Internal server error',
+            ...(process.env.NODE_ENV === 'development' && { 
+                error: error.message,
+                details: error.stack 
+            })
         });
     }
 });

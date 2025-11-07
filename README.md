@@ -34,6 +34,7 @@ A full-stack IoT-enabled classroom attendance and access control system built wi
 - System health monitoring
 - Manual door control override
 - Comprehensive audit trails
+- Superadmin console for privileged account lifecycle and role enforcement
 
 ## 🗄️ Database Structure
 
@@ -129,6 +130,12 @@ PORT=5000
 NODE_ENV=development
 FRONTEND_URL=http://localhost:3000
 ```
+
+#### Supabase OAuth configuration
+
+1. Copy `backend/env.example` to `backend/.env` and populate the `SUPABASE_*` entries with your Supabase URL, anon key, and service role key. Keep the service key on the server only.
+2. Copy `frontend/env.example` to `frontend/.env.local` (or `.env`) and set the `REACT_APP_SUPABASE_*` values using the anon key and desired redirect URL.
+3. Follow `docs/SUPABASE_SETUP.md` to enable Google Sign-In, register redirect URLs, and enforce email/domain allowlists before allowing users to log in.
 
 ## 🧪 Testing the System
 

@@ -1783,6 +1783,37 @@ namespace FutronicAttendanceSystem.Database
                 {
                     LogMessage("DEBUG", $"Dean access requested for user {userGuid}");
                     
+                    // Fetch current academic settings fresh from database (not cached)
+                    // This ensures schedule changes are immediately recognized without app restart
+                    string academicYear = CurrentAcademicYear; // Fallback to cached value
+                    string semester = CurrentSemester; // Fallback to cached value
+                    try
+                    {
+                        using (var cmdGetSettings = new MySqlCommand(@"
+                            SELECT 
+                                MAX(CASE WHEN SETTINGKEY = 'current_academic_year' THEN SETTINGVALUE END) as academic_year,
+                                MAX(CASE WHEN SETTINGKEY = 'current_semester' THEN SETTINGVALUE END) as semester
+                            FROM SETTINGS
+                            WHERE SETTINGKEY IN ('current_academic_year', 'current_semester')", connection))
+                        {
+                            using (var reader = cmdGetSettings.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    if (!reader.IsDBNull(0) && !string.IsNullOrWhiteSpace(reader.GetString(0)))
+                                        academicYear = reader.GetString(0);
+                                    if (!reader.IsDBNull(1) && !string.IsNullOrWhiteSpace(reader.GetString(1)))
+                                        semester = reader.GetString(1);
+                                }
+                            }
+                        }
+                        LogMessage("DEBUG", $"Fetched fresh academic settings for dean - Year: {academicYear}, Semester: {semester}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage("WARNING", $"Failed to fetch fresh academic settings, using cached values: {ex.Message}");
+                    }
+                    
                     // Try to find a scheduled class (same query as instructor)
                     using (var cmdCheckDeanSchedule = new MySqlCommand(@"
                         SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
@@ -1798,8 +1829,8 @@ namespace FutronicAttendanceSystem.Database
                         cmdCheckDeanSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckDeanSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckDeanSchedule.Parameters.AddWithValue("@currentDay", currentDay);
-                        cmdCheckDeanSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
-                        cmdCheckDeanSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@academicYear", academicYear);
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@semester", semester);
 
                         using (var reader = cmdCheckDeanSchedule.ExecuteReader())
                         {
@@ -1834,6 +1865,37 @@ namespace FutronicAttendanceSystem.Database
                     string earlyWindowTime = $"-00:{instructorEarlyMinutes:D2}:00";
                     Console.WriteLine($"DEBUG: Instructor early arrival window: {instructorEarlyMinutes} minutes");
                     
+                    // Fetch current academic settings fresh from database (not cached)
+                    // This ensures schedule changes are immediately recognized without app restart
+                    string academicYear = CurrentAcademicYear; // Fallback to cached value
+                    string semester = CurrentSemester; // Fallback to cached value
+                    try
+                    {
+                        using (var cmdGetSettings = new MySqlCommand(@"
+                            SELECT 
+                                MAX(CASE WHEN SETTINGKEY = 'current_academic_year' THEN SETTINGVALUE END) as academic_year,
+                                MAX(CASE WHEN SETTINGKEY = 'current_semester' THEN SETTINGVALUE END) as semester
+                            FROM SETTINGS
+                            WHERE SETTINGKEY IN ('current_academic_year', 'current_semester')", connection))
+                        {
+                            using (var reader = cmdGetSettings.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    if (!reader.IsDBNull(0) && !string.IsNullOrWhiteSpace(reader.GetString(0)))
+                                        academicYear = reader.GetString(0);
+                                    if (!reader.IsDBNull(1) && !string.IsNullOrWhiteSpace(reader.GetString(1)))
+                                        semester = reader.GetString(1);
+                                }
+                            }
+                        }
+                        LogMessage("DEBUG", $"Fetched fresh academic settings - Year: {academicYear}, Semester: {semester}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage("WARNING", $"Failed to fetch fresh academic settings, using cached values: {ex.Message}");
+                    }
+                    
                     // Use ADDTIME to allow early arrival within configured window
                     using (var cmdCheckInstructorSchedule = new MySqlCommand(@"
                         SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
@@ -1850,8 +1912,8 @@ namespace FutronicAttendanceSystem.Database
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@currentDay", currentDay);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@earlyWindow", earlyWindowTime);
-                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
-                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
+                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@academicYear", academicYear);
+                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@semester", semester);
 
                         using (var reader = cmdCheckInstructorSchedule.ExecuteReader())
                         {
@@ -1956,6 +2018,37 @@ namespace FutronicAttendanceSystem.Database
                     string earlyWindowTime = $"-00:{studentEarlyMinutes:D2}:00";
                     Console.WriteLine($"DEBUG: Student early arrival window: {studentEarlyMinutes} minutes");
                     
+                    // Fetch current academic settings fresh from database (not cached)
+                    // This ensures schedule changes are immediately recognized without app restart
+                    string academicYear = CurrentAcademicYear; // Fallback to cached value
+                    string semester = CurrentSemester; // Fallback to cached value
+                    try
+                    {
+                        using (var cmdGetSettings = new MySqlCommand(@"
+                            SELECT 
+                                MAX(CASE WHEN SETTINGKEY = 'current_academic_year' THEN SETTINGVALUE END) as academic_year,
+                                MAX(CASE WHEN SETTINGKEY = 'current_semester' THEN SETTINGVALUE END) as semester
+                            FROM SETTINGS
+                            WHERE SETTINGKEY IN ('current_academic_year', 'current_semester')", connection))
+                        {
+                            using (var reader = cmdGetSettings.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    if (!reader.IsDBNull(0) && !string.IsNullOrWhiteSpace(reader.GetString(0)))
+                                        academicYear = reader.GetString(0);
+                                    if (!reader.IsDBNull(1) && !string.IsNullOrWhiteSpace(reader.GetString(1)))
+                                        semester = reader.GetString(1);
+                                }
+                            }
+                        }
+                        LogMessage("DEBUG", $"Fetched fresh academic settings for student - Year: {academicYear}, Semester: {semester}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage("WARNING", $"Failed to fetch fresh academic settings, using cached values: {ex.Message}");
+                    }
+                    
                     // Use ADDTIME to allow early arrival within configured window
                     bool scheduleFound = false;
                     using (var cmdCheckStudentSchedule = new MySqlCommand(@"
@@ -1975,8 +2068,8 @@ namespace FutronicAttendanceSystem.Database
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@currentDay", currentDay);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@earlyWindow", earlyWindowTime);
-                        cmdCheckStudentSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
-                        cmdCheckStudentSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
+                        cmdCheckStudentSchedule.Parameters.AddWithValue("@academicYear", academicYear);
+                        cmdCheckStudentSchedule.Parameters.AddWithValue("@semester", semester);
 
                         using (var reader = cmdCheckStudentSchedule.ExecuteReader())
                         {

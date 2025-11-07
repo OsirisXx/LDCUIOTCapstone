@@ -150,6 +150,7 @@ function AttendanceLogs() {
       : '';
 
         const isUnknownScan = log.RECORD_TYPE === 'unknown_scan' || (log.FIRSTNAME === 'Unknown' && log.LASTNAME === 'User');
+        const isDeniedAccess = log.RECORD_TYPE === 'denied_access' || log.STATUS === 'Denied';
     
     // Extract RFID data from REASON field if available
     let rfidData = null;
@@ -177,6 +178,11 @@ function AttendanceLogs() {
               {!isUnknownScan && (
                 <div className="text-sm text-gray-500">
                   ID: {log.STUDENTID || log.FACULTYID || 'N/A'}
+                </div>
+              )}
+              {isDeniedAccess && log.REASON && (
+                <div className="text-xs text-red-700 font-medium mt-1">
+                  Reason: {log.REASON}
                 </div>
               )}
             </div>
@@ -248,6 +254,8 @@ function AttendanceLogs() {
         return <XCircleIcon className="h-5 w-5 text-red-500" />;
       case 'unknown':
         return <XCircleIcon className="h-5 w-5 text-red-500" />;
+      case 'denied':
+        return <XCircleIcon className="h-5 w-5 text-red-600" />;
       default:
         return <ClockIcon className="h-5 w-5 text-gray-500" />;
     }
@@ -263,6 +271,8 @@ function AttendanceLogs() {
         return 'bg-red-100 text-red-800';
       case 'unknown':
         return 'bg-red-100 text-red-800';
+      case 'denied':
+        return 'bg-red-200 text-red-900';
       default:
         return 'bg-gray-100 text-gray-800';
     }
@@ -391,6 +401,7 @@ function AttendanceLogs() {
               <option value="Present">Present</option>
               <option value="Late">Late</option>
               <option value="Absent">Absent</option>
+              <option value="Denied">Denied</option>
             </select>
           </div>
 

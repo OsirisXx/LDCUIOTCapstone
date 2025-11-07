@@ -18,9 +18,18 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// WiFi credentials - 2.4GHz Network (ESP32 Compatible)
-const char* ssid = "WIFi2.4";         // Your current WiFi network
-const char* password = "fOrtnite901_"; // Your WiFi password
+// WiFi credentials - 2.4GHz Networks (ESP32 Compatible)
+struct WiFiCredential {
+  const char* ssid;
+  const char* password;
+};
+
+WiFiCredential wifiNetworks[] = {
+  {"RedmiTurbo", "TwoOne11"},
+  {"WIFi2.4", "fOrtnite901_"}
+};
+const size_t wifiNetworkCount = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
+int activeNetworkIndex = -1;
 
 // Security - API Key for authentication
 const char* API_KEY = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Change this to your own secret key
@@ -185,20 +194,17 @@ void loop() {
   delay(100);
 }
 
-void connectToWiFi() {
+bool attemptWiFiConnection(const WiFiCredential& network) {
   Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
+  Serial.println(network.ssid);
 
-  // Disconnect first to avoid "sta is connecting" error
   WiFi.disconnect(true);
   delay(1000);
 
-  // Set WiFi mode
   WiFi.mode(WIFI_STA);
   delay(100);
 
-  // Begin connection
-  WiFi.begin(ssid, password);
+  WiFi.begin(network.ssid, network.password);
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
@@ -206,7 +212,6 @@ void connectToWiFi() {
     Serial.print(".");
     attempts++;
 
-    // Print status for debugging
     if (attempts % 10 == 0) {
       Serial.println();
       Serial.print("WiFi Status: ");
@@ -219,25 +224,46 @@ void connectToWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println();
     Serial.println("✓ WiFi connected!");
+    Serial.print("Connected SSID: ");
+    Serial.println(WiFi.SSID());
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
     Serial.print("Signal strength: ");
     Serial.print(WiFi.RSSI());
     Serial.println(" dBm");
-    
-    // Try to discover server IP
-    discoverServerIP();
-  } else {
-    Serial.println();
-    Serial.println("✗ WiFi connection failed!");
-    Serial.print("Final status: ");
-    Serial.println(WiFi.status());
-    Serial.println("Check:");
-    Serial.println("1. WiFi name: " + String(ssid));
-    Serial.println("2. WiFi password: " + String(password));
-    Serial.println("3. WiFi signal strength");
-    Serial.println("4. 2.4GHz vs 5GHz band");
+    return true;
   }
+
+  Serial.println();
+  Serial.println("✗ WiFi connection failed for: " + String(network.ssid));
+  Serial.print("Final status: ");
+  Serial.println(WiFi.status());
+  Serial.println("Check:");
+  Serial.println("1. WiFi name: " + String(network.ssid));
+  Serial.println("2. WiFi password: " + String(network.password));
+  Serial.println("3. WiFi signal strength");
+  Serial.println("4. 2.4GHz vs 5GHz band");
+  return false;
+}
+
+void connectToWiFi() {
+  if (wifiNetworkCount == 0) {
+    Serial.println("⚠️ No WiFi networks configured");
+    return;
+  }
+
+  size_t startIndex = activeNetworkIndex >= 0 ? static_cast<size_t>(activeNetworkIndex) : 0;
+
+  for (size_t attempt = 0; attempt < wifiNetworkCount; ++attempt) {
+    size_t index = (startIndex + attempt) % wifiNetworkCount;
+    if (attemptWiFiConnection(wifiNetworks[index])) {
+      activeNetworkIndex = static_cast<int>(index);
+      discoverServerIP();
+      return;
+    }
+  }
+
+  Serial.println("✗ Unable to connect to any configured WiFi networks.");
 }
   
 // Function to automatically discover server IP

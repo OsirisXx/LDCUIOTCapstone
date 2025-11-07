@@ -51,6 +51,8 @@ function Reports() {
   // const [expandedCards, setExpandedCards] = useState(new Set());
   const [sessionRoster, setSessionRoster] = useState([]);
   const [rosterLoading, setRosterLoading] = useState(false);
+  const [rosterLoadFailed, setRosterLoadFailed] = useState(false);
+  const [rosterLoadErrorReason, setRosterLoadErrorReason] = useState(null);
 
   useEffect(() => {
     fetchInitialData();
@@ -487,8 +489,25 @@ function Reports() {
   const fetchSessionRoster = async (sessionKey) => {
     try {
       setRosterLoading(true);
+      setRosterLoadFailed(false);
+      setRosterLoadErrorReason(null);
       const token = localStorage.getItem('token');
       const headers = { Authorization: `Bearer ${token}` };
+
+      // Validate session key - don't fetch if it contains "Unknown Room" or is missing time
+      // The backend expects format: YYYY-MM-DD-ROOM-STARTTIME where ROOM matches [A-Z]+-\d+ and STARTTIME is HH:MM:SS
+      // Check for obvious invalid patterns
+      if (!sessionKey || 
+          sessionKey.includes('Unknown Room') || 
+          sessionKey.endsWith('-') ||
+          !sessionKey.match(/\d{2}:\d{2}:\d{2}$/)) {
+        console.warn('⚠️ Invalid session key format, skipping roster fetch:', sessionKey);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason('Invalid session information (missing room or time)');
+        setRosterLoading(false);
+        return;
+      }
 
       // URL encode the session key to handle special characters
       const encodedSessionKey = encodeURIComponent(sessionKey);
@@ -497,6 +516,8 @@ function Reports() {
       
       if (response.data.success) {
         setSessionRoster(response.data.roster);
+        setRosterLoadFailed(false);
+        setRosterLoadErrorReason(null);
         // Store instructor information in selectedGroup
         if (response.data.session?.instructor) {
           setSelectedGroup(prev => ({
@@ -508,8 +529,9 @@ function Reports() {
         }
       } else {
         console.error('Failed to load roster:', response.data.message);
-        toast.error('Failed to load class roster');
         setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason(response.data.message || 'Failed to load roster');
       }
     } catch (error) {
       console.error('Error fetching session roster:', error);
@@ -517,10 +539,28 @@ function Reports() {
         toast.error('Session expired. Please login again.');
         localStorage.removeItem('token');
         window.location.href = '/login';
+      } else if (error.response?.status === 404) {
+        // 404 is expected when schedule doesn't exist - show info message but don't block UI
+        console.warn('⚠️ Schedule not found for session (this may be expected):', sessionKey);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason('Schedule not found for this session. The schedule may have been deleted or never existed.');
+        // Don't show error toast for 404s - they're often expected (e.g., schedule was deleted)
+      } else if (error.response?.status === 400) {
+        // 400 means bad request format - we should have caught this earlier, but handle it anyway
+        console.warn('⚠️ Invalid session key format:', sessionKey);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason('Invalid session key format');
+        // Don't show error toast - validation should have caught this
       } else {
+        // Other errors (500, network errors, etc.) - show error toast
+        console.error('Failed to load class roster:', error.response?.data?.message || error.message);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason(error.response?.data?.message || 'Failed to load roster');
         toast.error('Failed to load class roster');
       }
-      setSessionRoster([]);
     } finally {
       setRosterLoading(false);
     }
@@ -529,10 +569,27 @@ function Reports() {
   const viewGroupDetails = (groupKey, groupData) => {
     setSelectedGroup({ key: groupKey, ...groupData });
     setShowGroupDetails(true);
+    // Reset error states when viewing a new group
+    setRosterLoadFailed(false);
+    setRosterLoadErrorReason(null);
+    setSessionRoster([]);
     
     // Fetch session roster when viewing group details
+    // Only fetch if session key is valid (has proper room and time format)
     if (groupKey && groupData) {
-      fetchSessionRoster(groupKey);
+      // Validate session key before fetching
+      // Check for obvious invalid patterns (Unknown Room, missing time, etc.)
+      if (groupKey && 
+          !groupKey.includes('Unknown Room') && 
+          !groupKey.endsWith('-') &&
+          groupKey.match(/\d{2}:\d{2}:\d{2}$/)) {
+        fetchSessionRoster(groupKey);
+      } else {
+        console.warn('⚠️ Skipping roster fetch for invalid session key:', groupKey);
+        // Set error state for invalid session keys
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason('Invalid session information (missing room or time)');
+      }
     }
   };
 
@@ -540,6 +597,8 @@ function Reports() {
     setShowGroupDetails(false);
     setSelectedGroup(null);
     setSessionRoster([]);
+    setRosterLoadFailed(false);
+    setRosterLoadErrorReason(null);
   };
 
   const clearGroupAttendanceRecords = async () => {
@@ -791,9 +850,11 @@ function Reports() {
             <p className="text-sm text-gray-500">
               {rosterLoading 
                 ? 'Loading class list...' 
-                : sessionRoster.length > 0 
-                  ? `${sessionRoster.length} enrolled student${sessionRoster.length !== 1 ? 's' : ''}`
-                  : 'No students enrolled in this subject'
+                : rosterLoadFailed
+                  ? rosterLoadErrorReason || 'Unable to load class list'
+                  : sessionRoster.length > 0 
+                    ? `${sessionRoster.length} enrolled student${sessionRoster.length !== 1 ? 's' : ''}`
+                    : 'No students enrolled in this subject'
               }
             </p>
           </div>
@@ -801,6 +862,17 @@ function Reports() {
           {rosterLoading ? (
             <div className="flex items-center justify-center h-32">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+          ) : rosterLoadFailed ? (
+            <div className="text-center py-12">
+              <ExclamationTriangleIcon className="mx-auto h-12 w-12 text-yellow-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">Unable to load class roster</h3>
+              <p className="mt-1 text-sm text-gray-500 max-w-md mx-auto">
+                {rosterLoadErrorReason || 'The class roster could not be loaded. This may happen if the schedule for this session no longer exists in the system.'}
+              </p>
+              <p className="mt-2 text-xs text-gray-400">
+                Attendance records are still available below.
+              </p>
             </div>
           ) : sessionRoster.length > 0 ? (
             <div className="overflow-x-auto">
@@ -938,7 +1010,17 @@ function Reports() {
           
           {Object.keys(sessions).length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {Object.entries(sessions).map(([sessionKey, session]) => (
+              {Object.entries(sessions)
+                .sort(([keyA, sessionA], [keyB, sessionB]) => {
+                  // Check if title or subtitle contains "null" (case-insensitive)
+                  const aHasNull = (sessionA.title?.toLowerCase().includes('null') || 
+                                   sessionA.subtitle?.toLowerCase().includes('null')) ? 1 : 0;
+                  const bHasNull = (sessionB.title?.toLowerCase().includes('null') || 
+                                   sessionB.subtitle?.toLowerCase().includes('null')) ? 1 : 0;
+                  // Sort: items with null go to bottom
+                  return aHasNull - bHasNull;
+                })
+                .map(([sessionKey, session]) => (
                 <div 
                   key={sessionKey} 
                   className="bg-gray-50 rounded-lg p-6 border border-gray-200 hover:shadow-md hover:border-blue-300 transition-all cursor-pointer"
@@ -1135,9 +1217,11 @@ function Reports() {
             <p className="text-sm text-gray-500">
               {rosterLoading 
                 ? 'Loading class list...' 
-                : sessionRoster.length > 0 
-                  ? `${sessionRoster.length} enrolled student${sessionRoster.length !== 1 ? 's' : ''}`
-                  : 'No students enrolled in this subject'
+                : rosterLoadFailed
+                  ? rosterLoadErrorReason || 'Unable to load class list'
+                  : sessionRoster.length > 0 
+                    ? `${sessionRoster.length} enrolled student${sessionRoster.length !== 1 ? 's' : ''}`
+                    : 'No students enrolled in this subject'
               }
             </p>
           </div>
@@ -1145,6 +1229,17 @@ function Reports() {
           {rosterLoading ? (
             <div className="flex items-center justify-center h-32">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+          ) : rosterLoadFailed ? (
+            <div className="text-center py-12">
+              <ExclamationTriangleIcon className="mx-auto h-12 w-12 text-yellow-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">Unable to load class roster</h3>
+              <p className="mt-1 text-sm text-gray-500 max-w-md mx-auto">
+                {rosterLoadErrorReason || 'The class roster could not be loaded. This may happen if the schedule for this session no longer exists in the system.'}
+              </p>
+              <p className="mt-2 text-xs text-gray-400">
+                Attendance records are still available below.
+              </p>
             </div>
           ) : sessionRoster.length > 0 ? (
             <div className="overflow-x-auto">
@@ -1523,7 +1618,17 @@ function Reports() {
       ) : viewMode === 'cards' ? (
         /* Card View */
         <div className="space-y-6">
-          {Object.entries(groupedReports).map(([key, group]) => {
+          {Object.entries(groupedReports)
+            .sort(([keyA, groupA], [keyB, groupB]) => {
+              // Check if title or subtitle contains "null" (case-insensitive)
+              const aHasNull = (groupA.title?.toLowerCase().includes('null') || 
+                               groupA.subtitle?.toLowerCase().includes('null')) ? 1 : 0;
+              const bHasNull = (groupB.title?.toLowerCase().includes('null') || 
+                               groupB.subtitle?.toLowerCase().includes('null')) ? 1 : 0;
+              // Sort: items with null go to bottom (1 - 0 = 1, so A goes after B)
+              return aHasNull - bHasNull;
+            })
+            .map(([key, group]) => {
             const hasSessions = group.sessions && Object.keys(group.sessions).length > 0;
             
             return (

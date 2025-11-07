@@ -1000,12 +1000,18 @@ router.get('/attendance', authenticateToken, async (req, res) => {
         }
 
         // Status filter
-        let filterUnknownScans = true; // By default, include unknown scans when no status filter
+        let filterUnknownScans = true; // By default, include denied access logs when no status filter
         if (status) {
             if (status === 'Unknown') {
                 // When filtering for Unknown, only show unknown scans (exclude attendance records)
                 filterUnknownScans = true;
                 whereClause += ' AND 1=0'; // This will exclude all attendance records
+                // Will only show ACCESSLOGS entries where USERID IS NULL
+            } else if (status === 'Denied') {
+                // When filtering for Denied, only show denied access logs (exclude attendance records)
+                filterUnknownScans = true;
+                whereClause += ' AND 1=0'; // This will exclude all attendance records
+                // Will only show ACCESSLOGS entries where RESULT = 'denied'
             } else if (status === 'Present') {
                 // Filter by status - for Present, we need to include ADMIN-ACCESS and custodian/dean door access
                 whereClause += ' AND (';
@@ -1014,30 +1020,46 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 whereClause += '  (LOWER(u.USERTYPE) IN (?, ?) AND ar.ACTIONTYPE = ?)'; // custodian/dean door access
                 whereClause += ')';
                 params.push('Present', 'ADMIN-ACCESS', 'custodian', 'dean', 'Door Access');
-                filterUnknownScans = false; // Don't include unknown scans when filtering for Present
+                filterUnknownScans = false; // Don't include denied access logs when filtering for Present
             } else {
                 // For Late or Absent, only check ar.STATUS directly (ADMIN-ACCESS and door access are always Present)
                 whereClause += ' AND ar.STATUS = ?';
                 params.push(status);
-                filterUnknownScans = false; // Don't include unknown scans when filtering for Late/Absent
+                filterUnknownScans = false; // Don't include denied access logs when filtering for Late/Absent
             }
         }
 
-        // Build WHERE clause for unknown scans filter
-        let unknownWhereClause = 'WHERE al.USERID IS NULL AND al.ACCESSTYPE = \'attendance_scan\' AND al.RESULT = \'denied\'';
-        const unknownParams = [];
+        // Build WHERE clause for denied access logs (both known and unknown users)
+        // Updated to include ALL denied access attempts, not just unknown users
+        let deniedAccessWhereClause = 'WHERE al.ACCESSTYPE = \'attendance_scan\' AND al.RESULT = \'denied\'';
+        const deniedAccessParams = [];
+        
+        // If status filter is 'Unknown', only show unknown user denials
+        // If status filter is 'Denied', show all denied access attempts (known and unknown)
+        // Otherwise (no status filter or other filters), show all denied access attempts
+        if (status === 'Unknown') {
+            deniedAccessWhereClause += ' AND al.USERID IS NULL';
+        }
+        // For 'Denied' status or no status filter, show all denied attempts (no additional filter)
 
-        // Search filter for unknown scans (searches in REASON field for RFID data)
+        // Search filter for denied access logs (searches in REASON field, user names, or student IDs)
         if (search) {
-            unknownWhereClause += ' AND al.REASON LIKE ?';
+            deniedAccessWhereClause += ` AND (
+                al.REASON LIKE ? OR
+                EXISTS (
+                    SELECT 1 FROM USERS u 
+                    WHERE u.USERID = al.USERID 
+                    AND (u.FIRSTNAME LIKE ? OR u.LASTNAME LIKE ? OR u.STUDENTID LIKE ? OR u.FACULTYID LIKE ?)
+                )
+            )`;
             const searchTerm = `%${search}%`;
-            unknownParams.push(searchTerm);
+            deniedAccessParams.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
         }
 
-        // Date filter for unknown scans
+        // Date filter for denied access logs
         if (date) {
-            unknownWhereClause += ' AND DATE(al.TIMESTAMP) = ?';
-            unknownParams.push(date);
+            deniedAccessWhereClause += ' AND DATE(al.TIMESTAMP) = ?';
+            deniedAccessParams.push(date);
         }
 
         // Enhanced query with room, subject, and session information (day, time, room)
@@ -1089,7 +1111,7 @@ router.get('/attendance', authenticateToken, async (req, res) => {
             LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
             ${whereClause}`;
 
-        // Add UNION ALL for unknown scans only if filterUnknownScans is true
+        // Add UNION ALL for denied access logs (both known and unknown users) if filterUnknownScans is true
         if (filterUnknownScans) {
             logsQuery += `
             
@@ -1101,16 +1123,22 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 NULL as SCHEDULEID,
                 al.TIMESTAMP as SCANDATETIME,
                 al.TIMESTAMP,
-                'Unknown' as STATUS,
+                CASE 
+                    WHEN al.USERID IS NULL THEN 'Unknown'
+                    ELSE 'Denied'
+                END as STATUS,
                 al.AUTHMETHOD,
-                'Unknown Scan' as ACTIONTYPE,
+                CASE 
+                    WHEN al.USERID IS NULL THEN 'Unknown Scan'
+                    ELSE 'Access Denied'
+                END as ACTIONTYPE,
                 al.LOCATION,
                 NULL as ACADEMICYEAR,
                 NULL as SEMESTER,
-                'Unknown' as FIRSTNAME,
-                'User' as LASTNAME,
-                NULL as STUDENTID,
-                NULL as USERTYPE,
+                COALESCE(u.FIRSTNAME, 'Unknown') as FIRSTNAME,
+                COALESCE(u.LASTNAME, 'User') as LASTNAME,
+                u.STUDENTID,
+                u.USERTYPE,
                 NULL as SUBJECTCODE,
                 NULL as SUBJECTNAME,
                 r.ROOMNUMBER,
@@ -1120,10 +1148,14 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 NULL as ENDTIME,
                 DATE(al.TIMESTAMP) as DATE,
                 al.REASON,
-                'unknown_scan' as RECORD_TYPE
+                CASE 
+                    WHEN al.USERID IS NULL THEN 'unknown_scan'
+                    ELSE 'denied_access'
+                END as RECORD_TYPE
             FROM ACCESSLOGS al
+            LEFT JOIN USERS u ON al.USERID = u.USERID
             LEFT JOIN ROOMS r ON al.ROOMID = r.ROOMID
-            ${unknownWhereClause}`;
+            ${deniedAccessWhereClause}`;
         }
         
         logsQuery += `
@@ -1132,9 +1164,9 @@ router.get('/attendance', authenticateToken, async (req, res) => {
             LIMIT ? OFFSET ?
         `;
 
-        // Combine params for UNION query (only include unknownParams if filterUnknownScans is true)
+        // Combine params for UNION query (only include deniedAccessParams if filterUnknownScans is true)
         const queryParams = filterUnknownScans 
-            ? [...params, ...unknownParams, limitNum.toString(), offset.toString()]
+            ? [...params, ...deniedAccessParams, limitNum.toString(), offset.toString()]
             : [...params, limitNum.toString(), offset.toString()];
         const logs = await executeQuery(logsQuery, queryParams);
 
@@ -1158,13 +1190,13 @@ router.get('/attendance', authenticateToken, async (req, res) => {
                 SELECT al.LOGID
                 FROM ACCESSLOGS al
                 LEFT JOIN ROOMS r ON al.ROOMID = r.ROOMID
-                ${unknownWhereClause}`;
+                ${deniedAccessWhereClause}`;
         }
         
         countQuery += `
             ) as combined
         `;
-        const countParams = filterUnknownScans ? [...params, ...unknownParams] : [...params];
+        const countParams = filterUnknownScans ? [...params, ...deniedAccessParams] : [...params];
         const totalResult = await getSingleResult(countQuery, countParams);
         const total = totalResult?.total || 0;
         const totalPages = Math.ceil(total / limitNum);

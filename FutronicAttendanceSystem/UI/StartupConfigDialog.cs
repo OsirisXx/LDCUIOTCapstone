@@ -450,6 +450,9 @@ namespace FutronicAttendanceSystem.UI
                     RoomName = selectedRoom.DisplayName,
                     Building = selectedRoom.Building,
                     TestMode = chkTestMode.Checked,
+                    AllowUnauthorizedFingerprints = currentConfig?.AllowUnauthorizedFingerprints ?? false,
+                    AllowFingerprintOnly = currentConfig?.AllowFingerprintOnly ?? false,
+                    AllowRfidOnly = currentConfig?.AllowRfidOnly ?? false,
                     InsideSensor = insideDevice.DeviceId != "NONE" ? new SensorConfig
                     {
                         UsbDevicePath = insideDevice.DevicePath,
