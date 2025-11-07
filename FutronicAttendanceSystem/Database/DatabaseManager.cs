@@ -1256,10 +1256,13 @@ namespace FutronicAttendanceSystem.Database
                 }
 
                 // First, validate if there's a scheduled class for the current time and room                                                                   
-                var scheduleValidation = ValidateScheduleForCurrentTime(userGuid);                                                                              
+                var scheduleValidation = ValidateScheduleForCurrentTime(userGuid);
                 
-                // For sign-out, allow if validation fails but there's an active session or prior sign-in today
-                if (!scheduleValidation.IsValid && !isSignOut)
+                // Check if this is a door access action (for instructors, custodians, deans)
+                bool isDoorAccessAction = !string.IsNullOrEmpty(action) && action.IndexOf("Door Access", StringComparison.OrdinalIgnoreCase) >= 0;
+                
+                // For sign-out or door access, allow if validation fails but there's an active session or prior sign-in today
+                if (!scheduleValidation.IsValid && !isSignOut && !isDoorAccessAction)
                 {
                     LogMessage("WARNING", $"Schedule validation failed: {scheduleValidation.Reason}");                                                          
                     return new AttendanceAttemptResult { Success = false, Reason = scheduleValidation.Reason, SubjectName = scheduleValidation.SubjectName };   
@@ -1408,9 +1411,10 @@ namespace FutronicAttendanceSystem.Database
 
                 bool isCustodian = userType != null && userType.Equals("custodian", StringComparison.OrdinalIgnoreCase);
                 bool isDean = userType != null && userType.Equals("dean", StringComparison.OrdinalIgnoreCase);
+                bool isInstructor = userType != null && userType.Equals("instructor", StringComparison.OrdinalIgnoreCase);
 
-                // For custodians or deans without a specific schedule, use administrative schedule
-                if (string.IsNullOrWhiteSpace(scheduleId) && (isCustodian || (isDean && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))))
+                // For custodians, deans, or instructors with door access action without a specific schedule, use administrative schedule
+                if (string.IsNullOrWhiteSpace(scheduleId) && (isCustodian || (isDean && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId)) || (isInstructor && isDoorAccessAction && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))))
                 {
                     scheduleId = GetOrCreateAdministrativeSchedule(CurrentRoomId ?? "");
                     if (string.IsNullOrWhiteSpace(scheduleId))
@@ -1419,10 +1423,10 @@ namespace FutronicAttendanceSystem.Database
                         return new AttendanceAttemptResult { Success = false, Reason = "Failed to get administrative schedule" };
                     }
                     sessionId = null; // Don't associate with a session
-                    LogMessage("INFO", $"Using administrative schedule {scheduleId} for {userType} access");
+                    LogMessage("INFO", $"Using administrative schedule {scheduleId} for {userType} door access");
                 }
-                                // Other roles require a schedule (except sign-out, which can use NULL if no schedule found)
-                else if (string.IsNullOrWhiteSpace(scheduleId) && !isSignOut)
+                                // Other roles require a schedule (except sign-out and door access, which can use NULL if no schedule found)
+                else if (string.IsNullOrWhiteSpace(scheduleId) && !isSignOut && !isDoorAccessAction)
                 {
                     LogMessage("ERROR", "RecordAttendance: No valid schedule available to attach attendance.");
                     return new AttendanceAttemptResult { Success = false, Reason = "No valid schedule available" };
@@ -1457,7 +1461,11 @@ namespace FutronicAttendanceSystem.Database
                     scanType = "time_in";
                 }
                 string status = "Present";
-                bool isDoorAccessAction = !string.IsNullOrEmpty(action) && action.IndexOf("Door Access", StringComparison.OrdinalIgnoreCase) >= 0;
+                // Note: isDoorAccessAction was already determined above, but keep this for backward compatibility
+                if (!isDoorAccessAction)
+                {
+                    isDoorAccessAction = !string.IsNullOrEmpty(action) && action.IndexOf("Door Access", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
                 
                 // Determine auth method based on action string
                 string authMethod = "Fingerprint"; // Default

@@ -13,6 +13,6 @@
   "AllowUnauthorizedFingerprints": false,
   "AllowFingerprintOnly": false,
   "AllowRfidOnly": false,
-  "AllowInstructorDoorAccess": true,
-  "LastUpdated": "2025-11-08T01:00:08.2684703+08:00"
+  "AllowInstructorDoorAccess": false,
+  "LastUpdated": "2025-11-08T01:36:22.6927549+08:00"
 }

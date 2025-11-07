@@ -3327,7 +3327,29 @@ namespace FutronicAttendanceSystem
                                         attendanceRecords.Add(doorAccessRecord);
                                         UpdateAttendanceDisplay(doorAccessRecord);
                                         
-                                        // Record attendance for visibility
+                                        // Log successful door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userGuid,
+                                                    roomId: null,
+                                                    authMethod: "Fingerprint",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class)"
+                                                );
+                                                Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userName}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Also record attendance so it appears in web logs (ATTENDANCERECORDS)
                                         RecordAttendance(userName, "Door Access", true, currentScanLocation);
                                         
                                         // Trigger door access
@@ -3357,6 +3379,28 @@ namespace FutronicAttendanceSystem
                                         // Door access not enabled - deny
                                         SetStatusText($"❌ {userName}: No scheduled class. Door access not enabled.");
                                         Console.WriteLine($"❌ INSTRUCTOR {userName} DENIED: No scheduled class and door access not enabled");
+                                        
+                                        // Log denied access attempt to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userGuid,
+                                                    roomId: null,
+                                                    authMethod: "Fingerprint",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                );
+                                                Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                            }
+                                        }
                                         
                                         // Reset verification state
                                         awaitingCrossTypeVerification = false;
@@ -3446,8 +3490,27 @@ namespace FutronicAttendanceSystem
                                         attendanceRecords.Add(doorAccessRecord);
                                         UpdateAttendanceDisplay(doorAccessRecord);
                                         
-                                        // Record attendance for visibility
-                                        RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                        // Log successful door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userGuid,
+                                                    roomId: null,
+                                                    authMethod: "Fingerprint",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class)"
+                                                );
+                                                Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userName}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
                                         
                                         // Trigger door access
                                         _ = System.Threading.Tasks.Task.Run(async () => {
@@ -3469,6 +3532,29 @@ namespace FutronicAttendanceSystem
                                         // Door access not enabled - deny
                                         SetStatusText($"❌ {userName}: No scheduled class. Door access not enabled.");
                                         Console.WriteLine($"❌ INSTRUCTOR {userName} DENIED: No scheduled class and door access not enabled");
+                                        
+                                        // Log denied access attempt to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userGuid,
+                                                    roomId: null,
+                                                    authMethod: "Fingerprint",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                );
+                                                Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                            }
+                                        }
+                                        
                                         ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                                         return;
                                     }
@@ -8411,8 +8497,31 @@ namespace FutronicAttendanceSystem
                                             SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted (no scheduled class).");
                                             AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
                                             
-                                            // Record attendance for visibility
-                                            RecordAttendance(userInfo.Username, "Door Access", true, currentScanLocation);
+                                            // Log successful door access to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "success",
+                                                        reason: "Instructor door access granted (no scheduled class)"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                                }
+                                            }
+                                            
+                                            // Also record attendance so it appears in web logs (ATTENDANCERECORDS)
+                                            // Use "RFID Door Access" to indicate RFID authentication method
+                                            RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
                                             
                                             // Trigger door access
                                             _ = System.Threading.Tasks.Task.Run(async () => {
@@ -8441,6 +8550,28 @@ namespace FutronicAttendanceSystem
                                             SetRfidStatusText($"❌ {userInfo.Username}: No scheduled class. Door access not enabled.");
                                             Console.WriteLine($"❌ INSTRUCTOR {userInfo.Username} DENIED: No scheduled class and door access not enabled");
                                             AddRfidAttendanceRecord(userInfo.Username, "Access Denied", "No scheduled class");
+                                            
+                                            // Log denied access attempt to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "denied",
+                                                        reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                                }
+                                            }
                                             
                                             // Reset verification state
                                             awaitingCrossTypeVerification = false;
@@ -8493,8 +8624,27 @@ namespace FutronicAttendanceSystem
                                             SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted (no scheduled class).");
                                             AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
                                             
-                                            // Record attendance for visibility
-                                            RecordAttendance(userInfo.Username, "Door Access", true, currentScanLocation);
+                                            // Log successful door access to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "success",
+                                                        reason: "Instructor door access granted (no scheduled class)"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                                }
+                                            }
                                             
                                             // Trigger door access
                                             _ = System.Threading.Tasks.Task.Run(async () => {
@@ -8516,6 +8666,29 @@ namespace FutronicAttendanceSystem
                                             SetRfidStatusText($"❌ {userInfo.Username}: No scheduled class. Door access not enabled.");
                                             Console.WriteLine($"❌ INSTRUCTOR {userInfo.Username} DENIED: No scheduled class and door access not enabled");
                                             AddRfidAttendanceRecord(userInfo.Username, "Access Denied", "No scheduled class");
+                                            
+                                            // Log denied access attempt to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "denied",
+                                                        reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                                }
+                                            }
+                                            
                                             return;
                                         }
                                     }
@@ -8563,8 +8736,31 @@ namespace FutronicAttendanceSystem
                                             SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted (no scheduled class).");
                                             AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
                                             
-                                            // Record attendance for visibility
-                                            RecordAttendance(userInfo.Username, "Door Access", true, currentScanLocation);
+                                            // Log successful door access to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "success",
+                                                        reason: "Instructor door access granted (no scheduled class)"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                                }
+                                            }
+                                            
+                                            // Also record attendance so it appears in web logs (ATTENDANCERECORDS)
+                                            // Use "RFID Door Access" to indicate RFID authentication method
+                                            RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
                                             
                                             // Trigger door access
                                             _ = System.Threading.Tasks.Task.Run(async () => {
@@ -8586,6 +8782,29 @@ namespace FutronicAttendanceSystem
                                             SetRfidStatusText($"❌ {userInfo.Username}: No scheduled class. Door access not enabled.");
                                             Console.WriteLine($"❌ INSTRUCTOR {userInfo.Username} DENIED: No scheduled class and door access not enabled");
                                             AddRfidAttendanceRecord(userInfo.Username, "Access Denied", "No scheduled class");
+                                            
+                                            // Log denied access attempt to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "denied",
+                                                        reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                                }
+                                            }
+                                            
                                             return;
                                         }
                                     }
