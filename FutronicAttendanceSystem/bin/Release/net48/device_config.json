@@ -1,0 +1,18 @@
+{
+  "RoomId": "5d3225b6-2235-4434-bda3-fad3ef9fbfbc",
+  "RoomName": "WAC-302 - WAC-302 (WAC)",
+  "Building": "WAC",
+  "InsideSensor": {
+    "UsbDevicePath": "USB\\VID_1491&PID_0020\\FS00000000",
+    "DeviceId": "WAC-302_Inside",
+    "Enabled": true,
+    "SensorIndex": 0
+  },
+  "OutsideSensor": null,
+  "TestMode": false,
+  "AllowUnauthorizedFingerprints": false,
+  "AllowFingerprintOnly": false,
+  "AllowRfidOnly": false,
+  "AllowInstructorDoorAccess": false,
+  "LastUpdated": "2025-11-08T11:37:29.1591812+08:00"
+}
