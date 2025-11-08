@@ -2655,22 +2655,6 @@ namespace FutronicAttendanceSystem.Database
                 }
                 LogMessage("DEBUG", $"Active instructors count: {instructorCount}");
                 
-                // Check specific instructor
-                using (var cmd = new MySqlCommand("SELECT USERID, EMAIL, USERTYPE, STATUS FROM USERS WHERE EMAIL = 'harleyinstructor@gmail.com'", connection))
-                {
-                    using (var reader = cmd.ExecuteReader())
-                    {
-                        if (reader.Read())
-                        {
-                            LogMessage("DEBUG", $"Found instructor: ID={reader.GetString("USERID")}, Email={reader.GetString("EMAIL")}, Type={reader.GetString("USERTYPE")}, Status={reader.GetString("STATUS")}");
-                        }
-                        else
-                        {
-                            LogMessage("WARNING", "harleyinstructor@gmail.com not found in database");
-                        }
-                    }
-                }
-                
                 // Check if we have any class schedules
                 var scheduleCount = 0;
                 using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM CLASSSCHEDULES", connection))

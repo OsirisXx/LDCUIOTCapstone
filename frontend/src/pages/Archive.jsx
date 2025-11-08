@@ -1154,11 +1154,16 @@ function Archive() {
                                   {isGroupExpanded('attendance', group.key) && (
                                     <tr>
                                       <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="mb-2 text-xs text-gray-500">
+                                          Showing {group.items.length} archived record{group.items.length !== 1 ? 's' : ''} 
+                                          ({group.items.filter(r => r.RECORD_TYPE === 'attendance_record').length} attendance record{group.items.filter(r => r.RECORD_TYPE === 'attendance_record').length !== 1 ? 's' : ''}, 
+                                          {' '}{group.items.filter(r => r.RECORD_TYPE === 'unknown_scan' || r.RECORD_TYPE === 'denied_access').length} access log{group.items.filter(r => r.RECORD_TYPE === 'unknown_scan' || r.RECORD_TYPE === 'denied_access').length !== 1 ? 's' : ''})
+                                        </div>
                                         <div className="overflow-x-auto border border-gray-200 rounded">
                                           <table className="min-w-full divide-y divide-gray-200">
                                             <thead className="bg-white">
                                               <tr>
-                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">User</th>
                                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
                                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
@@ -1166,48 +1171,80 @@ function Archive() {
                                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
                                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
                                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Reason</th>
                                               </tr>
                                             </thead>
                                             <tbody className="bg-white divide-y divide-gray-200">
-                                              {group.items.map((record) => (
-                                                <tr key={record.ATTENDANCEID}>
-                                                  <td className="px-4 py-2 text-sm">
-                                                    <div className="text-gray-900 font-medium">{record.FIRSTNAME} {record.LASTNAME}</div>
-                                                    <div className="text-gray-500">{record.STUDENTID}</div>
-                                                  </td>
-                                                  <td className="px-4 py-2 text-sm">
-                                                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                                      record.STATUS === 'Present' ? 'bg-green-100 text-green-800' :
-                                                      record.STATUS === 'Late' ? 'bg-yellow-100 text-yellow-800' :
-                                                      'bg-red-100 text-red-800'
-                                                    }`}>
-                                                      {record.STATUS}
-                                                    </span>
-                                                  </td>
-                                                  <td className="px-4 py-2 text-sm text-gray-900">{record.ACTIONTYPE || 'N/A'}</td>
-                                                  <td className="px-4 py-2 text-sm">
-                                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                                      record.AUTHMETHOD === 'RFID' ? 'bg-blue-100 text-blue-800' :
-                                                      record.AUTHMETHOD === 'Fingerprint' ? 'bg-purple-100 text-purple-800' :
-                                                      record.AUTHMETHOD === 'RFID + Fingerprint' ? 'bg-indigo-100 text-indigo-800' :
-                                                      'bg-gray-100 text-gray-800'
-                                                    }`}>
-                                                      {record.AUTHMETHOD || 'Fingerprint'}
-                                                    </span>
-                                                  </td>
-                                                  <td className="px-4 py-2 text-sm">
-                                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                                      record.LOCATION === 'inside' ? 'bg-green-100 text-green-800' :
-                                                      'bg-orange-100 text-orange-800'
-                                                    }`}>
-                                                      {record.LOCATION === 'inside' ? 'Inside' : 'Outside'}
-                                                    </span>
-                                                  </td>
-                                                  <td className="px-4 py-2 text-sm text-gray-900">{record.ROOMNUMBER || 'N/A'}</td>
-                                                  <td className="px-4 py-2 text-sm text-gray-900">{record.SUBJECTCODE || 'N/A'}</td>
-                                                  <td className="px-4 py-2 text-sm text-gray-900">{formatDate(record.DATE)}</td>
-                                                </tr>
-                                              ))}
+                                              {group.items.map((record) => {
+                                                const isAccessLog = record.RECORD_TYPE === 'unknown_scan' || record.RECORD_TYPE === 'denied_access';
+                                                const isUnknownUser = record.RECORD_TYPE === 'unknown_scan';
+                                                
+                                                return (
+                                                  <tr key={record.ATTENDANCEID}>
+                                                    <td className="px-4 py-2 text-sm">
+                                                      <div className="text-gray-900 font-medium">
+                                                        {isUnknownUser ? 'Unknown User' : `${record.FIRSTNAME} ${record.LASTNAME}`}
+                                                      </div>
+                                                      {record.STUDENTID && (
+                                                        <div className="text-gray-500">ID: {record.STUDENTID}</div>
+                                                      )}
+                                                      {isAccessLog && record.RECORD_TYPE === 'unknown_scan' && (
+                                                        <div className="text-gray-500 text-xs italic">Unknown Scan</div>
+                                                      )}
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm">
+                                                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                                        record.STATUS === 'Present' ? 'bg-green-100 text-green-800' :
+                                                        record.STATUS === 'Late' ? 'bg-yellow-100 text-yellow-800' :
+                                                        record.STATUS === 'Unknown' ? 'bg-gray-100 text-gray-800' :
+                                                        record.STATUS === 'Denied' ? 'bg-red-100 text-red-800' :
+                                                        'bg-red-100 text-red-800'
+                                                      }`}>
+                                                        {record.STATUS}
+                                                      </span>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">{record.ACTIONTYPE || 'N/A'}</td>
+                                                    <td className="px-4 py-2 text-sm">
+                                                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                                        record.AUTHMETHOD === 'RFID' ? 'bg-blue-100 text-blue-800' :
+                                                        record.AUTHMETHOD === 'Fingerprint' ? 'bg-purple-100 text-purple-800' :
+                                                        record.AUTHMETHOD === 'RFID + Fingerprint' ? 'bg-indigo-100 text-indigo-800' :
+                                                        'bg-gray-100 text-gray-800'
+                                                      }`}>
+                                                        {record.AUTHMETHOD || 'N/A'}
+                                                      </span>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm">
+                                                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                                        record.LOCATION === 'inside' ? 'bg-green-100 text-green-800' :
+                                                        'bg-orange-100 text-orange-800'
+                                                      }`}>
+                                                        {record.LOCATION === 'inside' ? 'Inside' : 'Outside'}
+                                                      </span>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">{record.ROOMNUMBER || 'N/A'}</td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">
+                                                      {isAccessLog ? (
+                                                        <span className="text-gray-400 italic">N/A</span>
+                                                      ) : (
+                                                        record.SUBJECTCODE || 'N/A'
+                                                      )}
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">
+                                                      {record.DATE ? formatDate(record.DATE) : (record.TIMESTAMP ? formatDate(record.TIMESTAMP) : 'N/A')}
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">
+                                                      {record.REASON ? (
+                                                        <span className="text-xs text-gray-600" title={record.REASON}>
+                                                          {record.REASON.length > 50 ? `${record.REASON.substring(0, 50)}...` : record.REASON}
+                                                        </span>
+                                                      ) : (
+                                                        <span className="text-gray-400">-</span>
+                                                      )}
+                                                    </td>
+                                                  </tr>
+                                                );
+                                              })}
                                             </tbody>
                                           </table>
                                         </div>

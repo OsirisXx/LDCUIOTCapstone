@@ -6,7 +6,8 @@ import {
   ArrowPathIcon,
   MagnifyingGlassIcon,
   UserGroupIcon,
-  AdjustmentsHorizontalIcon
+  AdjustmentsHorizontalIcon,
+  ExclamationTriangleIcon
 } from '@heroicons/react/24/outline';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -25,6 +26,11 @@ function SuperAdmin() {
   const [refreshing, setRefreshing] = useState(false);
   const [searchInput, setSearchInput] = useState('');
   const [filters, setFilters] = useState({ role: 'all', status: 'all', search: '' });
+  const [showStatusModal, setShowStatusModal] = useState(false);
+  const [statusModalAnimation, setStatusModalAnimation] = useState('hidden');
+  const [selectedRecord, setSelectedRecord] = useState(null);
+  const [nextStatus, setNextStatus] = useState('');
+  const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
 
   const isSelf = (record) => record.USERID === user?.id;
 
@@ -117,29 +123,46 @@ function SuperAdmin() {
     }
   };
 
-  const handleStatusToggle = async (record) => {
-    const nextStatus = record.STATUS === 'Active' ? 'inactive' : 'active';
-    const confirmation = window.confirm(`Set ${record.FIRSTNAME} ${record.LASTNAME} to ${nextStatus}?`);
-    if (!confirmation) {
-      return;
-    }
+  const handleStatusToggle = (record) => {
+    const newStatus = record.STATUS === 'Active' ? 'inactive' : 'active';
+    setSelectedRecord(record);
+    setNextStatus(newStatus);
+    setShowStatusModal(true);
+    setTimeout(() => setStatusModalAnimation('visible'), 10);
+  };
 
+  const closeStatusModal = () => {
+    setStatusModalAnimation('hidden');
+    setTimeout(() => {
+      setShowStatusModal(false);
+      setSelectedRecord(null);
+      setNextStatus('');
+    }, 300);
+  };
+
+  const confirmStatusToggle = async () => {
+    if (!selectedRecord) return;
+
+    setIsUpdatingStatus(true);
     try {
       const payload = { status: nextStatus };
-      const { data } = await axios.put(`/api/users/${record.USERID}`, payload);
+      const { data } = await axios.put(`/api/users/${selectedRecord.USERID}`, payload);
       toast.success('Status updated.');
       const updated = data?.user;
       setRecords((previous) =>
         previous.map((item) =>
-          item.USERID === record.USERID
+          item.USERID === selectedRecord.USERID
             ? { ...item, ...updated, STATUS: updated?.STATUS ?? (nextStatus === 'active' ? 'Active' : 'Inactive') }
             : item
         )
       );
+      closeStatusModal();
     } catch (error) {
       console.error('Status update failed:', error);
       const message = error.response?.data?.message || 'Failed to update status.';
       toast.error(message);
+    } finally {
+      setIsUpdatingStatus(false);
     }
   };
 
@@ -342,6 +365,95 @@ function SuperAdmin() {
           </ul>
         </div>
       </div>
+
+      {/* Status Toggle Confirmation Modal */}
+      {showStatusModal && selectedRecord && (
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
+          {/* Backdrop with blur and fade animation */}
+          <div 
+            className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
+              statusModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+            }`}
+            onClick={closeStatusModal}
+          >
+            <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
+              {/* Modal container with scale and fade animation */}
+              <div 
+                className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
+                  statusModalAnimation === 'visible' 
+                    ? 'scale-100 opacity-100 translate-y-0' 
+                    : 'scale-95 opacity-0 translate-y-4'
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* Gradient header */}
+                <div className={`bg-gradient-to-r px-6 py-8 ${
+                  nextStatus === 'inactive' 
+                    ? 'from-amber-50 to-orange-100' 
+                    : 'from-emerald-50 to-green-100'
+                }`}>
+                  <div className={`mx-auto flex items-center justify-center h-16 w-16 rounded-full shadow-lg mb-4 ${
+                    nextStatus === 'inactive' 
+                      ? 'bg-amber-100 animate-pulse' 
+                      : 'bg-emerald-100 animate-pulse'
+                  }`}>
+                    <ExclamationTriangleIcon className={`h-8 w-8 ${
+                      nextStatus === 'inactive' ? 'text-amber-600' : 'text-emerald-600'
+                    }`} />
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                    {nextStatus === 'inactive' ? 'Deactivate Account' : 'Activate Account'}
+                  </h3>
+                  <p className="text-sm text-gray-600 leading-relaxed">
+                    Are you sure you want to {nextStatus === 'inactive' ? 'deactivate' : 'activate'} the account for{' '}
+                    <strong className="font-semibold text-gray-900">
+                      {selectedRecord.FIRSTNAME} {selectedRecord.LASTNAME}
+                    </strong>?
+                  </p>
+                  {nextStatus === 'inactive' && (
+                    <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                      <p className="text-sm text-amber-800 font-medium">
+                        ⚠️ Deactivated accounts will not be able to access the system until reactivated.
+                      </p>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Action buttons */}
+                <div className="bg-gray-50 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-3 space-y-3 space-y-reverse sm:space-y-0">
+                  <button
+                    type="button"
+                    onClick={closeStatusModal}
+                    disabled={isUpdatingStatus}
+                    className="w-full sm:w-auto inline-flex justify-center items-center px-6 py-3 border border-gray-300 shadow-sm text-sm font-medium rounded-xl text-gray-700 bg-white hover:bg-gray-50 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-all duration-200 ease-in-out transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmStatusToggle}
+                    disabled={isUpdatingStatus}
+                    className={`w-full sm:w-auto inline-flex justify-center items-center px-6 py-3 border border-transparent shadow-sm text-sm font-medium rounded-xl text-white bg-gradient-to-r focus:outline-none focus:ring-2 focus:ring-offset-2 transition-all duration-200 ease-in-out transform hover:scale-105 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed ${
+                      nextStatus === 'inactive'
+                        ? 'from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 focus:ring-amber-500'
+                        : 'from-emerald-600 to-green-600 hover:from-emerald-700 hover:to-green-700 focus:ring-emerald-500'
+                    }`}
+                  >
+                    {isUpdatingStatus ? (
+                      <>
+                        <ArrowPathIcon className="mr-2 h-4 w-4 animate-spin" />
+                        {nextStatus === 'inactive' ? 'Deactivating...' : 'Activating...'}
+                      </>
+                    ) : (
+                      nextStatus === 'inactive' ? 'Deactivate Account' : 'Activate Account'
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -982,6 +982,23 @@ router.get('/attendance', authenticateToken, async (req, res) => {
         const limitNum = Math.max(1, Math.min(100, parseInt(limit) || 10));
         const offset = (pageNum - 1) * limitNum;
 
+        // Check if ARCHIVED_AT column exists in ACCESSLOGS table
+        let accessLogsHasArchivedColumn = false;
+        try {
+            const columnCheck = await getSingleResult(`
+                SELECT COUNT(*) as count 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = DATABASE() 
+                AND TABLE_NAME = 'ACCESSLOGS' 
+                AND COLUMN_NAME = 'ARCHIVED_AT'
+            `);
+            accessLogsHasArchivedColumn = columnCheck && columnCheck.count > 0;
+        } catch (error) {
+            console.warn('Could not check for ARCHIVED_AT column in ACCESSLOGS:', error.message);
+            // Assume column doesn't exist if check fails
+            accessLogsHasArchivedColumn = false;
+        }
+
         // Build WHERE clause for filters
         let whereClause = 'WHERE ar.ARCHIVED_AT IS NULL';
         const params = [];
@@ -1031,7 +1048,11 @@ router.get('/attendance', authenticateToken, async (req, res) => {
 
         // Build WHERE clause for denied access logs (both known and unknown users)
         // Updated to include ALL denied access attempts, not just unknown users
+        // Also filter out archived access logs (if column exists)
         let deniedAccessWhereClause = 'WHERE al.ACCESSTYPE = \'attendance_scan\' AND al.RESULT = \'denied\'';
+        if (accessLogsHasArchivedColumn) {
+            deniedAccessWhereClause += ' AND al.ARCHIVED_AT IS NULL';
+        }
         const deniedAccessParams = [];
         
         // If status filter is 'Unknown', only show unknown user denials

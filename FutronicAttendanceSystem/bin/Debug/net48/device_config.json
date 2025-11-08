@@ -10,9 +10,9 @@
   },
   "OutsideSensor": null,
   "TestMode": false,
-  "AllowUnauthorizedFingerprints": true,
-  "AllowFingerprintOnly": true,
+  "AllowUnauthorizedFingerprints": false,
+  "AllowFingerprintOnly": false,
   "AllowRfidOnly": false,
-  "AllowInstructorDoorAccess": true,
-  "LastUpdated": "2025-11-08T14:46:43.4187896+08:00"
+  "AllowInstructorDoorAccess": false,
+  "LastUpdated": "2025-11-08T20:08:52.1696217+08:00"
 }

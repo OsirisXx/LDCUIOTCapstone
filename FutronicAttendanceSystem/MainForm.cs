@@ -111,7 +111,7 @@ namespace FutronicAttendanceSystem
                     testOperation.FakeDetection = false;
                     testOperation.FFDControl = false;
                     testOperation.FastMode = true;
-                    testOperation.FARN = 150;
+                    testOperation.FARN = 200; // Increased for stricter matching
                     testOperation.Version = VersionCompatible.ftr_version_compatible;
                     
                     // If we can create the object without exception, device is likely available
@@ -141,10 +141,11 @@ namespace FutronicAttendanceSystem
         // INSTRUCTOR SCAN BLOCKING: Prevent spam during 5-second delays
         private bool isProcessingInstructorScan = false;
         private bool isPausedForInstructorAction = false;
-
-        // TWO-SCAN VERIFICATION: For security and accuracy
-        private DateTime verificationScanStartTime = DateTime.MinValue;
-        private const int VERIFICATION_TIMEOUT_SECONDS = 15; // 15 seconds to complete verification
+        
+        // DOUBLE-SCAN VERIFICATION: For improved accuracy, especially for instructor actions
+        private string pendingVerificationUser = null;
+        private DateTime pendingVerificationTime = DateTime.MinValue;
+        private const int VERIFICATION_TIMEOUT_MS = 5000; // 5 seconds to complete verification
         
         // CROSS-TYPE DUAL-AUTHENTICATION: RFID OR Fingerprint first, then the OTHER type
         private bool awaitingCrossTypeVerification = false;
@@ -371,6 +372,13 @@ namespace FutronicAttendanceSystem
         // Background timers
         private System.Windows.Forms.Timer heartbeatTimer;
         private System.Windows.Forms.Timer syncTimer;
+        private System.Windows.Forms.Timer oledModeBlinkTimer;
+        
+        // OLED mode blinking tracking
+        private DateTime lastOledMessageTime = DateTime.MinValue;
+        private bool isBlinkingModeVisible = false;
+        private const int OLED_IDLE_THRESHOLD_MS = 6000; // Display is considered idle after 6 seconds
+        private const int OLED_BLINK_INTERVAL_MS = 2000; // Blink every 2 seconds
 
         // HTTP client for backend communication
         private static readonly HttpClient http = new HttpClient();
@@ -429,9 +437,6 @@ namespace FutronicAttendanceSystem
                 
                 // Auto-assign room if needed
                 dbManager?.AutoAssignRoomIfNeeded();
-                
-                // Test specific instructor validation
-                dbManager?.TestInstructorValidation("harleyinstructor@gmail.com");
                 
                 m_bInitializationSuccess = true;
                 RefreshUserList();
@@ -668,6 +673,23 @@ namespace FutronicAttendanceSystem
             syncTimer.Interval = config.Application.SyncInterval;
             syncTimer.Tick += (s, e) => SyncUsersFromCloud();
             syncTimer.Start();
+            
+            // OLED mode blinking timer
+            oledModeBlinkTimer = new System.Windows.Forms.Timer();
+            oledModeBlinkTimer.Interval = OLED_BLINK_INTERVAL_MS;
+            oledModeBlinkTimer.Tick += async (s, e) => 
+            {
+                try
+                {
+                    await HandleOledModeBlinking();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ OLED mode blinking error: {ex.Message}");
+                }
+            };
+            // Timer will be started/stopped based on session state
+            Console.WriteLine("✅ OLED mode blink timer initialized");
         }
 
         private async Task SendApiHeartbeatAsync()
@@ -2744,7 +2766,7 @@ namespace FutronicAttendanceSystem
                 m_Operation.FFDControl = false;    // Let device manage FFD internally
                 m_Operation.FastMode = false; // DISABLED: Prioritize accuracy over speed for enrollment
                 // INCREASED: Higher FARN for stricter matching to prevent false positives
-                m_Operation.FARN = 150; // Increased from 100 to 150
+                m_Operation.FARN = 200; // Increased from 150 to 200 for stricter matching
                 m_Operation.Version = VersionCompatible.ftr_version_compatible;
                 ((FutronicEnrollment)m_Operation).MIOTControlOff = true; // Turn off MIOT control per SDK guidance
 
@@ -2894,12 +2916,12 @@ namespace FutronicAttendanceSystem
                         m_AttendanceOperation.FakeDetection = false; // Disable fake finger detection to reduce false positives
                         m_AttendanceOperation.FFDControl = false;    // Let device manage FFD internally
                         m_AttendanceOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
-                        // FARN for matching accuracy (keep at 150 for strict matching)
-                        m_AttendanceOperation.FARN = 150;
+                        // FARN for matching accuracy - increased to 200 for stricter matching to prevent false positives
+                        m_AttendanceOperation.FARN = 200; // Increased from 150 to 200 for stricter matching
                         m_AttendanceOperation.Version = VersionCompatible.ftr_version_compatible;
                         
                         // Additional settings to reduce false positives
-                        // FARN already set to 150 above
+                        // FARN already set to 200 above
                         
                         // Add a small delay to ensure proper initialization
                         System.Threading.Thread.Sleep(100);
@@ -3088,6 +3110,8 @@ namespace FutronicAttendanceSystem
                     firstScanType = "";
                     crossVerificationStartTime = DateTime.MinValue;
                     
+                    UpdateOledModeBlinkingState(); // Stop OLED mode blinking
+                    
                     UpdateSessionStateDisplay();
                     SetStatusText("Session force ended by administrator.");
                 }
@@ -3194,6 +3218,82 @@ namespace FutronicAttendanceSystem
                     SetStatusText($"⏳ Please wait {Math.Ceiling((DEBOUNCE_INTERVAL_MS - timeSinceLastProcess.TotalMilliseconds) / 1000)} seconds before scanning again.");
                     ScheduleNextGetBaseTemplate(500);
                     return;
+                }
+                
+                // DOUBLE-SCAN VERIFICATION: For instructor actions, require two matching scans for accuracy
+                if (userInfo?.UserType?.ToLower() == "instructor")
+                {
+                    var timeSincePending = DateTime.Now - pendingVerificationTime;
+                    
+                    // Check if this is a verification scan (same user within timeout)
+                    if (pendingVerificationUser == userName && timeSincePending.TotalMilliseconds < VERIFICATION_TIMEOUT_MS)
+                    {
+                        // Verification successful - clear pending and proceed
+                        Console.WriteLine($"✅ Verification successful for instructor {userName}");
+                        pendingVerificationUser = null;
+                        pendingVerificationTime = DateTime.MinValue;
+                        
+                        // Reset finger detection flags now that verification is complete
+                        // This allows normal processing to continue
+                        hasValidFingerPlacement = false;
+                        isFingerOnScanner = false;
+                        
+                        // Continue to process instructor scan below
+                    }
+                    else
+                    {
+                        // Check if pending verification expired
+                        if (pendingVerificationUser != null && timeSincePending.TotalMilliseconds >= VERIFICATION_TIMEOUT_MS)
+                        {
+                            // Verification expired - reset and start new verification
+                            Console.WriteLine($"⏱️ Verification expired for {pendingVerificationUser}, starting new verification for {userName}");
+                            pendingVerificationUser = null;
+                            pendingVerificationTime = DateTime.MinValue;
+                        }
+                        
+                        // First scan - require verification (unless pending verification expired or different user)
+                        if (pendingVerificationUser != null && pendingVerificationUser != userName)
+                        {
+                            // Different user scanned - reset verification
+                            Console.WriteLine($"⚠️ Verification reset: Different user {userName} scanned (was {pendingVerificationUser})");
+                            pendingVerificationUser = null;
+                            pendingVerificationTime = DateTime.MinValue;
+                        }
+                        
+                        pendingVerificationUser = userName;
+                        pendingVerificationTime = DateTime.Now;
+                        SetStatusText($"⏳ Instructor verification required. Please scan again to confirm: {userName}");
+                        Console.WriteLine($"⏳ Instructor scan requires verification. Waiting for second scan from {userName}");
+                        
+                        // DO NOT reset finger-on flags here - keep finger detected so scanner continues
+                        // The flags will be reset after verification succeeds or in OnGetBaseTemplateComplete
+                        // if verification is pending, we'll handle it there
+                        
+                        // Send verification message to OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await RequestInfoDisplay(userInfo.EmployeeId, userName, "Verification required. Scan again to confirm.");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"⚠️ Failed to send verification message to OLED: {ex.Message}");
+                            }
+                        });
+                        
+                        ScheduleNextGetBaseTemplate(300); // Very short delay to detect second scan quickly
+                        return; // Don't process yet - wait for verification
+                    }
+                }
+                else
+                {
+                    // For non-instructors, clear any pending verification if user changed
+                    if (pendingVerificationUser != null && pendingVerificationUser != userName)
+                    {
+                        pendingVerificationUser = null;
+                        pendingVerificationTime = DateTime.MinValue;
+                    }
                 }
                 
                 // Update debouncing variables (only after successful processing)
@@ -3432,6 +3532,19 @@ namespace FutronicAttendanceSystem
                                             }
                                         }
                                         
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
                                         // Reset verification state
                                         awaitingCrossTypeVerification = false;
                                         pendingCrossVerificationUser = "";
@@ -3609,6 +3722,19 @@ namespace FutronicAttendanceSystem
                                                 Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
                                             }
                                         }
+                                        
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
                                         
                                         ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                                         return;
@@ -3846,6 +3972,7 @@ namespace FutronicAttendanceSystem
 
                             currentSessionState = AttendanceSessionState.ActiveForSignOut;
                             UpdateSessionStateDisplay();
+                            UpdateOledModeBlinkingState(); // Update OLED mode blinking
                             SetStatusText($"✅ Instructor {userName} opened sign-out. Students can now sign out.");
 
                             ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
@@ -3915,6 +4042,7 @@ namespace FutronicAttendanceSystem
                                 // Proceed with sign-out
                                 currentSessionState = AttendanceSessionState.ActiveForSignOut;
                                 UpdateSessionStateDisplay();
+                                UpdateOledModeBlinkingState(); // Update OLED mode blinking
                                 SetStatusText($"✅ Instructor {userName} opened sign-out. Students can now sign out.");
                                 
                                 Console.WriteLine($"🔄 SIGN-OUT PHASE ACTIVE - Students can now sign out");
@@ -4450,6 +4578,7 @@ namespace FutronicAttendanceSystem
                             signedOutStudentGuids.Clear();
 
                             UpdateSessionStateDisplay();
+                            UpdateOledModeBlinkingState(); // Stop OLED mode blinking
                             SetStatusText($"✅ Instructor {userName} signed out. Session ended.");
 
                             _ = System.Threading.Tasks.Task.Run(async () =>
@@ -4540,6 +4669,7 @@ namespace FutronicAttendanceSystem
                                 signedOutStudentGuids.Clear();
                                 
                                 UpdateSessionStateDisplay();
+                                UpdateOledModeBlinkingState(); // Stop OLED mode blinking
                                 SetStatusText($"✅ Instructor {userName} signed out. Session ended.");
                                 
                                 Console.WriteLine($"🔚 SESSION CLOSED - Instructor signed out, all students cleared");
@@ -4930,6 +5060,7 @@ namespace FutronicAttendanceSystem
                 signedOutStudentGuids.Clear();
 
                 UpdateSessionStateDisplay();
+                UpdateOledModeBlinkingState(); // Start OLED mode blinking
                 var subjectName = string.IsNullOrWhiteSpace(validationResult.SubjectName) ? "current subject" : validationResult.SubjectName;
                 SetStatusText($"✅ Instructor {userName} signed in. Session started for {subjectName}. Students can now sign in.");
                 Console.WriteLine($"✅ SESSION STARTED - Students can now sign in for {subjectName}");
@@ -4984,6 +5115,7 @@ namespace FutronicAttendanceSystem
                 signedOutStudentGuids.Clear();
 
                 UpdateSessionStateDisplay();
+                UpdateOledModeBlinkingState(); // Start OLED mode blinking
                 SetStatusText($"✅ Instructor {userName} signed in (unverified). Students can now sign in.");
                 
                 if (isRfidFlow)
@@ -6427,8 +6559,12 @@ namespace FutronicAttendanceSystem
                 
                 // QUALITY VALIDATION: Only process SUCCESSFUL scans if we had a valid finger placement
                 // Failed scans (retCode != 0) don't require valid placement - they're errors that need to be handled
-                bool placementStillValid = hasValidFingerPlacement && 
-                                         (DateTime.Now - lastValidPutOnTime).TotalMilliseconds < VALID_PLACEMENT_TIMEOUT_MS;
+                // EXCEPTION: During verification, allow processing even if placement timeout expired (finger stays on)
+                bool isVerificationPendingForPlacement = pendingVerificationUser != null && 
+                                        (DateTime.Now - pendingVerificationTime).TotalMilliseconds < VERIFICATION_TIMEOUT_MS;
+                bool placementStillValid = (hasValidFingerPlacement && 
+                                         (DateTime.Now - lastValidPutOnTime).TotalMilliseconds < VALID_PLACEMENT_TIMEOUT_MS) ||
+                                         isVerificationPendingForPlacement; // Allow during verification
                 
                 // For failed scans, always show error message and reset flags
                 if (!success)
@@ -6465,9 +6601,23 @@ namespace FutronicAttendanceSystem
                     lastScanTime = DateTime.Now;
                     SetStatusText("Processing identification...");
                     
+                    // Check if verification is pending - if so, don't reset flags yet
+                    // This allows the scanner to continue detecting the finger for the second scan
+                    bool isVerificationPending = pendingVerificationUser != null && 
+                                        (DateTime.Now - pendingVerificationTime).TotalMilliseconds < VERIFICATION_TIMEOUT_MS;
+                    
                     // Reset valid placement flag since we're processing the scan
-                    hasValidFingerPlacement = false;
-                    isFingerOnScanner = false;
+                    // BUT: Keep flags true if verification is pending to allow second scan detection
+                    if (!isVerificationPending)
+                    {
+                        hasValidFingerPlacement = false;
+                        isFingerOnScanner = false;
+                    }
+                    else
+                    {
+                        // Keep finger detected during verification - will be reset after verification completes
+                        Console.WriteLine("⏳ Verification pending - keeping finger detected for second scan");
+                    }
                     
                     // Take a snapshot to avoid concurrent modifications
                     var users = m_IdentificationUsers != null ? new List<UserRecord>(m_IdentificationUsers) : null;
@@ -6571,6 +6721,21 @@ namespace FutronicAttendanceSystem
                         if (matchIndex >= 0 && matchIndex < users.Count)
                         {
                             string userName = users[matchIndex].UserName;
+                            
+                            // MATCH VALIDATION: Check if this match is suspicious
+                            // If we recently processed a different user and this match seems inconsistent,
+                            // require a second scan for verification to prevent false matches
+                            var timeSinceLastProcess = DateTime.Now - lastProcessedTime;
+                            if (lastProcessedUser != null && 
+                                lastProcessedUser != userName && 
+                                lastProcessedUser != "" &&
+                                timeSinceLastProcess.TotalMilliseconds < 3000) // Within 3 seconds
+                            {
+                                Console.WriteLine($"⚠️ WARNING: Match changed from {lastProcessedUser} to {userName} within {timeSinceLastProcess.TotalMilliseconds}ms - requiring verification");
+                                SetStatusText($"⚠️ Match verification needed. Please scan again to confirm: {userName}");
+                                ScheduleNextGetBaseTemplate(1000);
+                                return; // Don't process yet - suspicious match change
+                            }
                             
                             // Set location based on which sensor detected the scan
                             // In dual-sensor mode, determine which sensor is active
@@ -6758,6 +6923,9 @@ namespace FutronicAttendanceSystem
                           }
                           
                           SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
+                          // Clear any pending verification on unknown fingerprint
+                          pendingVerificationUser = null;
+                          pendingVerificationTime = DateTime.MinValue;
                           // Notify ESP32 to show 'No match' on OLED
                           _ = System.Threading.Tasks.Task.Run(async () => {     
                               try { await RequestNoMatchDisplay(); } catch { }  
@@ -6963,7 +7131,11 @@ namespace FutronicAttendanceSystem
                 }
                 
                 // NEW: Don't schedule if finger is still on scanner (prevents repeated scans)
-                if (isFingerOnScanner)
+                // EXCEPTION: Allow scanning during verification to detect second scan while finger is still on
+                bool isVerificationPending = pendingVerificationUser != null && 
+                                        (DateTime.Now - pendingVerificationTime).TotalMilliseconds < VERIFICATION_TIMEOUT_MS;
+                
+                if (isFingerOnScanner && !isVerificationPending)
                 {
                     Console.WriteLine("⏸️ Finger still on scanner - skipping schedule to prevent repeated scans");
                     return;
@@ -7504,6 +7676,7 @@ namespace FutronicAttendanceSystem
                     {
                         var responseContent = await response.Content.ReadAsStringAsync();
                         Console.WriteLine($"ESP32 Response: {responseContent}");
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
                         return true;
                     }
 
@@ -7737,6 +7910,7 @@ namespace FutronicAttendanceSystem
                 if (success)
                 {
                     Console.WriteLine("✅ Denial message sent to ESP32 for display");
+                    lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
                 }
                 else
                 {
@@ -7768,6 +7942,7 @@ namespace FutronicAttendanceSystem
                     client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
                     await client.PostAsync(esp32Url, content);
+                    lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
                 }
             }
             catch { }
@@ -7790,6 +7965,7 @@ namespace FutronicAttendanceSystem
                     client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
                     await client.PostAsync(esp32Url, content);
+                    lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
                 }
             }
             catch { }
@@ -7851,6 +8027,7 @@ namespace FutronicAttendanceSystem
                         var responseContent = await response.Content.ReadAsStringAsync();
                         Console.WriteLine($"ESP32 RFID Denial Response: {responseContent}");
                         Console.WriteLine($"✅ RFID denial message sent to ESP32 for display");
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
                     }
                     else
                     {
@@ -7896,6 +8073,7 @@ namespace FutronicAttendanceSystem
                     if (response.IsSuccessStatusCode)
                     {
                         Console.WriteLine($"✅ Info message sent successfully to ESP32");
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
                     }
                     else
                     {
@@ -7937,6 +8115,7 @@ namespace FutronicAttendanceSystem
                     if (response.IsSuccessStatusCode)
                     {
                         Console.WriteLine($"✅ RFID info message sent successfully to ESP32");
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
                     }
                     else
                     {
@@ -8034,6 +8213,110 @@ namespace FutronicAttendanceSystem
                 catch { }
             }
             catch { }
+        }
+
+        // Handle OLED mode blinking when display is idle and session is active
+        private async Task HandleOledModeBlinking()
+        {
+            try
+            {
+                // Check if session is active (Sign In or Sign Out mode)
+                bool isSignInMode = currentSessionState == AttendanceSessionState.ActiveForStudents;
+                bool isSignOutMode = currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                
+                if (!isSignInMode && !isSignOutMode)
+                {
+                    // No active session, stop blinking
+                    if (oledModeBlinkTimer != null && oledModeBlinkTimer.Enabled)
+                    {
+                        oledModeBlinkTimer.Stop();
+                    }
+                    return;
+                }
+                
+                // Check if display has been idle long enough (other messages have finished)
+                var timeSinceLastMessage = DateTime.Now - lastOledMessageTime;
+                if (timeSinceLastMessage.TotalMilliseconds < OLED_IDLE_THRESHOLD_MS)
+                {
+                    // Display is still showing other messages, don't blink yet
+                    return;
+                }
+                
+                // Display is idle and session is active - show blinking mode
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+                
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                string modeText = isSignInMode ? "Sign In Mode" : "Sign Out Mode";
+                
+                // Toggle between visible and blank for blinking effect
+                if (isBlinkingModeVisible)
+                {
+                    // Hide (send empty lines)
+                    var blankPayload = new { action = "status", line1 = "", line2 = "", line3 = "", line4 = "" };
+                    var blankJson = JsonSerializer.Serialize(blankPayload);
+                    using (var client = new HttpClient())
+                    {
+                        client.Timeout = TimeSpan.FromSeconds(5);
+                        client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
+                        var content = new StringContent(blankJson, Encoding.UTF8, "application/json");
+                        await client.PostAsync(esp32Url, content);
+                    }
+                    isBlinkingModeVisible = false;
+                }
+                else
+                {
+                    // Show mode text
+                    var modePayload = new { action = "status", line1 = "Currently in", line2 = modeText, line3 = "", line4 = "" };
+                    var modeJson = JsonSerializer.Serialize(modePayload);
+                    using (var client = new HttpClient())
+                    {
+                        client.Timeout = TimeSpan.FromSeconds(5);
+                        client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
+                        var content = new StringContent(modeJson, Encoding.UTF8, "application/json");
+                        await client.PostAsync(esp32Url, content);
+                    }
+                    isBlinkingModeVisible = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error in OLED mode blinking: {ex.Message}");
+            }
+        }
+        
+        // Start/stop OLED mode blinking based on session state
+        private void UpdateOledModeBlinkingState()
+        {
+            try
+            {
+                bool shouldBlink = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                  currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                
+                if (oledModeBlinkTimer != null)
+                {
+                    if (shouldBlink && !oledModeBlinkTimer.Enabled)
+                    {
+                        // Start blinking timer
+                        oledModeBlinkTimer.Start();
+                        Console.WriteLine("✅ OLED mode blinking started");
+                        // Reset blinking state
+                        isBlinkingModeVisible = false;
+                        // Reset last message time to allow blinking to start after idle threshold
+                        lastOledMessageTime = DateTime.Now.AddMilliseconds(-OLED_IDLE_THRESHOLD_MS - 1000);
+                    }
+                    else if (!shouldBlink && oledModeBlinkTimer.Enabled)
+                    {
+                        // Stop blinking timer
+                        oledModeBlinkTimer.Stop();
+                        Console.WriteLine("✅ OLED mode blinking stopped");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error updating OLED mode blinking state: {ex.Message}");
+            }
         }
 
         private Task ShowModeRestrictionWarningAsync(bool isRfidOnlyMode, string rfidData = null)
@@ -8878,6 +9161,17 @@ namespace FutronicAttendanceSystem
 
         private void OnAttendanceTakeOff(FTR_PROGRESS progress)
         {
+            // Check if verification is pending - if so, ignore takeoff events
+            // This allows the finger to stay "detected" during verification
+            bool isVerificationPending = pendingVerificationUser != null && 
+                                        (DateTime.Now - pendingVerificationTime).TotalMilliseconds < VERIFICATION_TIMEOUT_MS;
+            
+            if (isVerificationPending)
+            {
+                Console.WriteLine("⏳ Verification pending - ignoring takeoff event to allow continuous scanning");
+                return; // Ignore takeoff during verification
+            }
+            
             // Only process if we had a valid finger placement first
             // This prevents false positives from repeated OnTakeOff events
             if (hasValidFingerPlacement && isFingerOnScanner)
@@ -9012,8 +9306,8 @@ namespace FutronicAttendanceSystem
                         m_AttendanceOperation.FakeDetection = false;
                         m_AttendanceOperation.FFDControl = false;
                         m_AttendanceOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
-                        // FARN for matching accuracy (keep at 150 for strict matching)
-                        m_AttendanceOperation.FARN = 150;
+                        // FARN for matching accuracy - increased to 200 for stricter matching
+                        m_AttendanceOperation.FARN = 200; // Increased from 150 to 200 for stricter matching
                         m_AttendanceOperation.Version = VersionCompatible.ftr_version_compatible;
                         
                         // Register events
@@ -9984,6 +10278,19 @@ namespace FutronicAttendanceSystem
                                                 }
                                             }
                                             
+                                            // Send denial message to ESP32 for OLED display
+                                            _ = System.Threading.Tasks.Task.Run(async () =>
+                                            {
+                                                try
+                                                {
+                                                    await RequestLockControlDenial(userInfo.EmployeeId, userInfo.Username, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                                }
+                                            });
+                                            
                                             // Reset verification state
                                             awaitingCrossTypeVerification = false;
                                             pendingCrossVerificationUser = "";
@@ -10100,6 +10407,19 @@ namespace FutronicAttendanceSystem
                                                 }
                                             }
                                             
+                                            // Send denial message to ESP32 for OLED display
+                                            _ = System.Threading.Tasks.Task.Run(async () =>
+                                            {
+                                                try
+                                                {
+                                                    await RequestLockControlDenial(userInfo.EmployeeId, userInfo.Username, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                                }
+                                            });
+                                            
                                             return;
                                         }
                                     }
@@ -10215,6 +10535,19 @@ namespace FutronicAttendanceSystem
                                                     Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
                                                 }
                                             }
+                                            
+                                            // Send denial message to ESP32 for OLED display
+                                            _ = System.Threading.Tasks.Task.Run(async () =>
+                                            {
+                                                try
+                                                {
+                                                    await RequestLockControlDenial(userInfo.EmployeeId, userInfo.Username, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                                }
+                                            });
                                             
                                             return;
                                         }
@@ -10962,6 +11295,7 @@ namespace FutronicAttendanceSystem
                                 signedOutStudentGuids.Clear();
 
                                 UpdateSessionStateDisplay();
+                                UpdateOledModeBlinkingState(); // Stop OLED mode blinking
                                 SetRfidStatusText($"✅ Instructor {userInfo.Username} closed RFID session.");
                                 AddRfidAttendanceRecord(userInfo.Username, "Session Closed", "Inactive");
 
@@ -11090,6 +11424,7 @@ namespace FutronicAttendanceSystem
                                     crossVerificationStartTime = DateTime.MinValue;
                                     
                                     UpdateSessionStateDisplay();
+                                    UpdateOledModeBlinkingState(); // Stop OLED mode blinking
                                     SetRfidStatusText($"✅ Instructor {userInfo.Username} closed RFID session.");
                                     AddRfidAttendanceRecord(userInfo.Username, "Session Closed", "Inactive");
                                     
@@ -13350,8 +13685,8 @@ namespace FutronicAttendanceSystem
                     m_InsideSensorOperation.FakeDetection = false;
                     m_InsideSensorOperation.FFDControl = false;
                     m_InsideSensorOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
-                    // FARN for matching accuracy (keep at 150 for strict matching)
-                    m_InsideSensorOperation.FARN = 150;
+                    // FARN for matching accuracy - increased to 200 for stricter matching
+                    m_InsideSensorOperation.FARN = 200; // Increased from 150 to 200 for stricter matching
                     m_InsideSensorOperation.Version = VersionCompatible.ftr_version_compatible;
                     
                     // Note: Futronic SDK device selection is handled internally
@@ -13497,8 +13832,8 @@ namespace FutronicAttendanceSystem
                     m_OutsideSensorOperation.FakeDetection = false;
                     m_OutsideSensorOperation.FFDControl = false;
                     m_OutsideSensorOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
-                    // FARN for matching accuracy (keep at 150 for strict matching)
-                    m_OutsideSensorOperation.FARN = 150;
+                    // FARN for matching accuracy - increased to 200 for stricter matching
+                    m_OutsideSensorOperation.FARN = 200; // Increased from 150 to 200 for stricter matching
                     m_OutsideSensorOperation.Version = VersionCompatible.ftr_version_compatible;
                     
                     // Note: Futronic SDK device selection is handled internally  
