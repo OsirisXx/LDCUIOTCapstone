@@ -1352,52 +1352,7 @@ namespace FutronicAttendanceSystem.Database
                     }
                 }
 
-                // Try to find an active session for today in the current device's room
-                // For sign-out, also include 'ended' sessions since sign-out can happen after session ends
-                string sessionId = null;
-                string scheduleId = null;
-                string sessionQuery = isSignOut 
-                    ? @"SELECT SESSIONID, SCHEDULEID
-                        FROM SESSIONS
-                        WHERE SESSIONDATE = CURRENT_DATE
-                          AND STATUS IN ('active','waiting','ended')
-                          AND ROOMID = @currentRoomId
-                        ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
-                        LIMIT 1"
-                    : @"SELECT SESSIONID, SCHEDULEID
-                        FROM SESSIONS
-                        WHERE SESSIONDATE = CURRENT_DATE
-                          AND STATUS IN ('active','waiting')
-                          AND ROOMID = @currentRoomId
-                        ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
-                        LIMIT 1";
-                    
-                using (var cmdFindSession = new MySqlCommand(sessionQuery, connection))
-                {
-                    cmdFindSession.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");                                                              
-                    using (var r = cmdFindSession.ExecuteReader())
-                    {
-                        if (r.Read())
-                        {
-                            sessionId = r.GetString(0);
-                            scheduleId = r.IsDBNull(1) ? null : r.GetString(1);
-                            LogMessage("INFO", $"Found session {sessionId} for room {CurrentRoomId}");                                                          
-                        }
-                        else
-                        {
-                            LogMessage("INFO", $"No active session found for room {CurrentRoomId} today");                                                      
-                        }
-                    }
-                }
-
-                // Use the schedule from validation if no active session found  
-                if (sessionId == null && !string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))                                                             
-                {
-                    scheduleId = scheduleValidation.ScheduleId;
-                    LogMessage("INFO", $"Using validated schedule {scheduleId} for attendance recording");                                                      
-                }
-
-                // Get user type first to determine if we should use administrative schedule
+                // Get user type first to determine if we should use administrative schedule for door access
                 string userType = null;
                 using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid AND ARCHIVED_AT IS NULL", connection))
                 {
@@ -1413,20 +1368,86 @@ namespace FutronicAttendanceSystem.Database
                 bool isDean = userType != null && userType.Equals("dean", StringComparison.OrdinalIgnoreCase);
                 bool isInstructor = userType != null && userType.Equals("instructor", StringComparison.OrdinalIgnoreCase);
 
-                // For custodians, deans, or instructors with door access action without a specific schedule, use administrative schedule
-                if (string.IsNullOrWhiteSpace(scheduleId) && (isCustodian || (isDean && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId)) || (isInstructor && isDoorAccessAction && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))))
+                // CRITICAL FIX: For door access actions, prioritize administrative schedule and skip session lookup
+                // This ensures door access records are properly logged even when other sessions are active
+                string sessionId = null;
+                string scheduleId = null;
+                
+                // For custodians, deans, or instructors with door access action, use administrative schedule first
+                // This takes priority over active sessions to ensure proper logging
+                // For instructors, always use administrative schedule for door access (even if they have a regular schedule)
+                if (isDoorAccessAction && (isCustodian || isDean || isInstructor))
                 {
                     scheduleId = GetOrCreateAdministrativeSchedule(CurrentRoomId ?? "");
                     if (string.IsNullOrWhiteSpace(scheduleId))
                     {
-                        LogMessage("ERROR", $"RecordAttendance: Failed to get administrative schedule for {userType}.");
+                        LogMessage("ERROR", $"RecordAttendance: Failed to get administrative schedule for {userType} door access. CurrentRoomId: {CurrentRoomId ?? "NULL"}");
                         return new AttendanceAttemptResult { Success = false, Reason = "Failed to get administrative schedule" };
                     }
-                    sessionId = null; // Don't associate with a session
-                    LogMessage("INFO", $"Using administrative schedule {scheduleId} for {userType} door access");
+                    sessionId = null; // Don't associate door access with a session
+                    LogMessage("INFO", $"Using administrative schedule {scheduleId} for {userType} door access (prioritized over active sessions)");
                 }
-                                // Other roles require a schedule (except sign-out and door access, which can use NULL if no schedule found)
-                else if (string.IsNullOrWhiteSpace(scheduleId) && !isSignOut && !isDoorAccessAction)
+                else
+                {
+                    // For non-door-access actions, try to find an active session for today in the current device's room
+                    // For sign-out, also include 'ended' sessions since sign-out can happen after session ends
+                    string sessionQuery = isSignOut 
+                        ? @"SELECT SESSIONID, SCHEDULEID
+                            FROM SESSIONS
+                            WHERE SESSIONDATE = CURRENT_DATE
+                              AND STATUS IN ('active','waiting','ended')
+                              AND ROOMID = @currentRoomId
+                            ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
+                            LIMIT 1"
+                        : @"SELECT SESSIONID, SCHEDULEID
+                            FROM SESSIONS
+                            WHERE SESSIONDATE = CURRENT_DATE
+                              AND STATUS IN ('active','waiting')
+                              AND ROOMID = @currentRoomId
+                            ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
+                            LIMIT 1";
+                        
+                    using (var cmdFindSession = new MySqlCommand(sessionQuery, connection))
+                    {
+                        cmdFindSession.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");                                                              
+                        using (var r = cmdFindSession.ExecuteReader())
+                        {
+                            if (r.Read())
+                            {
+                                sessionId = r.GetString(0);
+                                scheduleId = r.IsDBNull(1) ? null : r.GetString(1);
+                                LogMessage("INFO", $"Found session {sessionId} for room {CurrentRoomId}");                                                          
+                            }
+                            else
+                            {
+                                LogMessage("INFO", $"No active session found for room {CurrentRoomId} today");                                                      
+                            }
+                        }
+                    }
+
+                    // Use the schedule from validation if no active session found  
+                    if (sessionId == null && !string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))                                                             
+                    {
+                        scheduleId = scheduleValidation.ScheduleId;
+                        LogMessage("INFO", $"Using validated schedule {scheduleId} for attendance recording");                                                      
+                    }
+
+                    // For custodians, deans, or instructors with door access action without a specific schedule, use administrative schedule
+                    if (string.IsNullOrWhiteSpace(scheduleId) && (isCustodian || (isDean && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId)) || (isInstructor && isDoorAccessAction && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))))
+                    {
+                        scheduleId = GetOrCreateAdministrativeSchedule(CurrentRoomId ?? "");
+                        if (string.IsNullOrWhiteSpace(scheduleId))
+                        {
+                            LogMessage("ERROR", $"RecordAttendance: Failed to get administrative schedule for {userType}.");
+                            return new AttendanceAttemptResult { Success = false, Reason = "Failed to get administrative schedule" };
+                        }
+                        sessionId = null; // Don't associate with a session
+                        LogMessage("INFO", $"Using administrative schedule {scheduleId} for {userType} door access");
+                    }
+                }
+                
+                // Other roles require a schedule (except sign-out and door access, which can use NULL if no schedule found)
+                if (string.IsNullOrWhiteSpace(scheduleId) && !isSignOut && !isDoorAccessAction)
                 {
                     LogMessage("ERROR", "RecordAttendance: No valid schedule available to attach attendance.");
                     return new AttendanceAttemptResult { Success = false, Reason = "No valid schedule available" };

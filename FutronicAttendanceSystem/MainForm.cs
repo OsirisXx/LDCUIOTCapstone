@@ -82,7 +82,7 @@ namespace FutronicAttendanceSystem
         // False positive detection prevention
         private DateTime m_lastPutOnTime = DateTime.MinValue;
         private bool m_bInitialStartup = true;
-        private const int MIN_PUTON_INTERVAL_MS = 1000; // Minimum 1 second between put-on events
+        private const int MIN_PUTON_INTERVAL_MS = 500; // Minimum 500ms between put-on events (reduced for better responsiveness)
         
         // Database and cloud storage
         private DatabaseManager dbManager;
@@ -350,7 +350,7 @@ namespace FutronicAttendanceSystem
         private bool isInIdleMode = false;
         private DateTime lastScanAttemptTime = DateTime.Now;
         private const int IDLE_TIMEOUT_SECONDS = 30; // Go to idle mode after 30 seconds of no activity
-        private const int SCAN_INTERVAL_ACTIVE_MS = 300; // Fast scanning when active (3.3 scans/sec) - SDK-safe
+        private const int SCAN_INTERVAL_ACTIVE_MS = 500; // Increased from 300ms to 500ms for better processing time and accuracy
         private const int SCAN_INTERVAL_IDLE_MS = 2000; // Slow scanning when idle (0.5 scans/sec)
         
         // THREAD SAFETY: Prevent concurrent SDK calls
@@ -366,7 +366,7 @@ namespace FutronicAttendanceSystem
         // Only process scans if OnPutOn was called first (valid finger placement detected)
         private bool hasValidFingerPlacement = false;
         private DateTime lastValidPutOnTime = DateTime.MinValue;
-        private const int VALID_PLACEMENT_TIMEOUT_MS = 2000; // Valid placement expires after 2 seconds
+        private const int VALID_PLACEMENT_TIMEOUT_MS = 5000; // Increased from 2000ms to 5000ms to give more time for processing
         
         // Background timers
         private System.Windows.Forms.Timer heartbeatTimer;
@@ -2739,10 +2739,10 @@ namespace FutronicAttendanceSystem
 
                 m_Operation = new FutronicEnrollment();
 
-                // Set properties (tuned to avoid false fake-finger detections)
+                // Set properties (tuned for better accuracy)
                 m_Operation.FakeDetection = false; // Disable fake finger detection to reduce false positives
                 m_Operation.FFDControl = false;    // Let device manage FFD internally
-                m_Operation.FastMode = true;
+                m_Operation.FastMode = false; // DISABLED: Prioritize accuracy over speed for enrollment
                 // INCREASED: Higher FARN for stricter matching to prevent false positives
                 m_Operation.FARN = 150; // Increased from 100 to 150
                 m_Operation.Version = VersionCompatible.ftr_version_compatible;
@@ -2890,12 +2890,12 @@ namespace FutronicAttendanceSystem
                         // Create new operation with proper initialization
                         m_AttendanceOperation = new FutronicIdentification();
 
-                        // Set properties (tuned to avoid false fake-finger detections)
+                        // Set properties (tuned for better accuracy)
                         m_AttendanceOperation.FakeDetection = false; // Disable fake finger detection to reduce false positives
                         m_AttendanceOperation.FFDControl = false;    // Let device manage FFD internally
-                        m_AttendanceOperation.FastMode = true;
-                        // INCREASED: Higher FARN for stricter matching to prevent false positives
-                        m_AttendanceOperation.FARN = 150; // Increased from 100 to 150
+                        m_AttendanceOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
+                        // FARN for matching accuracy (keep at 150 for strict matching)
+                        m_AttendanceOperation.FARN = 150;
                         m_AttendanceOperation.Version = VersionCompatible.ftr_version_compatible;
                         
                         // Additional settings to reduce false positives
@@ -3563,6 +3563,9 @@ namespace FutronicAttendanceSystem
                                                 Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
                                             }
                                         }
+                                        
+                                        // Also record attendance so it appears in web logs (ATTENDANCERECORDS)
+                                        RecordAttendance(userName, "Door Access", true, currentScanLocation);
                                         
                                         // Trigger door access
                                         _ = System.Threading.Tasks.Task.Run(async () => {
@@ -5533,7 +5536,76 @@ namespace FutronicAttendanceSystem
                             }
                             else
                             {
-                                // Process sign-out immediately with fingerprint-only
+                                // CRITICAL FIX: Validate student enrollment before processing sign-out
+                                // Get user info for validation
+                                User user = null;
+                                if (userLookupByUsername != null)
+                                {
+                                    userLookupByUsername.TryGetValue(userName, out user);
+                                }
+                                
+                                if (user != null && !string.IsNullOrEmpty(user.EmployeeId) && dbManager != null)
+                                {
+                                    // Validate enrollment using the same method as sign-in
+                                    var validationAttempt = dbManager.TryRecordAttendanceByGuid(user.EmployeeId, "Student Sign-In", null);
+                                    
+                                    if (validationAttempt == null || !validationAttempt.Success)
+                                    {
+                                        // Student is not enrolled - deny sign-out
+                                        var reason = validationAttempt?.Reason ?? "Student is not enrolled in any class scheduled at this time";
+                                        SetStatusText($"❌ Student {userName}: {reason}");
+                                        Console.WriteLine($"❌ STUDENT {userName} SIGN-OUT DENIED: {reason}");
+                                        
+                                        // Log denied access attempt to ACCESSLOGS
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: user.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: reason
+                                            );
+                                            Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                        }
+                                        
+                                        // Create denial record
+                                        int userIdInt = user.Id;
+                                        var denialRecord = new Database.Models.AttendanceRecord
+                                        {
+                                            UserId = userIdInt,
+                                            Username = userName,
+                                            Timestamp = DateTime.Now,
+                                            Action = "Student Sign-Out",
+                                            Status = $"Denied: {reason}"
+                                        };
+                                        attendanceRecords.Add(denialRecord);
+                                        UpdateAttendanceDisplay(denialRecord);
+                                        
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, reason, "student");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                        break;
+                                    }
+                                }
+                                
+                                // Process sign-out immediately with fingerprint-only (only if validation passed)
                                 System.Threading.Tasks.Task.Run(() => {
                                     try
                                     {
@@ -5692,7 +5764,83 @@ namespace FutronicAttendanceSystem
                                 firstScanType = "";
                                 crossVerificationStartTime = DateTime.MinValue;
                                 
-                                // Process verified sign-out
+                                // CRITICAL FIX: Validate student enrollment before processing sign-out
+                                // Get user info for validation
+                                User user = null;
+                                if (userLookupByUsername != null)
+                                {
+                                    userLookupByUsername.TryGetValue(userName, out user);
+                                }
+                                
+                                if (user != null && !string.IsNullOrEmpty(user.EmployeeId) && dbManager != null)
+                                {
+                                    // Validate enrollment using the same method as sign-in
+                                    var validationAttempt = dbManager.TryRecordAttendanceByGuid(user.EmployeeId, "Student Sign-In", null);
+                                    
+                                    if (validationAttempt == null || !validationAttempt.Success)
+                                    {
+                                        // Student is not enrolled - deny sign-out
+                                        var reason = validationAttempt?.Reason ?? "Student is not enrolled in any class scheduled at this time";
+                                        SetStatusText($"❌ Student {userName}: {reason}");
+                                        Console.WriteLine($"❌ STUDENT {userName} SIGN-OUT DENIED: {reason}");
+                                        
+                                        // Reset verification state
+                                        awaitingCrossTypeVerification = false;
+                                        pendingCrossVerificationUser = "";
+                                        pendingCrossVerificationGuid = "";
+                                        firstScanType = "";
+                                        crossVerificationStartTime = DateTime.MinValue;
+                                        
+                                        // Log denied access attempt to ACCESSLOGS
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: user.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: reason
+                                            );
+                                            Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                        }
+                                        
+                                        // Create denial record
+                                        int userIdInt = user.Id;
+                                        var denialRecord = new Database.Models.AttendanceRecord
+                                        {
+                                            UserId = userIdInt,
+                                            Username = userName,
+                                            Timestamp = DateTime.Now,
+                                            Action = "Student Sign-Out",
+                                            Status = $"Denied: {reason}"
+                                        };
+                                        attendanceRecords.Add(denialRecord);
+                                        UpdateAttendanceDisplay(denialRecord);
+                                        
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, reason, "student");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                        return;
+                                    }
+                                }
+                                
+                                // Process verified sign-out (only if validation passed)
                                 System.Threading.Tasks.Task.Run(() => {
                                     try
                                     {
@@ -6291,9 +6439,10 @@ namespace FutronicAttendanceSystem
                     
                     // Show appropriate error message based on retCode
                     string errorMsg = retCode == 0 ? "No finger detected" : $"Template capture failed: {retCode}";
-                    SetStatusText($"{errorMsg}. Please try again.");
+                    SetStatusText($"{errorMsg}. Please place finger firmly and try again.");
                     Console.WriteLine($"⚠️ {errorMsg}");
-                    ScheduleNextGetBaseTemplate(1000);
+                    // Increased delay to give user time to reposition finger properly
+                    ScheduleNextGetBaseTemplate(1500);
                     return;
                 }
                 
@@ -7108,6 +7257,8 @@ namespace FutronicAttendanceSystem
                     string userGuid = user.EmployeeId;
                     string actionToRecord = action ?? DetermineAction(userName);
                     
+                    Console.WriteLine($"📝 RecordAttendance called: User={userName}, Action={actionToRecord}, GUID={userGuid ?? "NULL"}, sendToDatabase={sendToDatabase}");
+                    
                     // In dual-sensor mode, use currentScanLocation if no location specified
                     if (isDualSensorMode && string.IsNullOrEmpty(location))
                     {
@@ -7127,11 +7278,24 @@ namespace FutronicAttendanceSystem
                     
                     if (sendToDatabase && !string.IsNullOrEmpty(userGuid) && dbManager != null)
                     {
+                        // Ensure CurrentRoomId is set in DatabaseManager before recording (needed for administrative schedule creation)
+                        if (deviceConfig != null && !string.IsNullOrEmpty(deviceConfig.RoomId))
+                        {
+                            if (string.IsNullOrEmpty(dbManager.CurrentRoomId))
+                            {
+                                dbManager.CurrentRoomId = deviceConfig.RoomId;
+                                Console.WriteLine($"📍 Set DatabaseManager.CurrentRoomId to {deviceConfig.RoomId} for attendance recording");
+                            }
+                        }
+                        
+                        Console.WriteLine($"📝 Attempting to record attendance to database: User={userName}, GUID={userGuid}, Action={actionToRecord}");
                         // Start database operation asynchronously without waiting
                         System.Threading.Tasks.Task.Run(() => {
                             try
                             {
+                                Console.WriteLine($"🔍 Calling TryRecordAttendanceByGuid: GUID={userGuid}, Action={actionToRecord}, Location={location}");
                                 var attempt = dbManager.TryRecordAttendanceByGuid(userGuid, actionToRecord, location);
+                                Console.WriteLine($"🔍 TryRecordAttendanceByGuid returned: Success={attempt?.Success}, Reason={attempt?.Reason ?? "N/A"}");
                                 
                                 // Update the record on UI thread with final result
                                 this.Invoke(new Action(() => {
@@ -7142,10 +7306,16 @@ namespace FutronicAttendanceSystem
                                     
                                     if (!attempt.Success)
                                     {
-                                        Console.WriteLine($"ATTENDANCE DENIED - Full error: {attempt.Reason}");
+                                        Console.WriteLine($"❌ ATTENDANCE DENIED - Full error: {attempt.Reason}");
+                                        Console.WriteLine($"   User: {userName}, Action: {actionToRecord}, GUID: {userGuid}");
                                     }
                                     else
                                     {
+                                        Console.WriteLine($"✅ ATTENDANCE RECORDED SUCCESSFULLY:");
+                                        Console.WriteLine($"   User: {userName}, Action: {actionToRecord}, GUID: {userGuid}");
+                                        Console.WriteLine($"   ScheduleID: {attempt.ScheduleId ?? "NULL"}");
+                                        Console.WriteLine($"   Subject: {attempt.SubjectName ?? "N/A"}");
+                                        
                                         // If attendance successful, check if we need to control the lock
                                         System.Threading.Tasks.Task.Run(async () => {
                                             try
@@ -7162,7 +7332,8 @@ namespace FutronicAttendanceSystem
                             }
                             catch (Exception ex)
                             {
-                                Console.WriteLine($"Database operation failed: {ex.Message}");
+                                Console.WriteLine($"❌ Database operation failed for {userName}: {ex.Message}");
+                                Console.WriteLine($"   Stack trace: {ex.StackTrace}");
                                 this.Invoke(new Action(() => {
                                     local.Status = $"Error: {ex.Message}";
                                     // Only add to records and display when we have the final result
@@ -7177,15 +7348,22 @@ namespace FutronicAttendanceSystem
                     else
                     {
                         // No database operation or skip database, show final result immediately
+                        if (string.IsNullOrEmpty(userGuid))
+                        {
+                            Console.WriteLine($"⚠️ WARNING: RecordAttendance called for {userName} but userGuid is empty - cannot save to database");
+                        }
+                        if (dbManager == null)
+                        {
+                            Console.WriteLine($"⚠️ WARNING: RecordAttendance called for {userName} but dbManager is null - cannot save to database");
+                        }
                         local.Status = sendToDatabase ? "Success (No DB)" : "Already Signed In";
                         attendanceRecords.Add(local);
                         UpdateAttendanceDisplay(local);
                     }
-                    // Console.WriteLine($"Attendance recorded for {userName}: {local.Status}");
                 }
                 else
                 {
-                    Console.WriteLine($"User not found in database: {userName}");
+                    Console.WriteLine($"⚠️ WARNING: RecordAttendance called for {userName} but user not found in cache");
                     SetStatusText($"❌ User not found in database: {userName}");
                 }
             }
@@ -8686,8 +8864,16 @@ namespace FutronicAttendanceSystem
             hasValidFingerPlacement = true;
             lastValidPutOnTime = DateTime.Now;
             isFingerOnScanner = true;
-            Console.WriteLine("👆 Finger detected on scanner - preventing repeated scans");
-            SetStatusText("Attendance: Finger detected. Processing...");
+            Console.WriteLine("👆 Finger detected on scanner - waiting for stabilization");
+            
+            // Wait for finger to stabilize before processing (improves accuracy)
+            System.Threading.Tasks.Task.Delay(200).ContinueWith(_ =>
+            {
+                if (isFingerOnScanner && hasValidFingerPlacement && m_AttendanceOperation != null && !m_bExit)
+                {
+                    SetStatusText("Attendance: Finger detected. Processing...");
+                }
+            });
         }
 
         private void OnAttendanceTakeOff(FTR_PROGRESS progress)
@@ -8825,9 +9011,9 @@ namespace FutronicAttendanceSystem
                         m_AttendanceOperation = new FutronicIdentification();
                         m_AttendanceOperation.FakeDetection = false;
                         m_AttendanceOperation.FFDControl = false;
-                        m_AttendanceOperation.FastMode = true;
-                        // INCREASED: Higher FARN for stricter matching to prevent false positives
-                        m_AttendanceOperation.FARN = 150; // Increased from 100 to 150
+                        m_AttendanceOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
+                        // FARN for matching accuracy (keep at 150 for strict matching)
+                        m_AttendanceOperation.FARN = 150;
                         m_AttendanceOperation.Version = VersionCompatible.ftr_version_compatible;
                         
                         // Register events
@@ -11860,7 +12046,83 @@ namespace FutronicAttendanceSystem
                         firstScanType = "";
                         crossVerificationStartTime = DateTime.MinValue;
                         
-                        // Process verified sign-out
+                        // CRITICAL FIX: Validate student enrollment before processing sign-out
+                        // Get user info for validation
+                        User user = null;
+                        if (userLookupByUsername != null)
+                        {
+                            userLookupByUsername.TryGetValue(userName, out user);
+                        }
+                        
+                        if (user != null && !string.IsNullOrEmpty(user.EmployeeId) && dbManager != null)
+                        {
+                            // Validate enrollment using the same method as sign-in
+                            var validationAttempt = dbManager.TryRecordAttendanceByGuid(user.EmployeeId, "Student Sign-In", null);
+                            
+                            if (validationAttempt == null || !validationAttempt.Success)
+                            {
+                                // Student is not enrolled - deny sign-out
+                                var reason = validationAttempt?.Reason ?? "Student is not enrolled in any class scheduled at this time";
+                                SetRfidStatusText($"❌ Student {userName}: {reason}");
+                                Console.WriteLine($"❌ STUDENT {userName} SIGN-OUT DENIED: {reason}");
+                                
+                                // Reset verification state
+                                awaitingCrossTypeVerification = false;
+                                pendingCrossVerificationUser = "";
+                                pendingCrossVerificationGuid = "";
+                                firstScanType = "";
+                                crossVerificationStartTime = DateTime.MinValue;
+                                
+                                // Log denied access attempt to ACCESSLOGS
+                                try
+                                {
+                                    dbManager.LogAccessAttempt(
+                                        userId: user.EmployeeId,
+                                        roomId: null,
+                                        authMethod: "RFID",
+                                        location: currentScanLocation ?? "inside",
+                                        accessType: "attendance_scan",
+                                        result: "denied",
+                                        reason: reason
+                                    );
+                                    Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                                }
+                                catch (Exception logEx)
+                                {
+                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                }
+                                
+                                // Create denial record
+                                int userIdInt = user.Id;
+                                var denialRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = userIdInt,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Student Sign-Out (RFID)",
+                                    Status = $"Denied: {reason}"
+                                };
+                                attendanceRecords.Add(denialRecord);
+                                UpdateAttendanceDisplay(denialRecord);
+                                AddRfidAttendanceRecord(userName, "Sign-Out Denied", reason);
+                                
+                                // Send denial message to ESP32 for OLED display
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestRfidLockControlDenial(userGuid, userName, reason, "student", rfidData);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"Warning: Could not send RFID denial to ESP32: {ex.Message}");
+                                    }
+                                });
+                                
+                                return;
+                            }
+                        }
+                        
+                        // Process verified sign-out (only if validation passed)
                         System.Threading.Tasks.Task.Run(() => {
                             try
                             {
@@ -11997,10 +12259,10 @@ namespace FutronicAttendanceSystem
                 AddRfidAttendanceRecord(userName, "Waiting for Fingerprint", "First Scan");
                 
                 // Send intermediate status to ESP32
-                User user;
-                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                User userForStatus;
+                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out userForStatus))
                 {
-                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(userForStatus, "RFID", "FINGERPRINT", "/api/rfid-scan"));
                 }
             }
             catch (Exception ex)
@@ -13087,9 +13349,9 @@ namespace FutronicAttendanceSystem
                     m_InsideSensorOperation = new FutronicIdentification();
                     m_InsideSensorOperation.FakeDetection = false;
                     m_InsideSensorOperation.FFDControl = false;
-                    m_InsideSensorOperation.FastMode = true;
-                    // INCREASED: Higher FARN for stricter matching to prevent false positives
-                    m_InsideSensorOperation.FARN = 150; // Increased from 100 to 150
+                    m_InsideSensorOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
+                    // FARN for matching accuracy (keep at 150 for strict matching)
+                    m_InsideSensorOperation.FARN = 150;
                     m_InsideSensorOperation.Version = VersionCompatible.ftr_version_compatible;
                     
                     // Note: Futronic SDK device selection is handled internally
@@ -13234,9 +13496,9 @@ namespace FutronicAttendanceSystem
                     m_OutsideSensorOperation = new FutronicIdentification();
                     m_OutsideSensorOperation.FakeDetection = false;
                     m_OutsideSensorOperation.FFDControl = false;
-                    m_OutsideSensorOperation.FastMode = true;
-                    // INCREASED: Higher FARN for stricter matching to prevent false positives
-                    m_OutsideSensorOperation.FARN = 150; // Increased from 100 to 150
+                    m_OutsideSensorOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
+                    // FARN for matching accuracy (keep at 150 for strict matching)
+                    m_OutsideSensorOperation.FARN = 150;
                     m_OutsideSensorOperation.Version = VersionCompatible.ftr_version_compatible;
                     
                     // Note: Futronic SDK device selection is handled internally  
