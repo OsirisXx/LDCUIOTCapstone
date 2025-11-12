@@ -12,6 +12,7 @@ const { getSupabaseAdmin } = require('../services/supabaseAdmin');
 const { logSecurityEvent } = require('../services/auditService');
 
 const router = express.Router();
+const passwordComplexityRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 
 const supabaseExchangeLimiter = rateLimit({
     windowMs: 60 * 1000,
@@ -19,6 +20,15 @@ const supabaseExchangeLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     message: 'Too many login attempts. Please wait and try again.'
+});
+
+const loginLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 10, // 10 attempts per minute
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Too many login attempts. Please wait and try again.',
+    skipSuccessfulRequests: true // Don't count successful logins
 });
 
 const extractNameParts = (supabaseUser) => {
@@ -68,10 +78,13 @@ const extractNameParts = (supabaseUser) => {
 };
 
 // Login endpoint
-router.post('/login', [
-    body('email').isEmail().normalizeEmail(),
-    body('password').isLength({ min: 6 })
-], async (req, res) => {
+router.post('/login',
+    loginLimiter,
+    [
+        body('email').isEmail().normalizeEmail(),
+        body('password').isLength({ min: 6 })
+    ],
+    async (req, res) => {
     try {
         const errors = validationResult(req);
         if (!errors.isEmpty()) {
@@ -108,6 +121,11 @@ router.post('/login', [
             return res.status(401).json({ message: 'Account is inactive' });
         }
 
+        // Check if password is set
+        if (!user.password_hash) {
+            return res.status(401).json({ message: 'No password set for this account. Please sign in with Google first.' });
+        }
+
         // Verify password
         const isValidPassword = await bcrypt.compare(password, user.password_hash);
         if (!isValidPassword) {
@@ -116,6 +134,12 @@ router.post('/login', [
 
         const normalizedRole = (user.role || '').toLowerCase();
         user.role = normalizedRole;
+
+        // Check admin/superadmin role requirement
+        const allowedRoles = ['admin', 'superadmin'];
+        if (!allowedRoles.includes(normalizedRole)) {
+            return res.status(403).json({ message: 'This account does not have administrator privileges. Contact an administrator for access.' });
+        }
 
         // Generate JWT token
         const token = jwt.sign(
@@ -130,6 +154,9 @@ router.post('/login', [
 
         // Remove password from response
         delete user.password_hash;
+
+        // Add has_password flag
+        user.has_password = true;
 
         res.json({
             message: 'Login successful',
@@ -288,6 +315,12 @@ router.post('/supabase',
             { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
         );
 
+        // Check if user has password set
+        const userWithPassword = await getSingleResult(
+            `SELECT PASSWORD_HASH FROM USERS WHERE USERID = ?`,
+            [user.id]
+        );
+
         const responseUser = {
             id: user.id,
             email: user.email,
@@ -299,7 +332,8 @@ router.post('/supabase',
             student_id: user.student_id,
             faculty_id: user.faculty_id,
             supabase_id: supabaseUser.id,
-            supabase_role: supabaseRole
+            supabase_role: supabaseRole,
+            has_password: !!(userWithPassword?.PASSWORD_HASH)
         };
 
         await logSecurityEvent({
@@ -346,11 +380,27 @@ router.post('/supabase',
 });
 
 // Verify token endpoint
-router.get('/verify', authenticateToken, (req, res) => {
-    res.json({
-        message: 'Token is valid',
-        user: req.user
-    });
+router.get('/verify', authenticateToken, async (req, res) => {
+    try {
+        // Check if user has password set
+        const userWithPassword = await getSingleResult(
+            `SELECT PASSWORD_HASH FROM USERS WHERE USERID = ?`,
+            [req.user.id]
+        );
+        
+        const userResponse = {
+            ...req.user,
+            has_password: !!(userWithPassword?.PASSWORD_HASH)
+        };
+
+        res.json({
+            message: 'Token is valid',
+            user: userResponse
+        });
+    } catch (error) {
+        console.error('Verify token error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
 });
 
 // Logout endpoint (client-side token removal)
@@ -358,11 +408,72 @@ router.post('/logout', authenticateToken, (req, res) => {
     res.json({ message: 'Logout successful' });
 });
 
+// Set initial password endpoint (for users who don't have one yet)
+router.post('/set-password', [
+    authenticateToken,
+    body('newPassword')
+        .isLength({ min: 8 }).withMessage('Password must be at least 8 characters long')
+        .matches(passwordComplexityRegex)
+        .withMessage('Password must include at least one uppercase letter, one number, and one special character.'),
+    body('confirmPassword').custom((value, { req }) => {
+        if (value !== req.body.newPassword) {
+            throw new Error('Passwords do not match');
+        }
+        return true;
+    })
+], async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { newPassword } = req.body;
+        const userId = req.user.id;
+
+        // Get current password hash
+        const user = await getSingleResult(
+            'SELECT PASSWORD_HASH as password_hash FROM USERS WHERE USERID = ?',
+            [userId]
+        );
+
+        // Check if user already has a password
+        if (user.password_hash) {
+            return res.status(400).json({ message: 'Password already set. Use change password instead.' });
+        }
+
+        // Hash new password
+        const saltRounds = 10;
+        const newPasswordHash = await bcrypt.hash(newPassword, saltRounds);
+
+        // Update password
+        await executeQuery(
+            'UPDATE USERS SET PASSWORD_HASH = ?, UPDATED_AT = CURRENT_TIMESTAMP WHERE USERID = ?',
+            [newPasswordHash, userId]
+        );
+
+        res.json({ message: 'Password set successfully' });
+
+    } catch (error) {
+        console.error('Set password error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
 // Change password endpoint
 router.post('/change-password', [
     authenticateToken,
     body('currentPassword').isLength({ min: 6 }),
-    body('newPassword').isLength({ min: 6 })
+    body('newPassword')
+        .isLength({ min: 8 }).withMessage('Password must be at least 8 characters long')
+        .matches(passwordComplexityRegex)
+        .withMessage('Password must include at least one uppercase letter, one number, and one special character.'),
+    body('confirmPassword').custom((value, { req }) => {
+        if (value !== req.body.newPassword) {
+            throw new Error('Passwords do not match');
+        }
+        return true;
+    })
 ], async (req, res) => {
     try {
         const errors = validationResult(req);
@@ -378,6 +489,11 @@ router.post('/change-password', [
             'SELECT PASSWORD_HASH as password_hash FROM USERS WHERE USERID = ?',
             [userId]
         );
+
+        // Check if user has a password
+        if (!user.password_hash) {
+            return res.status(400).json({ message: 'No password set. Use set password instead.' });
+        }
 
         // Verify current password
         const isValidPassword = await bcrypt.compare(currentPassword, user.password_hash);

@@ -295,8 +295,8 @@ namespace FutronicAttendanceSystem.Database
             try
             {
                 // FIXED: Load ALL active users with proper fingerprint status check
-                // Use LEFT JOIN to include users without fingerprints so they can be enrolled
-                // Check if user has active fingerprint in AUTHENTICATIONMETHODS table
+                // Use subquery to get one fingerprint template and check existence
+                // This ensures one row per user even when they have multiple fingerprints
                 var cmd = new MySqlCommand(@"
                     SELECT 
                         U.USERID,
@@ -310,18 +310,24 @@ namespace FutronicAttendanceSystem.Database
                         U.FACULTYID,
                         U.YEARLEVEL,
                         U.RFIDTAG,
-                        A.FINGERPRINTTEMPLATE,
+                        (SELECT A1.FINGERPRINTTEMPLATE 
+                         FROM AUTHENTICATIONMETHODS A1 
+                         WHERE A1.USERID = U.USERID 
+                           AND A1.METHODTYPE = 'Fingerprint' 
+                           AND A1.ISACTIVE = 1 
+                           AND A1.STATUS = 'Active' 
+                         LIMIT 1) as FINGERPRINTTEMPLATE,
                         CASE 
-                            WHEN A.USERID IS NOT NULL AND A.METHODTYPE = 'Fingerprint' AND A.ISACTIVE = 1 AND A.STATUS = 'Active'
-                            THEN TRUE 
+                            WHEN EXISTS (
+                                SELECT 1 FROM AUTHENTICATIONMETHODS A2 
+                                WHERE A2.USERID = U.USERID 
+                                  AND A2.METHODTYPE = 'Fingerprint' 
+                                  AND A2.ISACTIVE = 1 
+                                  AND A2.STATUS = 'Active'
+                            ) THEN TRUE 
                             ELSE FALSE 
                         END as HAS_FINGERPRINT
                     FROM USERS U
-                    LEFT JOIN AUTHENTICATIONMETHODS A 
-                        ON A.USERID = U.USERID 
-                       AND A.METHODTYPE = 'Fingerprint' 
-                       AND A.ISACTIVE = 1
-                       AND A.STATUS = 'Active'
                     WHERE U.STATUS = 'Active'
                     ORDER BY U.LASTNAME, U.FIRSTNAME", connection);
 
@@ -814,27 +820,30 @@ namespace FutronicAttendanceSystem.Database
                     throw new Exception($"User with GUID {userGuid} not found or not active");
                 }
 
-                // Delete any existing fingerprint records for this user
-                var deleteExistingCmd = new MySqlCommand(@"
-                    DELETE FROM AUTHENTICATIONMETHODS 
-                    WHERE USERID = @USERID AND METHODTYPE = 'Fingerprint'", connection);
-                deleteExistingCmd.Parameters.AddWithValue("@USERID", userGuid);
-                deleteExistingCmd.ExecuteNonQuery();
+                // Count existing fingerprints to generate unique identifier
+                var countCmd = new MySqlCommand(@"
+                    SELECT COUNT(*) FROM AUTHENTICATIONMETHODS 
+                    WHERE USERID = @USERID AND METHODTYPE = 'Fingerprint' AND ISACTIVE = 1", connection);
+                countCmd.Parameters.AddWithValue("@USERID", userGuid);
+                var existingCount = Convert.ToInt32(countCmd.ExecuteScalar());
+                
+                // Generate unique identifier: FP_{userGuid}_{count+1}
+                string identifier = $"FP_{userGuid}_{existingCount + 1}";
 
-                // Insert new fingerprint record
+                // Insert new fingerprint record (don't delete existing ones)
                 var insertFingerprintCmd = new MySqlCommand(@"
                     INSERT INTO AUTHENTICATIONMETHODS (AUTHID, USERID, METHODTYPE, IDENTIFIER, FINGERPRINTTEMPLATE, ISACTIVE, STATUS)
                     VALUES (UUID(), @USERID, 'Fingerprint', @IDENTIFIER, @TEMPLATE, TRUE, 'Active')", connection);
                 
                 insertFingerprintCmd.Parameters.AddWithValue("@USERID", userGuid);
-                insertFingerprintCmd.Parameters.AddWithValue("@IDENTIFIER", $"FP_{userGuid}");
+                insertFingerprintCmd.Parameters.AddWithValue("@IDENTIFIER", identifier);
                 insertFingerprintCmd.Parameters.AddWithValue("@TEMPLATE", fingerprintTemplate ?? new byte[0]);
                 
                 var result = insertFingerprintCmd.ExecuteNonQuery() > 0;
                 
                 if (result)
                 {
-                    LogMessage("INFO", $"Successfully added fingerprint for user {userGuid}");
+                    LogMessage("INFO", $"Successfully added fingerprint {existingCount + 1} for user {userGuid}");
                 }
                 
                 return result;
@@ -844,6 +853,167 @@ namespace FutronicAttendanceSystem.Database
                 LogMessage("ERROR", $"Failed to add fingerprint to existing user: {ex.Message}");
                 throw new Exception($"Failed to add fingerprint to existing user: {ex.Message}", ex);
             }
+        }
+
+        // Get fingerprint count for a user
+        public int GetFingerprintCount(string userGuid)
+        {
+            try
+            {
+                var cmd = new MySqlCommand(@"
+                    SELECT COUNT(*) 
+                    FROM AUTHENTICATIONMETHODS 
+                    WHERE USERID = @USERID 
+                    AND METHODTYPE = 'Fingerprint' 
+                    AND ISACTIVE = 1 
+                    AND STATUS = 'Active'", connection);
+                cmd.Parameters.AddWithValue("@USERID", userGuid);
+                var count = Convert.ToInt32(cmd.ExecuteScalar());
+                return count;
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to get fingerprint count: {ex.Message}");
+                return 0;
+            }
+        }
+
+        // Get all fingerprints for a user
+        public List<FingerprintInfo> GetUserFingerprints(string userGuid)
+        {
+            var fingerprints = new List<FingerprintInfo>();
+            try
+            {
+                var cmd = new MySqlCommand(@"
+                    SELECT AUTHID, IDENTIFIER, DATEREGISTERED, LASTUPDATED
+                    FROM AUTHENTICATIONMETHODS
+                    WHERE USERID = @USERID AND METHODTYPE = 'Fingerprint' AND ISACTIVE = 1 AND STATUS = 'Active'
+                    ORDER BY DATEREGISTERED", connection);
+                cmd.Parameters.AddWithValue("@USERID", userGuid);
+                
+                using (var reader = cmd.ExecuteReader())
+                {
+                    int index = 1;
+                    while (reader.Read())
+                    {
+                        fingerprints.Add(new FingerprintInfo
+                        {
+                            AuthId = reader["AUTHID"].ToString(),
+                            Identifier = reader["IDENTIFIER"].ToString(),
+                            FingerprintNumber = index++,
+                            DateRegistered = reader.IsDBNull(reader.GetOrdinal("DATEREGISTERED")) 
+                                ? DateTime.MinValue 
+                                : Convert.ToDateTime(reader["DATEREGISTERED"]),
+                            LastUpdated = reader.IsDBNull(reader.GetOrdinal("LASTUPDATED")) 
+                                ? DateTime.MinValue 
+                                : Convert.ToDateTime(reader["LASTUPDATED"])
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to get user fingerprints: {ex.Message}");
+            }
+            return fingerprints;
+        }
+
+        // Delete a specific fingerprint by AUTHID
+        public bool DeleteFingerprint(string authId)
+        {
+            try
+            {
+                var cmd = new MySqlCommand(@"
+                    UPDATE AUTHENTICATIONMETHODS 
+                    SET ISACTIVE = FALSE, STATUS = 'Suspended'
+                    WHERE AUTHID = @AUTHID", connection);
+                cmd.Parameters.AddWithValue("@AUTHID", authId);
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to delete fingerprint: {ex.Message}");
+                return false;
+            }
+        }
+
+        // Delete all fingerprints for a user
+        public bool DeleteAllFingerprints(string userGuid)
+        {
+            MySqlTransaction transaction = null;
+            try
+            {
+                transaction = connection.BeginTransaction();
+
+                var deleteCmd = new MySqlCommand(@"
+                    DELETE FROM AUTHENTICATIONMETHODS
+                    WHERE USERID = @USERID AND METHODTYPE = 'Fingerprint'", connection, transaction);
+                deleteCmd.Parameters.AddWithValue("@USERID", userGuid);
+
+                var rowsDeleted = deleteCmd.ExecuteNonQuery();
+                transaction.Commit();
+
+                return rowsDeleted > 0;
+            }
+            catch (Exception ex)
+            {
+                try { transaction?.Rollback(); } catch { }
+                LogMessage("ERROR", $"Failed to delete all fingerprints: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                transaction?.Dispose();
+            }
+        }
+
+        // Load all fingerprints for identification (one record per fingerprint, not per user)
+        public List<UserFingerprint> LoadAllFingerprintsForIdentification()
+        {
+            var fingerprints = new List<UserFingerprint>();
+            try
+            {
+                var cmd = new MySqlCommand(@"
+                    SELECT 
+                        U.USERID,
+                        CONCAT(U.FIRSTNAME, ' ', U.LASTNAME) as USERNAME,
+                        U.USERTYPE,
+                        A.AUTHID,
+                        A.FINGERPRINTTEMPLATE,
+                        A.IDENTIFIER
+                    FROM USERS U
+                    INNER JOIN AUTHENTICATIONMETHODS A 
+                        ON A.USERID = U.USERID 
+                       AND A.METHODTYPE = 'Fingerprint' 
+                       AND A.ISACTIVE = 1
+                       AND A.STATUS = 'Active'
+                    WHERE U.STATUS = 'Active'
+                    ORDER BY U.LASTNAME, U.FIRSTNAME", connection);
+
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        if (!reader.IsDBNull(reader.GetOrdinal("FINGERPRINTTEMPLATE")))
+                        {
+                            fingerprints.Add(new UserFingerprint
+                            {
+                                UserId = reader["USERID"].ToString(),
+                                Username = reader["USERNAME"].ToString(),
+                                UserType = reader["USERTYPE"].ToString(),
+                                AuthId = reader["AUTHID"].ToString(),
+                                Template = (byte[])reader["FINGERPRINTTEMPLATE"],
+                                Identifier = reader["IDENTIFIER"].ToString()
+                            });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to load fingerprints for identification: {ex.Message}");
+            }
+            return fingerprints;
         }
 
         public User GetUserByRfidTag(string rfidTag)

@@ -81,3 +81,4 @@ C:\Users\Harley\Desktop\Capstone\attendanceiot\IOTCapstone\FutronicAttendanceSys
 C:\Users\Harley\Desktop\Capstone\attendanceiot\IOTCapstone\FutronicAttendanceSystem\obj\Debug\net48\FutronicAttendanceSystem.csproj.CopyComplete
 C:\Users\Harley\Desktop\Capstone\attendanceiot\IOTCapstone\FutronicAttendanceSystem\obj\Debug\net48\FutronicAttendanceSystem.exe
 C:\Users\Harley\Desktop\Capstone\attendanceiot\IOTCapstone\FutronicAttendanceSystem\obj\Debug\net48\FutronicAttendanceSystem.pdb
+C:\Users\Harley\Desktop\Capstone\attendanceiot\IOTCapstone\FutronicAttendanceSystem\bin\Debug\net48\UI\Resources\ldcu.ico

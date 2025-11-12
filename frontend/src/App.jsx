@@ -15,6 +15,7 @@ import Reports from './pages/Reports';
 import Archive from './pages/Archive';
 import Backup from './pages/Backup';
 import SuperAdmin from './pages/SuperAdmin';
+import Settings from './pages/Settings';
 
 // Protected Route Component - Only allows admin/superadmin users
 const ProtectedRoute = ({ children }) => {
@@ -148,6 +149,7 @@ function AppRoutes() {
           <Route path="reports" element={<AdminRoute><Reports /></AdminRoute>} />
           <Route path="archive" element={<AdminRoute><Archive /></AdminRoute>} />
           <Route path="backup" element={<AdminRoute><Backup /></AdminRoute>} />
+          <Route path="settings" element={<AdminRoute><Settings /></AdminRoute>} />
           <Route
             path="superadmin"
             element={

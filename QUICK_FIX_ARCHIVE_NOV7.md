@@ -68,3 +68,7 @@ WHERE ACCESSTYPE = 'attendance_scan'
 
 The improved archive logic will work better going forward, but existing unarchived logs need to be archived manually or by re-archiving the academic year/semester.
 
+
+
+
+

@@ -15,7 +15,8 @@ import {
   ChartBarIcon,
   ArchiveBoxIcon,
   ArrowDownTrayIcon,
-  ShieldCheckIcon
+  ShieldCheckIcon,
+  Cog6ToothIcon
 } from '@heroicons/react/24/outline';
 
 const navigation = [
@@ -237,7 +238,7 @@ function Layout() {
                   <ChevronDownIcon className="h-4 w-4" />
                 </button>
 
-                <div className={`absolute right-0 mt-2 w-48 rounded-lg shadow-lg ring-1 ring-white/10 transition-all duration-300 ease-in-out transform ${
+                <div className={`absolute right-0 mt-2 w-64 rounded-lg shadow-lg ring-1 ring-white/10 transition-all duration-300 ease-in-out transform ${
                   userMenuOpen 
                     ? 'opacity-100 translate-y-0 scale-100' 
                     : 'opacity-0 -translate-y-2 scale-95 pointer-events-none'
@@ -259,6 +260,14 @@ function Layout() {
                       <p className="text-maroon-100">{user?.email}</p>
                       <p className="text-xs text-maroon-200 capitalize">{user?.role}</p>
                     </div>
+                    <Link
+                      to="/settings"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="flex items-center w-full px-4 py-2 text-sm text-maroon-100 hover:bg-white/10 hover:text-white transition-colors duration-200"
+                    >
+                      <Cog6ToothIcon className="mr-3 h-4 w-4" />
+                      Settings
+                    </Link>
                     <button
                       onClick={() => {
                         setUserMenuOpen(false);

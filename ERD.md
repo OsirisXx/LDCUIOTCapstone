@@ -91,7 +91,7 @@ authenticationmethods (10 attributes)
 │ Status                │ ENUM('Active','Suspended') DEFAULT 'Active'                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
 
-Purpose: Defines user authentication factors and their activation status.
+Purpose: Defines user authentication factors and their activation status. Supports multiple authentication methods per user, including multiple fingerprints (e.g., different fingers enrolled for the same user).
 
 classschedules (14 attributes)
 
@@ -349,7 +349,7 @@ Notes: Delete rules not specified in schema; recommend RESTRICT unless otherwise
 - Mapping: authenticationmethods.USERID → users.USERID
 - Delete: Not specified (assume RESTRICT)
 - Cardinality: ●< authenticationmethods to | users
-- Meaning: User can have multiple authentication methods.
+- Meaning: User can have multiple authentication methods. One user can have multiple fingerprint authentication methods (multiple fingers enrolled), each with a unique AUTHID and IDENTIFIER.
 
 8) Class Schedule Subject
 - Type: Many-to-One

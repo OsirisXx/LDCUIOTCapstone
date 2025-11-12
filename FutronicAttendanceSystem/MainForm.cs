@@ -398,6 +398,23 @@ namespace FutronicAttendanceSystem
             
             Utils.Logger.Info("MainForm constructor starting...");
             InitializeComponent();
+            try
+            {
+                var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "UI", "Resources", "ldcu.ico");
+                if (File.Exists(iconPath))
+                {
+                    this.Icon = new Icon(iconPath);
+                    Utils.Logger.Info($"Application icon set from {iconPath}");
+                }
+                else
+                {
+                    Utils.Logger.Warning($"Application icon not found at {iconPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.Logger.Warning($"Failed to set application icon: {ex.Message}");
+            }
             // Reduce flicker on WinForms by enabling optimized double buffering
             try
             {
@@ -564,6 +581,23 @@ namespace FutronicAttendanceSystem
             Console.WriteLine($"  Test Mode: {deviceConfig.TestMode}");
             
             InitializeComponent();
+            try
+            {
+                var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "UI", "Resources", "ldcu.ico");
+                if (File.Exists(iconPath))
+                {
+                    this.Icon = new Icon(iconPath);
+                    Utils.Logger.Info($"Application icon set from {iconPath}");
+                }
+                else
+                {
+                    Utils.Logger.Warning($"Application icon not found at {iconPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.Logger.Warning($"Failed to set application icon: {ex.Message}");
+            }
             
             // Reduce flicker
             try
@@ -1214,7 +1248,7 @@ namespace FutronicAttendanceSystem
             var actionsColumn = new DataGridViewTextBoxColumn {
                 Name = "Actions",
                 HeaderText = "Actions",
-                Width = 200,
+                Width = 280,
                 ReadOnly = true
             };
             dgvUsers.Columns.Add(actionsColumn);
@@ -1351,10 +1385,25 @@ namespace FutronicAttendanceSystem
                     // Set actions text based on fingerprint and RFID status
                     string actionsText = "";
                     
-                    // Fingerprint action
+                    // Get fingerprint count
+                    int fingerprintCount = 0;
+                    if (!string.IsNullOrEmpty(user.EmployeeId))
+                    {
+                        fingerprintCount = dbManager.GetFingerprintCount(user.EmployeeId);
+                    }
+                    
+                    // Fingerprint action - use "Manage FP" for multiple, "Delete FP" for single
                     if (hasFingerprint)
                     {
-                        actionsText = "Delete FP";
+                        if (fingerprintCount > 1)
+                        {
+                            // Use shorter text for multiple fingerprints - badge will show count
+                            actionsText = "Manage FP";
+                        }
+                        else
+                        {
+                            actionsText = "Delete FP";
+                        }
                     }
                     else
                     {
@@ -1371,7 +1420,9 @@ namespace FutronicAttendanceSystem
                         actionsText += " | Assign RFID";
                     }
                     
+                    // Store fingerprint count in cell tag for badge rendering
                     dgvUsers.Rows[row].Cells["Actions"].Value = actionsText;
+                    dgvUsers.Rows[row].Cells["Actions"].Tag = fingerprintCount;
                     
                     // Store the user object in the row tag for easy access
                     dgvUsers.Rows[row].Tag = user;
@@ -1545,7 +1596,23 @@ namespace FutronicAttendanceSystem
                     // Left half clicked - Fingerprint action
                     if (hasFingerprint)
                     {
-                        DeleteUserFingerprint(user);
+                        // Check if user has multiple fingerprints
+                        int fingerprintCount = 0;
+                        if (!string.IsNullOrEmpty(user.EmployeeId))
+                        {
+                            fingerprintCount = dbManager.GetFingerprintCount(user.EmployeeId);
+                        }
+                        
+                        if (fingerprintCount > 1)
+                        {
+                            // Show dialog for multiple fingerprints
+                            ShowFingerprintManagementDialog(user, fingerprintCount);
+                        }
+                        else
+                        {
+                            // Single fingerprint - delete directly
+                            DeleteUserFingerprint(user);
+                        }
                     }
                     else
                     {
@@ -1585,6 +1652,17 @@ namespace FutronicAttendanceSystem
                 Color rightColor = isSelected ? Color.White : Color.FromArgb(40, 167, 69);
                 Color dividerColor = isSelected ? Color.White : Color.Gray;
                 
+                // Get fingerprint count from cell tag
+                int fingerprintCount = 0;
+                if (e.RowIndex >= 0 && e.ColumnIndex >= 0)
+                {
+                    var cell = dgvUsers.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                    if (cell.Tag != null && int.TryParse(cell.Tag.ToString(), out int count))
+                    {
+                        fingerprintCount = count;
+                    }
+                }
+                
                 // Check if we need to split the text into two parts
                 if (actionsText.Contains("|"))
                 {
@@ -1592,14 +1670,58 @@ namespace FutronicAttendanceSystem
                     var leftText = splitText[0].Trim();
                     var rightText = splitText[1].Trim();
                     
-                    // Draw left part (Delete) with conditional color
-                    var leftRect = new Rectangle(cellBounds.Left + 5, cellBounds.Top + 3, cellBounds.Width / 2 - 5, cellBounds.Height - 6);
-                    using (var brush = new SolidBrush(leftColor))
+                    // Use amber/yellow color for "Manage FP" (multiple fingerprints)
+                    Color textColor = leftColor;
+                    if (fingerprintCount > 1 && leftText == "Manage FP")
+                    {
+                        textColor = isSelected ? Color.White : Color.FromArgb(255, 193, 7); // Yellow/Amber for multiple
+                    }
+                    
+                    // Draw left part - adjust width if badge will be shown
+                    int badgeSize = fingerprintCount > 1 ? 18 : 0;
+                    int leftSectionWidth = cellBounds.Width / 2 - 5;
+                    int textAreaWidth = leftSectionWidth - (badgeSize > 0 ? badgeSize + 5 : 0);
+                    
+                    var leftRect = new Rectangle(cellBounds.Left + 5, cellBounds.Top + 3, textAreaWidth, cellBounds.Height - 6);
+                    using (var brush = new SolidBrush(textColor))
                     {
                         e.Graphics.DrawString(leftText, e.CellStyle.Font, brush, leftRect, new StringFormat { 
                             Alignment = StringAlignment.Center, 
                             LineAlignment = StringAlignment.Center 
                         });
+                    }
+                    
+                    // Draw badge indicator for multiple fingerprints (positioned at top-right of left section)
+                    if (fingerprintCount > 1)
+                    {
+                        // Position badge at top-right corner of left section
+                        int badgeX = cellBounds.Left + cellBounds.Width / 2 - badgeSize - 3;
+                        int badgeY = cellBounds.Top + 3;
+                        
+                        // Badge background (amber/yellow)
+                        Color badgeColor = isSelected ? Color.White : Color.FromArgb(255, 193, 7);
+                        Color badgeTextColor = isSelected ? Color.FromArgb(255, 193, 7) : Color.White;
+                        
+                        using (var brush = new SolidBrush(badgeColor))
+                        {
+                            e.Graphics.FillEllipse(brush, badgeX, badgeY, badgeSize, badgeSize);
+                        }
+                        
+                        // Badge border
+                        using (var pen = new Pen(isSelected ? Color.White : Color.FromArgb(255, 152, 0), 1.5f))
+                        {
+                            e.Graphics.DrawEllipse(pen, badgeX, badgeY, badgeSize, badgeSize);
+                        }
+                        
+                        // Badge text (count)
+                        using (var font = new Font(e.CellStyle.Font.FontFamily, 8, FontStyle.Bold))
+                        using (var brush = new SolidBrush(badgeTextColor))
+                        {
+                            var textSize = e.Graphics.MeasureString(fingerprintCount.ToString(), font);
+                            var textX = badgeX + (badgeSize - textSize.Width) / 2;
+                            var textY = badgeY + (badgeSize - textSize.Height) / 2;
+                            e.Graphics.DrawString(fingerprintCount.ToString(), font, brush, textX, textY);
+                        }
                     }
                     
                     // Draw divider with conditional color
@@ -1609,7 +1731,7 @@ namespace FutronicAttendanceSystem
                                             cellBounds.Left + cellBounds.Width / 2, cellBounds.Bottom - 3);
                     }
                     
-                    // Draw right part (Re-enroll) with conditional color
+                    // Draw right part (RFID action) with conditional color
                     var rightRect = new Rectangle(cellBounds.Left + cellBounds.Width / 2 + 5, cellBounds.Top + 3, 
                                                  cellBounds.Width / 2 - 10, cellBounds.Height - 6);
                     using (var brush = new SolidBrush(rightColor))
@@ -1794,6 +1916,192 @@ namespace FutronicAttendanceSystem
                     MessageBoxIcon.Error);
                 SetStatusText($"Error: {ex.Message}");
             }
+        }
+
+        // Show fingerprint management dialog for users with multiple fingerprints
+        private void ShowFingerprintManagementDialog(User user, int fingerprintCount)
+        {
+            var fingerprints = dbManager.GetUserFingerprints(user.EmployeeId);
+            
+            var dialog = new Form
+            {
+                Text = $"Manage Fingerprints - {user.FirstName} {user.LastName}",
+                Size = new Size(500, 400),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false
+            };
+            
+            var mainPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10),
+                RowCount = 4,
+                ColumnCount = 1
+            };
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            
+            // Header
+            var lblHeader = new Label
+            {
+                Text = $"This user has {fingerprintCount} fingerprint(s) registered:",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                AutoSize = true,
+                Padding = new Padding(0, 0, 0, 10)
+            };
+            mainPanel.Controls.Add(lblHeader, 0, 0);
+            
+            // List of fingerprints
+            var lstFingerprints = new ListBox
+            {
+                Dock = DockStyle.Fill,
+                Font = new Font("Segoe UI", 9)
+            };
+            
+            foreach (var fp in fingerprints)
+            {
+                string displayText = $"Fingerprint #{fp.FingerprintNumber} - Registered: {fp.DateRegistered:MM/dd/yyyy HH:mm}";
+                lstFingerprints.Items.Add(new ListItem { Text = displayText, AuthId = fp.AuthId });
+            }
+            
+            mainPanel.Controls.Add(lstFingerprints, 0, 1);
+            
+            // Buttons panel
+            var buttonPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(0, 10, 0, 0)
+            };
+            
+            var btnAddAnother = new Button
+            {
+                Text = "➕ Add Another Fingerprint",
+                Size = new Size(180, 35),
+                BackColor = Color.FromArgb(0, 123, 255),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            btnAddAnother.Click += (s, e) =>
+            {
+                dialog.DialogResult = DialogResult.OK;
+                dialog.Close();
+                // Start enrollment for adding another fingerprint
+                selectedUser = user;
+                isUserSelected = true;
+                StartEnrollment();
+            };
+            
+            var btnDeleteSelected = new Button
+            {
+                Text = "🗑️ Delete Selected",
+                Size = new Size(150, 35),
+                BackColor = Color.FromArgb(220, 53, 69),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Enabled = lstFingerprints.SelectedIndex >= 0
+            };
+            btnDeleteSelected.Click += (s, e) =>
+            {
+                if (lstFingerprints.SelectedItem != null)
+                {
+                    var selectedItem = lstFingerprints.SelectedItem as ListItem;
+                    if (MessageBox.Show(
+                        $"Are you sure you want to delete this fingerprint?",
+                        "Confirm Delete",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question) == DialogResult.Yes)
+                    {
+                        if (dbManager.DeleteFingerprint(selectedItem.AuthId))
+                        {
+                            MessageBox.Show("Fingerprint deleted successfully.", "Success", 
+                                MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            cloudUsers = dbManager.LoadAllUsers();
+                            LoadUsersIntoTable();
+                            dialog.Close();
+                        }
+                        else
+                        {
+                            MessageBox.Show("Failed to delete fingerprint.", "Error", 
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            };
+            
+            var btnDeleteAll = new Button
+            {
+                Text = "🗑️ Delete All",
+                Size = new Size(120, 35),
+                BackColor = Color.FromArgb(220, 53, 69),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            btnDeleteAll.Click += (s, e) =>
+            {
+                if (MessageBox.Show(
+                    $"Are you sure you want to delete ALL {fingerprintCount} fingerprint(s) for this user?",
+                    "Confirm Delete All",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    if (dbManager.DeleteAllFingerprints(user.EmployeeId))
+                    {
+                        MessageBox.Show("All fingerprints deleted successfully.", "Success", 
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        try
+                        {
+                            cloudUsers = dbManager.LoadAllUsers();
+                            RebuildUserLookupCaches();
+                        }
+                        catch (Exception reloadEx)
+                        {
+                            SetStatusText($"Fingerprints deleted but failed to refresh user list: {reloadEx.Message}");
+                        }
+                        LoadUsersIntoTable();
+                        dialog.Close();
+                    }
+                    else
+                    {
+                        MessageBox.Show("Failed to delete all fingerprints.", "Error", 
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            };
+            
+            var btnCancel = new Button
+            {
+                Text = "Cancel",
+                Size = new Size(100, 35),
+                DialogResult = DialogResult.Cancel
+            };
+            
+            lstFingerprints.SelectedIndexChanged += (s, e) =>
+            {
+                btnDeleteSelected.Enabled = lstFingerprints.SelectedIndex >= 0;
+            };
+            
+            buttonPanel.Controls.Add(btnAddAnother);
+            buttonPanel.Controls.Add(btnDeleteSelected);
+            buttonPanel.Controls.Add(btnDeleteAll);
+            buttonPanel.Controls.Add(btnCancel);
+            
+            mainPanel.Controls.Add(buttonPanel, 0, 2);
+            
+            dialog.Controls.Add(mainPanel);
+            dialog.ShowDialog();
+        }
+
+        // Helper class for ListBox items
+        private class ListItem
+        {
+            public string Text { get; set; }
+            public string AuthId { get; set; }
+            public override string ToString() => Text;
         }
 
         private void AssignUserRfid(User user)
@@ -2728,6 +3036,13 @@ namespace FutronicAttendanceSystem
         {
             try
             {
+                // Prevent starting enrollment if already in progress
+                if (m_bEnrollmentInProgress || isEnrollmentActive)
+                {
+                    SetStatusText("Enrollment already in progress. Please wait...");
+                    return;
+                }
+                
                 // Set enrollment state
                 m_bEnrollmentInProgress = true;
                 // Reset guidance UI
@@ -3319,6 +3634,13 @@ namespace FutronicAttendanceSystem
                 string userGuid = userInfo.EmployeeId;
                 
                 // Console.WriteLine($"User type: {userType}, Session state: {currentSessionState}");
+
+                if (deviceConfig?.AllowUnauthorizedFingerprints == true)
+                {
+                    GrantDoorOverrideForKnownUser(userInfo.Username, userGuid, currentScanLocation ?? "inside");
+                    ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                    return;
+                }
                 
                 // Process based on user type and current session state
                 if (userType == "instructor")
@@ -6422,12 +6744,16 @@ namespace FutronicAttendanceSystem
 						// Add fingerprint to existing user (don't create new user)
 						if (selectedUser != null && !string.IsNullOrEmpty(selectedUser.EmployeeId))
 						{
+							// Get existing fingerprint count before adding
+							int existingCount = dbManager.GetFingerprintCount(selectedUser.EmployeeId);
+							
 							bool fingerprintAdded = dbManager.AddFingerprintToExistingUser(selectedUser.EmployeeId, userRecord.Template);
 							
 							if (fingerprintAdded)
 							{
-								SetStatusText($"Enrollment successful! Fingerprint added for '{selectedUser.FirstName} {selectedUser.LastName}'.");
-								UpdateEnrollmentGuidance(5, "Done! You can proceed to attendance.");
+								int newCount = existingCount + 1;
+								SetStatusText($"Enrollment successful! Fingerprint #{newCount} added for '{selectedUser.FirstName} {selectedUser.LastName}'.");
+								UpdateEnrollmentGuidance(5, $"Done! Fingerprint #{newCount} saved. You can add another fingerprint or proceed.");
 								
 								// Refresh user data from database and update display
 								try
@@ -6443,21 +6769,6 @@ namespace FutronicAttendanceSystem
 								{
 									SetStatusText($"Enrollment successful, but failed to refresh user list: {ex.Message}");
 								}
-								
-								// Clear selection after refresh
-								ClearSelection();
-							}
-							else
-							{
-								SetStatusText("Failed to add fingerprint to existing user.");
-								UpdateEnrollmentGuidance(0, "Enrollment failed. Please try again.");
-							}
-						}
-						else
-						{
-							SetStatusText("Error: No user selected for enrollment.");
-							UpdateEnrollmentGuidance(0, "Please select a user first.");
-						}
 
                         // Force refresh users immediately so identification sees the new template
                         try
@@ -6472,6 +6783,97 @@ namespace FutronicAttendanceSystem
                         {
                             SetStatusText($"Error refreshing users: {ex.Message}");
                         }
+								
+								// Perform cleanup BEFORE showing dialog to avoid conflicts
+								// This ensures the operation is fully disposed before we try to restart
+								try
+								{
+									UnregisterEnrollmentEvents();
+									if (m_Operation != null)
+									{
+										try { m_Operation.Dispose(); } catch { }
+										m_Operation = null;
+									}
+									m_OperationObj = null;
+								}
+								catch (Exception cleanupEx)
+								{
+									Console.WriteLine($"Cleanup error: {cleanupEx.Message}");
+								}
+								
+								// Reset enrollment flags
+								m_bEnrollmentInProgress = false;
+								isEnrollmentActive = false;
+								
+								// Show option to add another fingerprint after cleanup is complete
+								// Use BeginInvoke to avoid blocking the background thread
+								if (this.IsHandleCreated && !this.IsDisposed)
+								{
+									this.BeginInvoke(new Action(() =>
+									{
+										EnableControls(true);
+										
+										var result = MessageBox.Show(
+											$"Fingerprint #{newCount} successfully enrolled!\n\n" +
+											$"Total fingerprints for this user: {newCount}\n\n" +
+											$"Would you like to enroll another fingerprint for this user?",
+											"Enrollment Complete",
+											MessageBoxButtons.YesNo,
+											MessageBoxIcon.Question);
+										
+										if (result == DialogResult.Yes)
+										{
+											// Ensure user is still selected and form fields are populated
+											if (selectedUser != null && isUserSelected)
+											{
+												// Re-populate form fields to ensure they're set
+												PopulateFormFields(selectedUser);
+												
+												// Update UI to show selected user
+												lblSelectedUser.Text = $"Selected: {selectedUser.FirstName} {selectedUser.LastName} ({selectedUser.UserType})";
+												lblSelectedUser.ForeColor = Color.DarkGreen;
+												btnEnroll.Enabled = true;
+												btnEnroll.Text = $"Start Enrollment for {selectedUser.FirstName}";
+												
+												// Start new enrollment - operation is already cleaned up
+												if (!m_bEnrollmentInProgress && !isEnrollmentActive)
+												{
+													StartEnrollment();
+												}
+												else
+												{
+													SetStatusText("Please wait for current enrollment to complete.");
+												}
+											}
+											else
+											{
+												SetStatusText("User selection lost. Please select the user again.");
+												MessageBox.Show(
+													"User selection was lost. Please select the user from the table again.",
+													"Selection Lost",
+													MessageBoxButtons.OK,
+													MessageBoxIcon.Warning);
+											}
+										}
+										else
+										{
+											// Clear selection
+											ClearSelection();
+										}
+									}));
+								}
+							}
+							else
+							{
+								SetStatusText("Failed to add fingerprint to existing user.");
+								UpdateEnrollmentGuidance(0, "Enrollment failed. Please try again.");
+							}
+						}
+						else
+						{
+							SetStatusText("Error: No user selected for enrollment.");
+							UpdateEnrollmentGuidance(0, "Please select a user first.");
+						}
 					}
 					catch (Exception dbEx)
 					{
@@ -6484,6 +6886,7 @@ namespace FutronicAttendanceSystem
                     UpdateEnrollmentGuidance(0, "Enrollment failed. Press 'Start Enrollment' to try again.");
                     isEnrollmentActive = false;
                     try { enrollProgressTimer?.Stop(); } catch { }
+                    // Don't reset m_bEnrollmentInProgress here - let finally block handle cleanup
                 }
             }
             catch (Exception ex)
@@ -6493,13 +6896,33 @@ namespace FutronicAttendanceSystem
             }
             finally
             {
-                // Reset enrollment state
-                m_bEnrollmentInProgress = false;
-                isEnrollmentActive = false;
-                try { enrollProgressTimer?.Stop(); } catch { }
-                
-                UnregisterEnrollmentEvents();
-                EnableControls(true);
+                // Reset enrollment state (only if not already reset in success path)
+                // The success path handles cleanup, but we need to ensure flags are reset for failure cases
+                if (m_bEnrollmentInProgress || isEnrollmentActive)
+                {
+                    m_bEnrollmentInProgress = false;
+                    isEnrollmentActive = false;
+                    try { enrollProgressTimer?.Stop(); } catch { }
+                    
+                    // Clean up enrollment operation (only if not already cleaned up)
+                    try
+                    {
+                        if (m_Operation != null)
+                        {
+                            UnregisterEnrollmentEvents();
+                            try { m_Operation.Dispose(); } catch { }
+                            m_Operation = null;
+                        }
+                        m_OperationObj = null;
+                    }
+                    catch { }
+                    
+                    // Only enable controls if we're handling cleanup here (failure case)
+                    if (this.IsHandleCreated && !this.IsDisposed)
+                    {
+                        this.BeginInvoke(new Action(() => EnableControls(true)));
+                    }
+                }
                 
                 // CRITICAL: Reset identifying flag to allow attendance restart
                 isIdentifying = false;
@@ -6511,11 +6934,14 @@ namespace FutronicAttendanceSystem
                     {
                         if (!m_bExit && alwaysOnAttendance && !m_bEnrollmentInProgress)
                         {
-                            this.Invoke(new Action(() => 
+                            if (this.IsHandleCreated && !this.IsDisposed)
                             {
-                                SetStatusText("Restarting attendance after enrollment...");
-                                StartIdentification();
-                            }));
+                                this.BeginInvoke(new Action(() => 
+                                {
+                                    SetStatusText("Restarting attendance after enrollment...");
+                                    StartIdentification();
+                                }));
+                            }
                         }
                     });
                 }
@@ -7785,12 +8211,14 @@ namespace FutronicAttendanceSystem
                 Console.WriteLine($"User: {user.FirstName} {user.LastName} - Type: {user.UserType}");
                 Console.WriteLine($"Current Session State: {currentSessionState}");
 
-                // Special handling for early arrivals - allow door access even if session is not active
+                // Special handling for early arrivals and door overrides - allow door access even if session is not active
                 bool isEarlyArrival = !string.IsNullOrEmpty(action) && 
                     (action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0);
+                bool isDoorOverride = !string.IsNullOrEmpty(action) && 
+                    (action.IndexOf("Door Override", StringComparison.OrdinalIgnoreCase) >= 0);
 
-                // Check if user should be allowed to open lock (unless it's an early arrival)
-                if (!isEarlyArrival && !ShouldOpenLockForUser(user))
+                // Check if user should be allowed to open lock (unless it's an early arrival or door override)
+                if (!isEarlyArrival && !isDoorOverride && !ShouldOpenLockForUser(user))
                 {
                     Console.WriteLine($"⚠️ User {user.FirstName} {user.LastName} ({user.UserType}) - access denied");
                     Console.WriteLine($"⚠️ Session State: {currentSessionState} - Not allowed for this user type");
@@ -7800,6 +8228,11 @@ namespace FutronicAttendanceSystem
                 if (isEarlyArrival)
                 {
                     Console.WriteLine($"✅ Early Arrival: Allowing door access for {user.FirstName} {user.LastName}");
+                }
+                
+                if (isDoorOverride)
+                {
+                    Console.WriteLine($"✅ Door Override: Allowing door access for {user.FirstName} {user.LastName} (AllowUnauthorizedFingerprints enabled)");
                 }
                 
                 Console.WriteLine($"✅ User {user.FirstName} {user.LastName} ({user.UserType}) - access granted");
@@ -7827,14 +8260,23 @@ namespace FutronicAttendanceSystem
                 {
                     displayMessage = "Early Arrival recorded. Scan inside at start.";
                 }
+                
+                // For door overrides, we need to bypass ESP32's session check by setting sessionActive=true
+                bool effectiveSessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                             currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                if (isDoorOverride)
+                {
+                    effectiveSessionActive = true; // Override: allow access regardless of session state
+                }
+                
                 var payload = new
                 {
                     action = lockAction,
                     user = $"{user.FirstName} {user.LastName}",
                     userType = user.UserType?.ToLower(),
-                    sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
-                                   currentSessionState == AttendanceSessionState.ActiveForSignOut,
-                    message = displayMessage
+                    sessionActive = effectiveSessionActive,
+                    message = displayMessage,
+                    overrideRequest = isDoorOverride
                 };
 
                 bool success = await PostLockPayloadAsync(esp32Ip, payload);
@@ -8636,12 +9078,21 @@ namespace FutronicAttendanceSystem
                 Console.WriteLine($"User: {user.FirstName} {user.LastName} - Type: {user.UserType}");
                 Console.WriteLine($"Current Session State: {currentSessionState}");
 
-                // Check if user should be allowed to open lock
-                if (!ShouldOpenLockForUser(user))
+                // Special handling for door overrides - allow door access even if session is not active
+                bool isDoorOverride = !string.IsNullOrEmpty(action) && 
+                    (action.IndexOf("Door Override", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                // Check if user should be allowed to open lock (unless it's a door override)
+                if (!isDoorOverride && !ShouldOpenLockForUser(user))
                 {
                     Console.WriteLine($"⚠️ User {user.FirstName} {user.LastName} ({user.UserType}) - access denied");
                     Console.WriteLine($"⚠️ Session State: {currentSessionState} - Not allowed for this user type");
                     return;
+                }
+                
+                if (isDoorOverride)
+                {
+                    Console.WriteLine($"✅ Door Override (RFID): Allowing door access for {user.FirstName} {user.LastName} (AllowUnauthorizedFingerprints enabled)");
                 }
                 
                 Console.WriteLine($"✅ User {user.FirstName} {user.LastName} ({user.UserType}) - access granted");
@@ -8671,14 +9122,23 @@ namespace FutronicAttendanceSystem
                 {
                     displayMessage = "Early Arrival recorded. Scan inside at start.";
                 }
+                
+                // For door overrides, we need to bypass ESP32's session check by setting sessionActive=true
+                bool effectiveSessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                             currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                if (isDoorOverride)
+                {
+                    effectiveSessionActive = true; // Override: allow access regardless of session state
+                }
+                
                 var payload = new
                 {
                     rfid_data = rfidData,
                     user = $"{user.FirstName} {user.LastName}",
                     userType = user.UserType?.ToLower(),
-                    sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
-                                   currentSessionState == AttendanceSessionState.ActiveForSignOut,
-                    message = displayMessage
+                    sessionActive = effectiveSessionActive,
+                    message = displayMessage,
+                    overrideRequest = isDoorOverride
                 };
 
                 var json = JsonSerializer.Serialize(payload);
@@ -8889,7 +9349,7 @@ namespace FutronicAttendanceSystem
             {
 
                 // Scan common IP ranges (fast scan of likely IPs)
-                var likelyIPs = new List<int> { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 20, 50, 100, 101, 102, 200, 254 };
+                var likelyIPs = new List<int> { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 50, 100, 101, 102, 200, 254 };
                 
                 Utils.Logger.Debug($"Scanning IPs: {string.Join(", ", likelyIPs.Select(ip => $"{networkPrefix}.{ip}"))}");
 
@@ -9420,44 +9880,8 @@ namespace FutronicAttendanceSystem
 
         private List<UserRecord> LoadUsers()
         {
-            var users = new List<UserRecord>();
-            
-            // Check if cloudUsers is initialized
-            if (cloudUsers == null)
-            {
-                SetStatusText("Users not loaded from database yet. Please wait...");
-                return users;
-            }
-            
-            // Convert cloud users to UserRecord format for compatibility
-            foreach (var cloudUser in cloudUsers)
-            {
-                try
-                {
-                    // Only add users with valid templates to prevent identification errors
-                    if (cloudUser?.FingerprintTemplate != null && cloudUser.FingerprintTemplate.Length > 0 && !string.IsNullOrEmpty(cloudUser.Username))
-                    {
-                        var userRecord = new UserRecord
-                        {
-                            UserName = cloudUser.Username,
-                            Template = cloudUser.FingerprintTemplate
-                        };
-                        users.Add(userRecord);
-                    }
-                    else
-                    {
-                        // Skip users with invalid templates (reduced logging)
-                        // Console.WriteLine($"Skipping user '{cloudUser.Username}' - invalid or empty fingerprint template");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // Skip invalid users and log the error
-                    Console.WriteLine($"Error loading user: {ex.Message}");
-                }
-            }
-
-            return users;
+            // For identification we must load every fingerprint template (including multiples per user)
+            return LoadUserRecordsForIdentification();
         }
 
 
@@ -10152,6 +10576,13 @@ namespace FutronicAttendanceSystem
                 Console.WriteLine($"✅ RFID found: {userInfo.Username} ({userInfo.UserType})");
                 
                 string userType = userInfo.UserType?.ToLower();
+                
+                if (deviceConfig?.AllowUnauthorizedFingerprints == true)
+                {
+                    GrantDoorOverrideForKnownUser(userInfo.Username, userInfo.EmployeeId, currentScanLocation ?? "inside", isRfid: true, rfidData: rfidData);
+                    lastRfidInput = DateTime.MinValue;
+                    return;
+                }
                 
                 // Route based on user type and session state (same logic as fingerprint system)
                 if (userType == "instructor")
@@ -14353,6 +14784,104 @@ namespace FutronicAttendanceSystem
             }
         }
 
+        private void GrantDoorOverrideForKnownUser(string userName, string userGuid, string location, bool isRfid = false, string rfidData = null)
+        {
+            string normalizedLocation = string.IsNullOrWhiteSpace(location) ? "inside" : location;
+            string statusMessage = $"🔓 Door override granted: {userName}";
+
+            if (isRfid)
+            {
+                SetRfidStatusText(statusMessage);
+                AddRfidAttendanceRecord(userName, "Door Override", "Override Enabled");
+            }
+            else
+            {
+                SetStatusText(statusMessage);
+            }
+
+            var overrideRecord = new Database.Models.AttendanceRecord
+            {
+                UserId = 0,
+                Username = userName,
+                Timestamp = DateTime.Now,
+                Action = "Door Override",
+                Status = "Override Enabled"
+            };
+
+            attendanceRecords.Add(overrideRecord);
+            UpdateAttendanceDisplay(overrideRecord);
+
+            if (normalizedLocation.Equals("inside", StringComparison.OrdinalIgnoreCase))
+            {
+                dualSensorPanel?.UpdateInsideLastScan(userName, "Door override granted", true);
+                dualSensorPanel?.UpdateInsideStatus("Active");
+            }
+            else
+            {
+                dualSensorPanel?.UpdateOutsideLastScan(userName, "Door override granted", true);
+                dualSensorPanel?.UpdateOutsideStatus("Active");
+            }
+
+            try
+            {
+                dbManager?.LogAccessAttempt(
+                    userId: string.IsNullOrEmpty(userGuid) ? null : userGuid,
+                    roomId: null,
+                    authMethod: isRfid ? "RFID" : "Fingerprint",
+                    location: normalizedLocation,
+                    accessType: "door_override",
+                    result: "granted",
+                    reason: "AllowUnauthorizedFingerprints override enabled");
+            }
+            catch (Exception logEx)
+            {
+                Console.WriteLine($"⚠️ Failed to log door override access attempt: {logEx.Message}");
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    if (isRfid)
+                    {
+                        if (!string.IsNullOrEmpty(userGuid))
+                        {
+                            await RequestRfidLockControl(userGuid, "Door Override", rfidData ?? "");
+                        }
+                        else
+                        {
+                            await RequestAnonymousLockControl(normalizedLocation, "Door override (RFID) - no user GUID");
+                        }
+                    }
+                    else
+                    {
+                        if (!string.IsNullOrEmpty(userGuid))
+                        {
+                            await RequestLockControl(userGuid, "Door Override");
+                        }
+                        else
+                        {
+                            await RequestAnonymousLockControl(normalizedLocation, "Door override (Fingerprint) - no user GUID");
+                        }
+                    }
+                }
+                catch (Exception lockEx)
+                {
+                    Console.WriteLine($"❌ Door override request failed: {lockEx.Message}");
+                }
+            });
+
+            dualSensorPanel?.AddActivityItem(new ActivityItem
+            {
+                Timestamp = DateTime.Now,
+                UserName = userName,
+                Action = "Door Override",
+                Location = normalizedLocation,
+                Success = true,
+                StatusMessage = "Override Enabled"
+            });
+        }
+
         private void TestSensorScan(string location)
         {
             // Test mode simulation
@@ -14387,25 +14916,25 @@ namespace FutronicAttendanceSystem
         {
             try
             {
-                var users = dbManager.LoadAllUsers();
+                // Use new method that loads ALL fingerprints (not just one per user)
+                var fingerprints = dbManager.LoadAllFingerprintsForIdentification();
                 var userRecords = new List<UserRecord>();
 
-                Utils.Logger.Debug($"Loading users for identification from database...");
-                Utils.Logger.Debug($"Total users loaded: {users.Count}");
+                Utils.Logger.Debug($"Loading fingerprints for identification from database...");
+                Utils.Logger.Debug($"Total fingerprints loaded: {fingerprints.Count}");
 
-                foreach (var user in users)
+                foreach (var fp in fingerprints)
                 {
-                    // Enhanced template validation
-                    if (user.FingerprintTemplate != null &&
-                        user.FingerprintTemplate.Length > 0 &&
-                        IsValidFingerprintTemplate(user.FingerprintTemplate))
+                    if (fp.Template != null &&
+                        fp.Template.Length > 0 &&
+                        IsValidFingerprintTemplate(fp.Template))
                     {
-                        Utils.Logger.Debug($"Valid template for user: {user.Username} ({user.UserType}) - Template size: {user.FingerprintTemplate.Length} bytes");
+                        Utils.Logger.Debug($"Valid template for user: {fp.Username} ({fp.UserType}) - Template size: {fp.Template.Length} bytes - AuthID: {fp.AuthId}");
 
                         userRecords.Add(new UserRecord
                         {
-                            UserName = user.Username,
-                            Template = user.FingerprintTemplate
+                            UserName = fp.Username,
+                            Template = fp.Template
                         });
                     }
                     else
@@ -14414,7 +14943,7 @@ namespace FutronicAttendanceSystem
                     }
                 }
 
-                Utils.Logger.Info($"Loaded {userRecords.Count} user records for identification");
+                Utils.Logger.Info($"Loaded {userRecords.Count} fingerprint records for identification");
                 Utils.Logger.Debug($"Instructors: {userRecords.Count(u => u.UserName.Contains("aurora") || u.UserName.Contains("AURORA"))}");
                 Utils.Logger.Debug($"Students: {userRecords.Count - userRecords.Count(u => u.UserName.Contains("aurora") || u.UserName.Contains("AURORA"))}");
 
@@ -14422,7 +14951,7 @@ namespace FutronicAttendanceSystem
             }
             catch (Exception ex)
             {
-                Utils.Logger.Error($"Error loading users for identification: {ex.Message}");
+                Utils.Logger.Error($"Error loading fingerprints for identification: {ex.Message}");
                 return new List<UserRecord>();
             }
         }
