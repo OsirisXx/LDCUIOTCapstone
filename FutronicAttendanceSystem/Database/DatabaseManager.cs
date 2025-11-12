@@ -1833,17 +1833,101 @@ namespace FutronicAttendanceSystem.Database
                     return new AttendanceAttemptResult { Success = true, ScheduleId = scheduleId, SubjectName = scheduleValidation.SubjectName };
                 }
                 
-                // For sign-out, ensure we use the correct action type and scan type
+                // For sign-out, update the existing sign-in record instead of creating a new one
                 if (isSignOut)
                 {
                     actionType = "Sign Out";
                     scanType = "time_out";
                     status = "Present"; // Sign-out is always considered present
-                    LogMessage("INFO", $"Sign-out action: Setting ActionType=Sign Out, SCANTYPE=time_out");
-                    Console.WriteLine($"🔍 SIGN-OUT: Setting ActionType=Sign Out, SCANTYPE=time_out");
+                    LogMessage("INFO", $"Sign-out action: Updating existing sign-in record with TimeOut");
+                    Console.WriteLine($"🔍 SIGN-OUT: Updating existing sign-in record with TimeOut");
+                    
+                    // Find the existing sign-in record for today and update it with TimeOut
+                    DateTime signOutTime = DateTime.Now;
+                    
+                    // First, try to find the sign-in record by schedule and session
+                    string findSignInQuery = @"
+                        SELECT ATTENDANCEID, TIMEIN
+                        FROM ATTENDANCERECORDS
+                        WHERE USERID = @USERID
+                          AND DATE = CURRENT_DATE
+                          AND SCHEDULEID = @SCHEDULEID
+                          AND (ACTIONTYPE = 'Sign In' OR ACTIONTYPE = 'Early Arrival')
+                          AND (TIMEOUT IS NULL OR TIMEOUT = '00:00:00')
+                        ORDER BY SCANDATETIME DESC
+                        LIMIT 1";
+                    
+                    string existingAttendanceId = null;
+                    TimeSpan? existingTimeIn = null;
+                    
+                    using (var cmdFind = new MySqlCommand(findSignInQuery, connection))
+                    {
+                        cmdFind.Parameters.AddWithValue("@USERID", userGuid);
+                        cmdFind.Parameters.AddWithValue("@SCHEDULEID", (object)scheduleId ?? DBNull.Value);
+                        
+                        using (var reader = cmdFind.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                existingAttendanceId = reader.GetString("ATTENDANCEID");
+                                if (!reader.IsDBNull(reader.GetOrdinal("TIMEIN")))
+                                {
+                                    var timeInStr = reader.GetString("TIMEIN");
+                                    if (TimeSpan.TryParse(timeInStr, out var timeIn))
+                                    {
+                                        existingTimeIn = timeIn;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (!string.IsNullOrEmpty(existingAttendanceId))
+                    {
+                        // Update the existing record with TimeOut
+                        var updateSignOutCmd = new MySqlCommand(@"
+                            UPDATE ATTENDANCERECORDS
+                            SET TIMEOUT = @TIMEOUT,
+                                ACTIONTYPE = @ACTIONTYPE,
+                                SCANTYPE = @SCANTYPE,
+                                Updated_At = CURRENT_TIMESTAMP
+                            WHERE ATTENDANCEID = @ATTENDANCEID
+                        ", connection);
+                        
+                        updateSignOutCmd.Parameters.AddWithValue("@TIMEOUT", signOutTime.TimeOfDay);
+                        updateSignOutCmd.Parameters.AddWithValue("@ACTIONTYPE", "Sign Out");
+                        updateSignOutCmd.Parameters.AddWithValue("@SCANTYPE", "time_out");
+                        updateSignOutCmd.Parameters.AddWithValue("@ATTENDANCEID", existingAttendanceId);
+                        
+                        int rowsAffected = updateSignOutCmd.ExecuteNonQuery();
+                        
+                        if (rowsAffected > 0)
+                        {
+                            LogMessage("INFO", $"Sign-out recorded successfully for user GUID: {userGuid}");
+                            Console.WriteLine($"✅ Sign-out time updated in existing record:");
+                            Console.WriteLine($"   UserGUID: {userGuid}");
+                            Console.WriteLine($"   Original TimeIn: {existingTimeIn?.ToString(@"hh\:mm\:ss")}");
+                            Console.WriteLine($"   TimeOut: {signOutTime:HH:mm:ss}");
+                            Console.WriteLine($"   AttendanceID: {existingAttendanceId}");
+                            Console.WriteLine($"   ScheduleID: {scheduleId}");
+                            
+                            return new AttendanceAttemptResult { Success = true, ScheduleId = scheduleId, SubjectName = scheduleValidation.SubjectName };
+                        }
+                        else
+                        {
+                            LogMessage("WARNING", $"Failed to update sign-out time for user GUID: {userGuid}");
+                            Console.WriteLine($"⚠️ Failed to update existing record with sign-out time");
+                        }
+                    }
+                    else
+                    {
+                        LogMessage("WARNING", $"No existing sign-in record found for sign-out. User may not have signed in today.");
+                        Console.WriteLine($"⚠️ No existing sign-in record found for user {userGuid}. Cannot record sign-out without sign-in.");
+                        return new AttendanceAttemptResult { Success = false, Reason = "No sign-in record found for today. Please sign in first." };
+                    }
                 }
 
-                // For new records, capture the scan time explicitly
+                // For new records (sign-in, early arrival, etc.), capture the scan time explicitly
                 DateTime scanTime = DateTime.Now;
 
                 // Compose insert

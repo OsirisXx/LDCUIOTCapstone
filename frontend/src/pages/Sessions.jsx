@@ -14,6 +14,12 @@ import {
 import axios from 'axios';
 import toast from 'react-hot-toast';
 
+const shouldHideAdminAccess = (subjectCode, subjectName) => {
+  const normalizedCode = subjectCode?.toString().trim().toUpperCase();
+  const normalizedName = subjectName?.toString().trim().toLowerCase();
+  return normalizedCode === 'ADMIN-ACCESS' || (normalizedName && normalizedName.includes('administrative door access'));
+};
+
 function Sessions() {
   const [sessions, setSessions] = useState([]);
   const [allSchedules, setAllSchedules] = useState([]);
@@ -56,20 +62,22 @@ function Sessions() {
       const unifiedData = unifiedResponse.data;
       
       // Extract data from unified response
-      const allSchedulesData = unifiedData.schedules?.data || [];
-      setAllSchedules(allSchedulesData);
+      const schedulesResponse = unifiedData.schedules?.data || [];
+      const sanitizedSchedules = schedulesResponse.filter(schedule => !shouldHideAdminAccess(schedule.SUBJECTCODE, schedule.SUBJECTNAME));
+      setAllSchedules(sanitizedSchedules);
 
       // Filter today's schedules
       const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-      const todaysSchedules = allSchedulesData.filter(schedule => schedule.DAYOFWEEK === currentDay);
+      const todaysSchedules = sanitizedSchedules.filter(schedule => schedule.DAYOFWEEK === currentDay);
       setTodaysSchedule(todaysSchedules);
 
       // Get instructors and rooms from unified data
-      const instructorsData = unifiedData.subjects?.data || [];
+      const instructorsResponse = unifiedData.subjects?.data || [];
+      const sanitizedSubjects = instructorsResponse.filter(subject => !shouldHideAdminAccess(subject.SUBJECTCODE, subject.SUBJECTNAME));
       const roomsData = unifiedData.rooms?.data || [];
       
       // Extract unique instructors
-      const uniqueInstructors = [...new Map(instructorsData.map(item => [item.INSTRUCTORID, {
+      const uniqueInstructors = [...new Map(sanitizedSubjects.map(item => [item.INSTRUCTORID, {
         USERID: item.INSTRUCTORID,
         FIRSTNAME: item.instructor_name?.split(' ')[0] || '',
         LASTNAME: item.instructor_name?.split(' ').slice(1).join(' ') || '',

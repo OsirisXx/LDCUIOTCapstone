@@ -21,6 +21,12 @@ import axios from 'axios';
 // Set up axios defaults
 axios.defaults.baseURL = 'http://localhost:5000';
 
+const shouldHideAdminAccess = (subjectCode, subjectName) => {
+  const normalizedCode = subjectCode?.toString().trim().toUpperCase();
+  const normalizedName = subjectName?.toString().trim().toLowerCase();
+  return normalizedCode === 'ADMIN-ACCESS' || (normalizedName && normalizedName.includes('administrative door access'));
+};
+
 function Reports() {
   const [reports, setReports] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -401,6 +407,8 @@ function Reports() {
       const response = await axios.get(`/api/reports/attendance`, { headers });
       console.log('📊 Reports response:', response.data);
       let reports = response.data.data || [];
+
+      reports = reports.filter(report => !shouldHideAdminAccess(report.SUBJECTCODE, report.SUBJECTNAME));
       
       // Apply client-side filtering for now
       if (filters.search) {

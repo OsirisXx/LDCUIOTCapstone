@@ -3,7 +3,7 @@
 - **Database name and system name**: IoT Attendance System (IOTCapstone)
 - **Institution/organization**: TBD
 - **Total entities (table count)**: 14
-- **Total attributes (column count across all tables)**: 172
+- **Total attributes (column count across all tables)**: 173
 - **Total relationships (foreign key count)**: 25
 - **Notation preference**: Crow's Foot
 
@@ -13,7 +13,7 @@ Table 1.
 | ENTITY NAME | NO. OF ATTRIBUTES | PRIMARY KEY | NO. OF FOREIGN KEYS |
 |---|---:|---|:---:|
 | accesslogs | 12 | LOGID | ✓ |
-| attendancerecords | 19 | ATTENDANCEID | ✓ |
+| attendancerecords | 20 | ATTENDANCEID | ✓ |
 | authenticationmethods | 10 | AUTHID | ✓ |
 | classschedules | 14 | SCHEDULEID | ✓ |
 | courses | 10 | COURSEID | ✓ |
@@ -48,7 +48,7 @@ accesslogs (12 attributes)
 
 Purpose: Captures all door and session-related access events, including method, location, outcome, and client metadata.
 
-attendancerecords (19 attributes)
+attendancerecords (20 attributes)
 
 │ ATTENDANCERECORDS │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -60,6 +60,7 @@ attendancerecords (19 attributes)
 │ ScanDateTime          │ TIMESTAMP DEFAULT CURRENT_TIMESTAMP                                                                     │
 │ Date                  │ DATE NOT NULL                                                                                          │
 │ TimeIn                │ TIME DEFAULT NULL                                                                                       │
+│ TimeOut               │ TIME DEFAULT NULL                                                                                       │
 │ AuthMethod            │ ENUM('RFID','Fingerprint') NOT NULL                                                                     │
 │ Location              │ ENUM('inside','outside') NOT NULL                                                                       │
 │ Status                │ ENUM('Present','Late','Absent','Early Arrival','Early Scan | Absent') NOT NULL                          │
