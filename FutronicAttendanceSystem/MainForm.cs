@@ -432,7 +432,7 @@ namespace FutronicAttendanceSystem
         private static readonly HttpClient http = new HttpClient();
 
         // Backend API base URL
-        private readonly string backendBaseUrl = "http://localhost:5000";
+        private readonly string backendBaseUrl = "http://172.72.100.126:5000";
 
         // Enrollment progress smoothing
         private System.Windows.Forms.Timer enrollProgressTimer;
@@ -13487,7 +13487,7 @@ namespace FutronicAttendanceSystem
                     var json = JsonSerializer.Serialize(payload);
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-                    var response = await client.PostAsync("http://localhost:5000/api/logs/rfid-scan", content);
+                    var response = await client.PostAsync("http://172.72.100.126:5000/api/logs/rfid-scan", content);
                     
                     if (response.IsSuccessStatusCode)
                     {
