@@ -8516,35 +8516,18 @@ namespace FutronicAttendanceSystem
                 Console.WriteLine("=== ANONYMOUS LOCK CONTROL START ===");
                 Console.WriteLine($"Location: {location}");
                 Console.WriteLine($"Reason: {reason}");
+                Console.WriteLine("📡 Sending anonymous lock command through backend API...");
 
-                string esp32Ip = await DiscoverESP32();
-
-                if (string.IsNullOrEmpty(esp32Ip))
-                {
-                    Console.WriteLine("❌ No ESP32 device found on network");
-                    if (!this.IsDisposed)
-                    {
-                        this.Invoke(new Action(() =>
-                        {
-                            SetStatusText("❌ Door override failed: no controller");
-                        }));
-                    }
-                    return;
-                }
-
+                // For anonymous/unknown users, we can't send user_id, so just trigger the ESP32 directly via backend
+                // This is a simplified approach - the backend will need to handle this case
                 var payload = new
                 {
-                    action = "open",
-                    // Use a privileged role to satisfy ESP32 policy checks
-                    user = "System Override",
-                    userType = "instructor",
-                    sessionActive = true,
-                    message = reason,
-                    location = location,
-                    overrideRequest = true
+                    room_id = dbManager?.CurrentRoomId,
+                    action = "check_in",
+                    anonymous = true
                 };
 
-                bool success = await PostLockPayloadAsync(esp32Ip, payload);
+                bool success = await PostBackendLockControlAsync(payload);
 
                 if (!this.IsDisposed)
                 {
