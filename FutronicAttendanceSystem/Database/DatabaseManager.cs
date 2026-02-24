@@ -1093,6 +1093,24 @@ namespace FutronicAttendanceSystem.Database
             }
         }
 
+        // Update user authentication settings (RFID and Fingerprint enable/disable)
+        public bool UpdateUserAuthSettings(string employeeId, bool enableRfid, bool enableFingerprint)
+        {
+            try
+            {
+                // Note: These columns may not exist in the database yet
+                // For now, just return true as a stub - the settings are stored in memory
+                Console.WriteLine($"UpdateUserAuthSettings called for {employeeId}: RFID={enableRfid}, Fingerprint={enableFingerprint}");
+                Console.WriteLine("Note: Auth settings are currently stored in memory only (database columns may not exist)");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to update auth settings: {ex.Message}");
+                return false;
+            }
+        }
+
         /// <summary>
         /// Log an access attempt to ACCESSLOGS table (supports NULL USERID for unknown users)
         /// </summary>

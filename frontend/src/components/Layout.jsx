@@ -134,20 +134,15 @@ function Layout() {
           <div className="flex h-16 items-center px-4 border-b border-maroon-200/30">
             <button
               onClick={() => setDesktopSidebarCollapsed(!desktopSidebarCollapsed)}
-              className="mr-3 text-maroon-200 hover:text-white transition-colors duration-200 p-1 rounded-md hover:bg-white/10"
+              className="flex-shrink-0 text-maroon-200 hover:text-white transition-colors duration-200 p-1 rounded-md hover:bg-white/10"
               title="Toggle Sidebar"
             >
               <Bars3Icon className="h-5 w-5" />
             </button>
-            {!desktopSidebarCollapsed && (
-              <>
-                <img className="h-8 w-auto" src="/ldcu.png" alt="Liceo de Cagayan University" />
-                <div className="ml-3">
-                  <h1 className="text-sm font-semibold text-white">IoT Attendance</h1>
-                  <p className="text-xs text-maroon-100">Liceo de Cagayan</p>
-                </div>
-              </>
-            )}
+            <div className={`ml-3 overflow-hidden whitespace-nowrap transition-all duration-300 ease-in-out ${desktopSidebarCollapsed ? 'max-w-0 opacity-0' : 'max-w-xs opacity-100'}`}>
+              <h1 className="text-sm font-semibold text-white">IoT Attendance</h1>
+              <p className="text-xs text-maroon-100">Liceo de Cagayan</p>
+            </div>
           </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
             {navigation.map((item) => {
@@ -158,33 +153,35 @@ function Layout() {
                 <Link
                   key={item.name}
                   to={item.href}
-                  className={`group flex items-center ${desktopSidebarCollapsed ? 'px-2 py-3 justify-center' : 'px-3 py-2.5'} text-sm font-medium rounded-lg transition-all duration-200 ${
+                  className={`group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
                     isActive(item.href)
                       ? 'bg-white/20 text-white shadow-lg backdrop-blur-sm border border-white/10'
                       : 'text-maroon-100 hover:bg-white/10 hover:text-white hover:backdrop-blur-sm'
                   }`}
                   title={desktopSidebarCollapsed ? item.name : ''}
                 >
-                  <item.icon className={`${desktopSidebarCollapsed ? 'h-6 w-6' : 'mr-3 h-5 w-5'} flex-shrink-0`} />
-                  {!desktopSidebarCollapsed && item.name}
+                  <div className="w-5 h-5 flex-shrink-0">
+                    <item.icon className="h-5 w-5" />
+                  </div>
+                  <span className={`ml-3 overflow-hidden whitespace-nowrap transition-all duration-300 ease-in-out ${desktopSidebarCollapsed ? 'max-w-0 opacity-0' : 'max-w-xs opacity-100'}`}>
+                    {item.name}
+                  </span>
                 </Link>
               );
             })}
           </nav>
           
-          {/* Logo at bottom when collapsed */}
-          {desktopSidebarCollapsed && (
-            <div className="p-3 border-t border-maroon-200/30">
-              <div className="flex justify-center">
-                <img 
-                  className="h-8 w-8 rounded-md opacity-80 hover:opacity-100 transition-opacity duration-200" 
-                  src="/ldcu.png" 
-                  alt="Liceo de Cagayan University" 
-                  title="Liceo de Cagayan University"
-                />
-              </div>
+          {/* Logo at bottom - always visible */}
+          <div className="p-3 border-t border-maroon-200/30">
+            <div className="flex justify-center">
+              <img 
+                className="h-8 w-8 rounded-md opacity-80 hover:opacity-100 transition-opacity duration-200" 
+                src="/ldcu.png" 
+                alt="Liceo de Cagayan University" 
+                title="Liceo de Cagayan University"
+              />
             </div>
-          )}
+          </div>
         </div>
       </div>
 

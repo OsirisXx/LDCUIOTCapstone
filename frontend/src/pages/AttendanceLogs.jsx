@@ -62,7 +62,7 @@ function AttendanceLogs() {
         ...(statusFilter && { status: statusFilter })
       });
 
-      const response = await axios.get(`http://localhost:5000/api/logs/attendance?${params}`, {
+      const response = await axios.get(`http://172.72.100.126:5000/api/logs/attendance?${params}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
 
@@ -92,7 +92,7 @@ function AttendanceLogs() {
         ...(statusFilter && { status: statusFilter })
       });
 
-      const response = await axios.get(`http://localhost:5000/api/logs/attendance?${params}`, {
+      const response = await axios.get(`http://172.72.100.126:5000/api/logs/attendance?${params}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
 

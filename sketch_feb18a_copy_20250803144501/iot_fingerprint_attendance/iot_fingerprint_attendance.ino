@@ -18,18 +18,9 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// WiFi credentials - 2.4GHz Networks (ESP32 Compatible)
-struct WiFiCredential {
-  const char* ssid;
-  const char* password;
-};
-
-WiFiCredential wifiNetworks[] = {
-  {"RedmiTurbo", "TwoOne11"},
-  {"WIFi2.4", "fOrtnite901_"}
-};
-const size_t wifiNetworkCount = sizeof(wifiNetworks) / sizeof(wifiNetworks[0]);
-int activeNetworkIndex = -1;
+// WiFi credentials - 2.4GHz Network (ESP32 Compatible)
+const char* ssid = "WIFi2.4";         // Your current WiFi network
+const char* password = "fOrtnite901_"; // Your WiFi password
 
 // Security - API Key for authentication
 const char* API_KEY = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Change this to your own secret key
@@ -42,7 +33,7 @@ String discoveredServerIP = "";
 bool ipDiscovered = false;
 
 // Manual IP override (uncomment and set if auto-discovery fails)
-const char* manualServerIP = "192.168.111.24"; // Your computer's current IP (matches your ipconfig)
+const char* manualServerIP = "172.72.100.126"; // Server PC Ethernet IP for lab demonstration
 
 // Alternative: Use localhost if on same machine
 // const char* manualServerIP = "localhost"; // Alternative for testing
@@ -53,22 +44,21 @@ WebServer server(80);
 
 // No LED pins needed (you don't have LEDs)
 
-// Buzzer pin for audio feedback
-#define BUZZER_PIN 18
+// Buzzer pin (not connected but defined to avoid compile errors)
+#define BUZZER_PIN 19
 
 // Solenoid Lock Control
 #define RELAY_PIN 5     // Relay control pin for solenoid lock
 #define LOCK_DURATION 3000  // How long to keep lock open (3 seconds)
 
-// OLED Display Configuration
+// OLED Display Configuration (I2C)
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 #define SCREEN_ADDRESS 0x3C
 
-// Using ESP32 default I2C pins (SDA=21, SCL=22)
-
-// Initialize OLED display
+// I2C OLED: SCL=GPIO 21, SDA=GPIO 22 (but user has SDA on GPIO 23)
+// Initialize OLED display for I2C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Global variable to track if display is working
@@ -81,15 +71,15 @@ bool lockIsOpen = false;
 // Display timing variables for non-blocking operation
 unsigned long displayOnTime = 0;
 bool displayIsOn = false;
-const unsigned long DISPLAY_DURATION = 5000; // Display stays on for 5 seconds
+const unsigned long DISPLAY_DURATION = 3000; // Display stays on for 3 seconds
 
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  // Initialize I2C for OLED (use default ESP32 I2C pins)
-  Wire.begin();
+  // Initialize I2C with custom pins: SDA=23, SCL=21
+  Wire.begin(23, 21);  // SDA on GPIO 23, SCL on GPIO 21
   
   // Initialize OLED display (simple approach like working code)
   Serial.println("🖥️ Initializing OLED display...");
@@ -194,17 +184,20 @@ void loop() {
   delay(100);
 }
 
-bool attemptWiFiConnection(const WiFiCredential& network) {
+void connectToWiFi() {
   Serial.print("Connecting to WiFi: ");
-  Serial.println(network.ssid);
+  Serial.println(ssid);
 
+  // Disconnect first to avoid "sta is connecting" error
   WiFi.disconnect(true);
   delay(1000);
 
+  // Set WiFi mode
   WiFi.mode(WIFI_STA);
   delay(100);
 
-  WiFi.begin(network.ssid, network.password);
+  // Begin connection
+  WiFi.begin(ssid, password);
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
@@ -212,6 +205,7 @@ bool attemptWiFiConnection(const WiFiCredential& network) {
     Serial.print(".");
     attempts++;
 
+    // Print status for debugging
     if (attempts % 10 == 0) {
       Serial.println();
       Serial.print("WiFi Status: ");
@@ -224,46 +218,25 @@ bool attemptWiFiConnection(const WiFiCredential& network) {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println();
     Serial.println("✓ WiFi connected!");
-    Serial.print("Connected SSID: ");
-    Serial.println(WiFi.SSID());
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
     Serial.print("Signal strength: ");
     Serial.print(WiFi.RSSI());
     Serial.println(" dBm");
-    return true;
+    
+    // Try to discover server IP
+    discoverServerIP();
+  } else {
+    Serial.println();
+    Serial.println("✗ WiFi connection failed!");
+    Serial.print("Final status: ");
+    Serial.println(WiFi.status());
+    Serial.println("Check:");
+    Serial.println("1. WiFi name: " + String(ssid));
+    Serial.println("2. WiFi password: " + String(password));
+    Serial.println("3. WiFi signal strength");
+    Serial.println("4. 2.4GHz vs 5GHz band");
   }
-
-  Serial.println();
-  Serial.println("✗ WiFi connection failed for: " + String(network.ssid));
-  Serial.print("Final status: ");
-  Serial.println(WiFi.status());
-  Serial.println("Check:");
-  Serial.println("1. WiFi name: " + String(network.ssid));
-  Serial.println("2. WiFi password: " + String(network.password));
-  Serial.println("3. WiFi signal strength");
-  Serial.println("4. 2.4GHz vs 5GHz band");
-  return false;
-}
-
-void connectToWiFi() {
-  if (wifiNetworkCount == 0) {
-    Serial.println("⚠️ No WiFi networks configured");
-    return;
-  }
-
-  size_t startIndex = activeNetworkIndex >= 0 ? static_cast<size_t>(activeNetworkIndex) : 0;
-
-  for (size_t attempt = 0; attempt < wifiNetworkCount; ++attempt) {
-    size_t index = (startIndex + attempt) % wifiNetworkCount;
-    if (attemptWiFiConnection(wifiNetworks[index])) {
-      activeNetworkIndex = static_cast<int>(index);
-      discoverServerIP();
-      return;
-    }
-  }
-
-  Serial.println("✗ Unable to connect to any configured WiFi networks.");
 }
   
 // Function to automatically discover server IP
@@ -514,12 +487,6 @@ void displayFingerprintMatch(String userName, bool lockOpened, String userType =
     if (userType == "instructor") {
       display.println("Door unlocked");
       display.println("(Instructor)");
-    } else if (userType == "custodian") {
-      display.println("Door unlocked");
-      display.println("(Custodian)");
-    } else if (userType == "dean") {
-      display.println("Door unlocked");
-      display.println("(Dean)");
     } else {
       display.println("Door unlocked");
       display.println("(Student)");
@@ -562,12 +529,6 @@ void displayRfidScanResult(String userName, bool lockOpened, String userType = "
     if (userType == "instructor") {
       display.println("Door unlocked");
       display.println("(Instructor)");
-    } else if (userType == "custodian") {
-      display.println("Door unlocked");
-      display.println("(Custodian)");
-    } else if (userType == "dean") {
-      display.println("Door unlocked");
-      display.println("(Dean)");
     } else {
       display.println("Door unlocked");
       display.println("(Student)");
@@ -607,60 +568,6 @@ void displayNoMatch() {
   turnOnDisplay();
 }
 
-void displayInstructorDenial(String userName, String denialReason, String userType) {
-  if (!displayWorking) {
-    Serial.println("🖥️ Display not working - skipping instructor denial display");
-    return;
-  }
-  
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  
-  // Display user name
-  display.println(userName);
-  display.println("");
-  
-  // Display "Access Denied" header
-  display.println("Access Denied");
-  display.println("");
-  
-  // Display denial reason (try to fit on screen)
-  // Split long messages across multiple lines if needed
-  if (denialReason.length() > 0) {
-    // Check if reason is too long for one line (approximately 21 chars per line)
-    if (denialReason.length() <= 21) {
-      display.println(denialReason);
-    } else {
-      // Split the reason into multiple lines
-      String line1 = denialReason.substring(0, 21);
-      display.println(line1);
-      
-      if (denialReason.length() > 21) {
-        String line2 = denialReason.substring(21);
-        if (line2.length() > 21) {
-          line2 = line2.substring(0, 21);
-        }
-        display.println(line2);
-      }
-    }
-  } else {
-    // Default message if no reason provided
-    if (userType == "instructor") {
-      display.println("No scheduled class");
-      display.println("at this time");
-    } else {
-      display.println("Access not allowed");
-    }
-  }
-  
-  display.display();
-  
-  // Turn on display with timer
-  turnOnDisplay();
-}
-
 void displaySystemStatus() {
   if (!displayWorking) {
     Serial.println("🖥️ Display not working - skipping system status display");
@@ -678,48 +585,6 @@ void displaySystemStatus() {
   display.println(WiFi.localIP());
   display.println("");
   display.println("Waiting for scan...");
-  display.display();
-  
-  // Turn on display with timer
-  turnOnDisplay();
-}
-
-void displayWaitingForSecondScan(String userName, String firstScanType, String requiredScan, String userType) {
-  if (!displayWorking) {
-    Serial.println("🖥️ Display not working - skipping waiting for second scan display");
-    return;
-  }
-  
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  
-  // Show first scan verification
-  if (firstScanType == "FINGERPRINT") {
-    display.println("Fingerprint verified");
-  } else if (firstScanType == "RFID") {
-    display.println("RFID card verified");
-  } else {
-    display.println("Scan verified");
-  }
-  
-  display.println("");
-  display.println(userName);
-  display.println("");
-  
-  // Show what's needed next
-  if (requiredScan == "RFID") {
-    display.println("Please scan your");
-    display.println("RFID card to continue");
-  } else if (requiredScan == "FINGERPRINT") {
-    display.println("Please scan your");
-    display.println("fingerprint to continue");
-  } else {
-    display.println("Please complete");
-    display.println("verification");
-  }
-  
   display.display();
   
   // Turn on display with timer
@@ -823,10 +688,6 @@ void handleLockControl() {
     String user = doc["user"];
     String userType = doc["userType"] | "";
     bool sessionActive = doc["sessionActive"] | false;
-    bool awaitingSecondScan = doc["awaitingSecondScan"] | false;
-    String firstScanType = doc["firstScanType"] | "";
-    String requiredScan = doc["requiredScan"] | "";
-    String denialReason = doc["denialReason"] | "";
     
     Serial.print("🔓 Action: ");
     Serial.println(action);
@@ -836,102 +697,11 @@ void handleLockControl() {
     Serial.println(userType);
     Serial.print("📅 Session Active: ");
     Serial.println(sessionActive ? "Yes" : "No");
-    Serial.print("⏳ Awaiting Second Scan: ");
-    Serial.println(awaitingSecondScan ? "Yes" : "No");
-    if (awaitingSecondScan) {
-      Serial.print("🔍 First Scan Type: ");
-      Serial.println(firstScanType);
-      Serial.print("🔍 Required Scan: ");
-      Serial.println(requiredScan);
-    }
-    if (denialReason.length() > 0) {
-      Serial.print("❌ Denial Reason: ");
-      Serial.println(denialReason);
-    }
-    
-    // Handle no-match (unrecognized) scans
-    if (action == "no_match") {
-      Serial.println("❌ NO MATCH: Displaying 'No match found' on OLED");
-      displayNoMatch();
-      beepError();
-      server.send(200, "application/json", "{\"message\":\"No match displayed\",\"action\":\"no_match\"}");
-      return;
-    }
-    
-    // Custom status display (confirmation/notifications)
-    if (action == "status") {
-      String line1 = doc["line1"] | "Status";
-      String line2 = doc["line2"] | "";
-      String line3 = doc["line3"] | "";
-      String line4 = doc["line4"] | "";
-      displayMessage(line1, line2, line3, line4);
-      beepSuccess();
-      server.send(200, "application/json", "{\"message\":\"Status displayed\",\"action\":\"status\"}");
-      return;
-    }
-
-    // Handle info action (for early arrival and other informational messages)
-    if (action == "info") {
-      String infoMessage = doc["message"] | "";
-      String infoUser = doc["user"] | "";
-      
-      Serial.println("ℹ️ INFO MESSAGE: Displaying informational message on OLED");
-      
-      if (infoMessage.length() > 0) {
-        // Format message for display - split long messages
-        String line1 = infoUser.length() > 0 ? infoUser : "Information";
-        String line2 = "";
-        String line3 = "";
-        String line4 = "";
-        
-        // Split message into lines if it's long
-        if (infoMessage.length() <= 21) {
-          line2 = infoMessage;
-        } else if (infoMessage.length() <= 42) {
-          line2 = infoMessage.substring(0, 21);
-          line3 = infoMessage.substring(21);
-        } else {
-          line2 = infoMessage.substring(0, 21);
-          line3 = infoMessage.substring(21, 42);
-          line4 = infoMessage.substring(42, 63);
-        }
-        
-        displayMessage(line1, line2, line3, line4);
-        beepSuccess();
-        server.send(200, "application/json", "{\"message\":\"Info displayed\",\"action\":\"info\"}");
-        return;
-      } else {
-        // Fallback if no message provided
-        displayMessage(infoUser, "Info received", "", "");
-        beepSuccess();
-        server.send(200, "application/json", "{\"message\":\"Info displayed\",\"action\":\"info\"}");
-        return;
-      }
-    }
-
-    // Check if this is a denial message (especially for instructors)
-    if (action == "denied" || denialReason.length() > 0) {
-      Serial.println("❌ DENIAL MESSAGE: Displaying denial on OLED");
-      displayInstructorDenial(user, denialReason, userType);
-      beepError();
-      server.send(200, "application/json", "{\"message\":\"Denial message displayed\",\"action\":\"denied\",\"user\":\"" + user + "\"}");
-      return;
-    }
-    
-    // Check if this is an intermediate status update (waiting for second scan)
-    if (awaitingSecondScan) {
-      Serial.println("⏳ INTERMEDIATE STATUS: Displaying waiting message for second scan");
-      displayWaitingForSecondScan(user, firstScanType, requiredScan, userType);
-      
-      // Send response for intermediate status
-      server.send(200, "application/json", "{\"message\":\"Intermediate status displayed\",\"awaitingSecondScan\":true,\"requiredScan\":\"" + requiredScan + "\"}");
-      return;
-    }
     
     // Determine if lock should open based on user type and session state
     bool shouldOpenLock = false;
-    if (userType == "instructor" || userType == "custodian" || userType == "dean") {
-      // Instructors, custodians, and deans can always open the door
+    if (userType == "instructor") {
+      // Instructors can always open the door (simplified logic to avoid state confusion)
       shouldOpenLock = true;
     } else if (userType == "student" && sessionActive) {
       // Students can open door during active session (even if already signed in)
@@ -954,10 +724,6 @@ void handleLockControl() {
     Serial.print("💡 Logic: ");
     if (userType == "instructor") {
       Serial.println("Instructor - Always allowed (simplified logic)");
-    } else if (userType == "custodian") {
-      Serial.println("Custodian - Always allowed (door access only)");
-    } else if (userType == "dean") {
-      Serial.println("Dean - Always allowed (can start sessions)");
     } else if (userType == "student" && sessionActive) {
       Serial.println("Student with active session - Allowed (can go in/out)");
     } else {
@@ -1010,15 +776,10 @@ void handleLockControl() {
        return;
      }
      
-         String rfidData = doc["rfid_data"];
+     String rfidData = doc["rfid_data"];
      String user = doc["user"];
      String userType = doc["userType"] | "";
      bool sessionActive = doc["sessionActive"] | false;
-     bool awaitingSecondScan = doc["awaitingSecondScan"] | false;
-     String firstScanType = doc["firstScanType"] | "";
-     String requiredScan = doc["requiredScan"] | "";
-     String denialReason = doc["denialReason"] | "";
-     String action = doc["action"] | "";
      
      Serial.print("🔖 RFID Data: ");
      Serial.println(rfidData);
@@ -1028,102 +789,11 @@ void handleLockControl() {
      Serial.println(userType);
      Serial.print("📅 Session Active: ");
      Serial.println(sessionActive ? "Yes" : "No");
-     Serial.print("⏳ Awaiting Second Scan: ");
-     Serial.println(awaitingSecondScan ? "Yes" : "No");
-     if (awaitingSecondScan) {
-       Serial.print("🔍 First Scan Type: ");
-       Serial.println(firstScanType);
-       Serial.print("🔍 Required Scan: ");
-       Serial.println(requiredScan);
-     }
-     if (denialReason.length() > 0) {
-       Serial.print("❌ Denial Reason: ");
-       Serial.println(denialReason);
-     }
-     
-    // Handle no-match (unrecognized) RFID scans
-     if (action == "no_match") {
-       Serial.println("❌ RFID NO MATCH: Displaying 'No match found' on OLED");
-       displayNoMatch();
-       beepError();
-       server.send(200, "application/json", "{\"message\":\"RFID no match displayed\",\"action\":\"no_match\"}");
-       return;
-     }
-     
-    // Custom status display (confirmation/notifications)
-    if (action == "status") {
-      String line1 = doc["line1"] | "Status";
-      String line2 = doc["line2"] | "";
-      String line3 = doc["line3"] | "";
-      String line4 = doc["line4"] | "";
-      displayMessage(line1, line2, line3, line4);
-      beepSuccess();
-      server.send(200, "application/json", "{\"message\":\"RFID status displayed\",\"action\":\"status\"}");
-      return;
-    }
-
-    // Handle info action (for early arrival and other informational messages)
-    if (action == "info") {
-      String infoMessage = doc["message"] | "";
-      String infoUser = doc["user"] | "";
-      
-      Serial.println("ℹ️ INFO MESSAGE: Displaying informational message on OLED");
-      
-      if (infoMessage.length() > 0) {
-        // Format message for display - split long messages
-        String line1 = infoUser.length() > 0 ? infoUser : "Information";
-        String line2 = "";
-        String line3 = "";
-        String line4 = "";
-        
-        // Split message into lines if it's long
-        if (infoMessage.length() <= 21) {
-          line2 = infoMessage;
-        } else if (infoMessage.length() <= 42) {
-          line2 = infoMessage.substring(0, 21);
-          line3 = infoMessage.substring(21);
-        } else {
-          line2 = infoMessage.substring(0, 21);
-          line3 = infoMessage.substring(21, 42);
-          line4 = infoMessage.substring(42, 63);
-        }
-        
-        displayMessage(line1, line2, line3, line4);
-        beepSuccess();
-        server.send(200, "application/json", "{\"message\":\"Info displayed\",\"action\":\"info\"}");
-        return;
-      } else {
-        // Fallback if no message provided
-        displayMessage(infoUser, "Info received", "", "");
-        beepSuccess();
-        server.send(200, "application/json", "{\"message\":\"Info displayed\",\"action\":\"info\"}");
-        return;
-      }
-    }
-
-    // Check if this is a denial message
-     if (denialReason.length() > 0) {
-       Serial.println("❌ RFID DENIAL MESSAGE: Displaying denial on OLED");
-       displayInstructorDenial(user, denialReason, userType);
-       beepError();
-       server.send(200, "application/json", "{\"message\":\"RFID denial message displayed\",\"action\":\"denied\",\"user\":\"" + user + "\"}");
-       return;
-     }
-     
-     // Check if this is an intermediate status update (waiting for second scan)
-     if (awaitingSecondScan) {
-       Serial.println("⏳ INTERMEDIATE STATUS: Displaying waiting message for second scan");
-       displayWaitingForSecondScan(user, firstScanType, requiredScan, userType);
-       
-       // Send response for intermediate status
-       server.send(200, "application/json", "{\"message\":\"Intermediate status displayed\",\"awaitingSecondScan\":true,\"requiredScan\":\"" + requiredScan + "\"}");
-       return;
-     }
      
      // Determine if lock should open based on user type and session state
      bool shouldOpenLock = false;
-     if (userType == "instructor" || userType == "custodian" || userType == "dean") {
-       // Instructors, custodians, and deans can always open the door
+     if (userType == "instructor") {
+       // Instructors can always open the door (simplified logic to avoid state confusion)
        shouldOpenLock = true;
      } else if (userType == "student" && sessionActive) {
        // Students can open door during active session (even if already signed in)
@@ -1148,10 +818,6 @@ void handleLockControl() {
      Serial.print("💡 Logic: ");
      if (userType == "instructor") {
        Serial.println("Instructor - Always allowed (simplified logic)");
-     } else if (userType == "custodian") {
-       Serial.println("Custodian - Always allowed (door access only)");
-     } else if (userType == "dean") {
-       Serial.println("Dean - Always allowed (can start sessions)");
      } else if (userType == "student" && sessionActive) {
        Serial.println("Student with active session - Allowed (can go in/out)");
      } else {

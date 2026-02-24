@@ -17,6 +17,8 @@ namespace FutronicAttendanceSystem.Database.Models
         public string Email { get; set; }
         public string Phone { get; set; }
         public bool IsActive { get; set; } = true;
+        public bool EnableRfid { get; set; } = true;
+        public bool EnableFingerprint { get; set; } = true;
         public DateTime CreatedAt { get; set; }
         public DateTime UpdatedAt { get; set; }
 

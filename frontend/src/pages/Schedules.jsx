@@ -18,7 +18,7 @@ import toast from 'react-hot-toast';
 import axios from 'axios';
 
 // Set up axios defaults
-axios.defaults.baseURL = 'http://localhost:5000';
+axios.defaults.baseURL = 'http://172.72.100.126:5000';
 
 function Schedules() {
   const [schedules, setSchedules] = useState([]);

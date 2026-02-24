@@ -53,6 +53,53 @@ namespace FutronicAttendanceSystem
         private bool IsRfidOnlyMode => deviceConfig?.AllowRfidOnly == true;
         private bool IsDualAuthRequired => !IsFingerprintOnlyMode && !IsRfidOnlyMode;
         
+        // Helper method to check if a user can authenticate with a specific method
+        // Applies intersection of global device settings and per-user settings (Option B)
+        private bool CanUserAuthenticateWith(User user, string method)
+        {
+            if (user == null) return false;
+            
+            string methodUpper = method.ToUpper();
+            
+            // Check per-user settings first
+            bool userAllowsMethod = false;
+            if (methodUpper == "RFID")
+            {
+                userAllowsMethod = user.EnableRfid;
+            }
+            else if (methodUpper == "FINGERPRINT")
+            {
+                userAllowsMethod = user.EnableFingerprint;
+            }
+            
+            // If user has disabled this method, deny regardless of global settings
+            if (!userAllowsMethod)
+                return false;
+            
+            // Check global device settings
+            if (IsFingerprintOnlyMode && methodUpper == "RFID")
+                return false; // Global restricts RFID
+            
+            if (IsRfidOnlyMode && methodUpper == "FINGERPRINT")
+                return false; // Global restricts Fingerprint
+            
+            // Method is allowed both globally and per-user
+            return true;
+        }
+        
+        // Helper to check what authentication methods a user needs
+        private (bool needsRfid, bool needsFingerprint) GetUserAuthRequirements(User user)
+        {
+            if (user == null)
+                return (false, false);
+            
+            // Apply intersection: only require methods that are enabled both globally AND per-user
+            bool needsRfid = CanUserAuthenticateWith(user, "RFID");
+            bool needsFingerprint = CanUserAuthenticateWith(user, "FINGERPRINT");
+            
+            return (needsRfid, needsFingerprint);
+        }
+        
         // Track which sensor detected the current fingerprint scan
         private string currentScanLocation = "inside";
         private DateTime lastUnauthorizedDoorOpenTime = DateTime.MinValue;
@@ -377,8 +424,9 @@ namespace FutronicAttendanceSystem
         // OLED mode blinking tracking
         private DateTime lastOledMessageTime = DateTime.MinValue;
         private bool isBlinkingModeVisible = false;
+        private DateTime lastModeDisplayTime = DateTime.MinValue;
         private const int OLED_IDLE_THRESHOLD_MS = 6000; // Display is considered idle after 6 seconds
-        private const int OLED_BLINK_INTERVAL_MS = 2000; // Blink every 2 seconds
+        private const int OLED_BLINK_INTERVAL_MS = 1000; // Check every second for timing control
 
         // HTTP client for backend communication
         private static readonly HttpClient http = new HttpClient();
@@ -711,16 +759,21 @@ namespace FutronicAttendanceSystem
             // OLED mode blinking timer
             oledModeBlinkTimer = new System.Windows.Forms.Timer();
             oledModeBlinkTimer.Interval = OLED_BLINK_INTERVAL_MS;
-            oledModeBlinkTimer.Tick += async (s, e) => 
+            oledModeBlinkTimer.Tick += (s, e) => 
             {
-                try
+                // Fire and forget async task
+                Task.Run(async () =>
                 {
-                    await HandleOledModeBlinking();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"❌ OLED mode blinking error: {ex.Message}");
-                }
+                    try
+                    {
+                        await HandleOledModeBlinking();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"❌ OLED mode blinking error: {ex.Message}");
+                        Console.WriteLine($"   Stack trace: {ex.StackTrace}");
+                    }
+                });
             };
             // Timer will be started/stopped based on session state
             Console.WriteLine("✅ OLED mode blink timer initialized");
@@ -1230,7 +1283,15 @@ namespace FutronicAttendanceSystem
                 DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter }
             });
             dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { 
-                Name = "HasFingerprint", HeaderText = "Enrolled", Width = 80,
+                Name = "EnableAuth", HeaderText = "Enable | RFID & FP", Width = 173,
+                ReadOnly = false,
+                DefaultCellStyle = new DataGridViewCellStyle { 
+                    Alignment = DataGridViewContentAlignment.MiddleCenter,
+                    Font = new Font("Segoe UI", 8F)
+                }
+            });
+            dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { 
+                Name = "HasFingerprint", HeaderText = "Fingerprint", Width = 80,
                 DefaultCellStyle = new DataGridViewCellStyle { 
                     Alignment = DataGridViewContentAlignment.MiddleCenter,
                     Font = new Font("Segoe UI", 8F, FontStyle.Bold)
@@ -1304,9 +1365,9 @@ namespace FutronicAttendanceSystem
                 // Filter users based on search criteria
                 filteredUsers = FilterUsers(cloudUsers, txtSearchUsers?.Text ?? "", cmbSearchType?.SelectedItem?.ToString() ?? "All");
                 
-                // Sort users: enrolled users (with fingerprints) first
+                // Sort users: users with fingerprint OR RFID first (either one = top priority)
                 filteredUsers = filteredUsers.OrderByDescending(u => 
-                    u.FingerprintTemplate != null && u.FingerprintTemplate.Length > 0
+                    (u.FingerprintTemplate != null && u.FingerprintTemplate.Length > 0) || !string.IsNullOrEmpty(u.RfidTag)
                 ).ThenBy(u => u.LastName).ThenBy(u => u.FirstName).ToList();
                 
                 // Clear existing rows
@@ -1353,6 +1414,11 @@ namespace FutronicAttendanceSystem
                         dgvUsers.Rows[row].Cells["Status"].Style.BackColor = Color.FromArgb(248, 215, 218);
                         dgvUsers.Rows[row].Cells["Status"].Style.ForeColor = Color.FromArgb(114, 28, 36);
                     }
+                    
+                    // Per-user authentication settings (stored as string for custom rendering)
+                    // Format: "enableRfid|enableFingerprint" (will be rendered as checkboxes)
+                    dgvUsers.Rows[row].Cells["EnableAuth"].Value = $"{user.EnableRfid}|{user.EnableFingerprint}";
+                    dgvUsers.Rows[row].Cells["EnableAuth"].Style.BackColor = Color.FromArgb(240, 248, 255);
                     
                     // Fingerprint enrollment status
                     var hasFingerprint = user.FingerprintTemplate != null && user.FingerprintTemplate.Length > 0;
@@ -1574,8 +1640,152 @@ namespace FutronicAttendanceSystem
             
             var columnName = dgvUsers.Columns[e.ColumnIndex].Name;
             
+            // Check if EnableAuth column was clicked
+            if (columnName == "EnableAuth")
+            {
+                var row = dgvUsers.Rows[e.RowIndex];
+                var user = row.Tag as User;
+                
+                if (user == null) return;
+                
+                // Parse current values
+                var cellValue = row.Cells["EnableAuth"].Value?.ToString() ?? "True|True";
+                var parts = cellValue.Split('|');
+                bool enableRfid = parts.Length > 0 && bool.Parse(parts[0]);
+                bool enableFingerprint = parts.Length > 1 && bool.Parse(parts[1]);
+                
+                var cellBounds = dgvUsers.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, false);
+                var clickX = dgvUsers.PointToClient(Control.MousePosition).X - cellBounds.Left;
+                var cellWidth = cellBounds.Width;
+                
+                // Determine which checkbox was clicked (left = RFID, right = Fingerprint)
+                bool clickedRfid = clickX < cellWidth / 2;
+                
+                // Toggle the clicked checkbox
+                if (clickedRfid)
+                {
+                    // User wants to toggle RFID
+                    bool newRfidValue = !enableRfid;
+                    
+                    // Validate: at least one must remain checked
+                    if (!newRfidValue && !enableFingerprint)
+                    {
+                        MessageBox.Show("At least one authentication method must be enabled for the user.",
+                            "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    
+                    // Ask for confirmation before toggling
+                    string action = newRfidValue ? "enable" : "disable";
+                    string confirmMessage = $"Are you sure you want to {action} RFID authentication for {user.FirstName} {user.LastName}?";
+                    
+                    var confirmResult = MessageBox.Show(
+                        confirmMessage,
+                        "Confirm Change",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+                    
+                    if (confirmResult != DialogResult.Yes)
+                        return;
+                    
+                    // Check if user has RFID registered
+                    bool hasRfid = !string.IsNullOrEmpty(user.RfidTag);
+                    if (newRfidValue && !hasRfid)
+                    {
+                        var result = MessageBox.Show(
+                            $"User {user.FirstName} {user.LastName} does not have an RFID card registered.\n\n" +
+                            "Enabling RFID will allow them to use it once they register a card.\n\n" +
+                            "Do you want to continue?",
+                            "Warning: RFID Not Registered",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning);
+                        
+                        if (result != DialogResult.Yes)
+                            return;
+                    }
+                    
+                    enableRfid = newRfidValue;
+                }
+                else
+                {
+                    // User wants to toggle Fingerprint
+                    bool newFingerprintValue = !enableFingerprint;
+                    
+                    // Validate: at least one must remain checked
+                    if (!newFingerprintValue && !enableRfid)
+                    {
+                        MessageBox.Show("At least one authentication method must be enabled for the user.",
+                            "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    
+                    // Ask for confirmation before toggling
+                    string action = newFingerprintValue ? "enable" : "disable";
+                    string confirmMessage = $"Are you sure you want to {action} Fingerprint authentication for {user.FirstName} {user.LastName}?";
+                    
+                    var confirmResult = MessageBox.Show(
+                        confirmMessage,
+                        "Confirm Change",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+                    
+                    if (confirmResult != DialogResult.Yes)
+                        return;
+                    
+                    // Check if user has fingerprint enrolled
+                    bool hasFingerprint = user.FingerprintTemplate != null && user.FingerprintTemplate.Length > 0;
+                    if (newFingerprintValue && !hasFingerprint)
+                    {
+                        var result = MessageBox.Show(
+                            $"User {user.FirstName} {user.LastName} does not have a fingerprint enrolled.\n\n" +
+                            "Enabling Fingerprint will allow them to use it once they enroll.\n\n" +
+                            "Do you want to continue?",
+                            "Warning: Fingerprint Not Enrolled",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning);
+                        
+                        if (result != DialogResult.Yes)
+                            return;
+                    }
+                    
+                    enableFingerprint = newFingerprintValue;
+                }
+                
+                // Save to database
+                try
+                {
+                    if (dbManager.UpdateUserAuthSettings(user.EmployeeId, enableRfid, enableFingerprint))
+                    {
+                        // Update the user object
+                        user.EnableRfid = enableRfid;
+                        user.EnableFingerprint = enableFingerprint;
+                        
+                        // Update the cell value
+                        row.Cells["EnableAuth"].Value = $"{enableRfid}|{enableFingerprint}";
+                        
+                        // Refresh the cell to show updated checkboxes
+                        dgvUsers.InvalidateCell(e.ColumnIndex, e.RowIndex);
+                        
+                        // Reload cloudUsers from database to ensure consistency
+                        cloudUsers = dbManager.LoadAllUsers();
+                        RebuildUserLookupCaches();
+                        
+                        SetStatusText($"Updated auth settings for {user.FirstName} {user.LastName}: RFID={enableRfid}, Fingerprint={enableFingerprint}");
+                    }
+                    else
+                    {
+                        MessageBox.Show("Failed to update authentication settings in database.",
+                            "Database Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error updating authentication settings: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
             // Check if Actions column was clicked
-            if (columnName == "Actions")
+            else if (columnName == "Actions")
             {
                 var row = dgvUsers.Rows[e.RowIndex];
                 var user = row.Tag as User;
@@ -1635,8 +1845,109 @@ namespace FutronicAttendanceSystem
         }
         private void DgvUsers_CellPainting(object sender, DataGridViewCellPaintingEventArgs e)
         {
-            // Only paint the Actions column
-            if (e.ColumnIndex >= 0 && e.RowIndex >= 0 && dgvUsers.Columns[e.ColumnIndex].Name == "Actions")
+            // Paint the EnableAuth column with checkboxes
+            if (e.ColumnIndex >= 0 && e.RowIndex >= 0 && dgvUsers.Columns[e.ColumnIndex].Name == "EnableAuth")
+            {
+                var cellBounds = e.CellBounds;
+                var cellValue = e.Value?.ToString() ?? "True|True";
+                
+                // Parse the stored value (format: "enableRfid|enableFingerprint")
+                var parts = cellValue.Split('|');
+                bool enableRfid = parts.Length > 0 && bool.Parse(parts[0]);
+                bool enableFingerprint = parts.Length > 1 && bool.Parse(parts[1]);
+                
+                // Clear the cell background
+                e.PaintBackground(cellBounds, true);
+                
+                // Check if row is selected
+                bool isSelected = (e.State & DataGridViewElementStates.Selected) == DataGridViewElementStates.Selected;
+                Color textColor = isSelected ? Color.White : Color.FromArgb(52, 58, 64);
+                Color dividerColor = isSelected ? Color.White : Color.LightGray;
+                
+                // Calculate positions for two checkboxes side by side
+                int halfWidth = cellBounds.Width / 2;
+                int checkboxSize = 14;
+                int labelHeight = 12; // Height for label text
+                int totalContentHeight = checkboxSize + labelHeight + 2; // checkbox + gap + label
+                int verticalCenter = cellBounds.Top + (cellBounds.Height - totalContentHeight) / 2;
+                
+                // Left checkbox (RFID)
+                int leftCheckX = cellBounds.Left + (halfWidth - checkboxSize) / 2;
+                Rectangle leftCheckRect = new Rectangle(leftCheckX, verticalCenter, checkboxSize, checkboxSize);
+                
+                // Draw RFID checkbox
+                using (var pen = new Pen(textColor, 1.5f))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    e.Graphics.FillRectangle(brush, leftCheckRect);
+                    e.Graphics.DrawRectangle(pen, leftCheckRect);
+                    
+                    if (enableRfid)
+                    {
+                        // Draw checkmark
+                        using (var checkBrush = new SolidBrush(Color.FromArgb(40, 167, 69)))
+                        using (var checkFont = new Font("Segoe UI", 10F, FontStyle.Bold))
+                        {
+                            e.Graphics.DrawString("✓", checkFont, checkBrush, 
+                                leftCheckRect.Left - 1, leftCheckRect.Top - 2);
+                        }
+                    }
+                }
+                
+                // Draw "RFID" label below checkbox
+                using (var labelBrush = new SolidBrush(textColor))
+                using (var labelFont = new Font("Segoe UI", 7F))
+                {
+                    var labelRect = new Rectangle(cellBounds.Left, verticalCenter + checkboxSize + 2, 
+                        halfWidth, labelHeight);
+                    var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    e.Graphics.DrawString("RFID", labelFont, labelBrush, labelRect, sf);
+                }
+                
+                // Divider line
+                using (var pen = new Pen(dividerColor))
+                {
+                    e.Graphics.DrawLine(pen, cellBounds.Left + halfWidth, cellBounds.Top + 3, 
+                        cellBounds.Left + halfWidth, cellBounds.Bottom - 3);
+                }
+                
+                // Right checkbox (Fingerprint)
+                int rightCheckX = cellBounds.Left + halfWidth + (halfWidth - checkboxSize) / 2;
+                Rectangle rightCheckRect = new Rectangle(rightCheckX, verticalCenter, checkboxSize, checkboxSize);
+                
+                // Draw Fingerprint checkbox
+                using (var pen = new Pen(textColor, 1.5f))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    e.Graphics.FillRectangle(brush, rightCheckRect);
+                    e.Graphics.DrawRectangle(pen, rightCheckRect);
+                    
+                    if (enableFingerprint)
+                    {
+                        // Draw checkmark
+                        using (var checkBrush = new SolidBrush(Color.FromArgb(40, 167, 69)))
+                        using (var checkFont = new Font("Segoe UI", 10F, FontStyle.Bold))
+                        {
+                            e.Graphics.DrawString("✓", checkFont, checkBrush, 
+                                rightCheckRect.Left - 1, rightCheckRect.Top - 2);
+                        }
+                    }
+                }
+                
+                // Draw "FP" label below checkbox
+                using (var labelBrush = new SolidBrush(textColor))
+                using (var labelFont = new Font("Segoe UI", 7F))
+                {
+                    var labelRect = new Rectangle(cellBounds.Left + halfWidth, verticalCenter + checkboxSize + 2, 
+                        halfWidth, labelHeight);
+                    var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    e.Graphics.DrawString("FP", labelFont, labelBrush, labelRect, sf);
+                }
+                
+                e.Handled = true;
+            }
+            // Paint the Actions column
+            else if (e.ColumnIndex >= 0 && e.RowIndex >= 0 && dgvUsers.Columns[e.ColumnIndex].Name == "Actions")
             {
                 var cellBounds = e.CellBounds;
                 var actionsText = e.Value?.ToString() ?? "";
@@ -7148,6 +7459,46 @@ namespace FutronicAttendanceSystem
                         {
                             string userName = users[matchIndex].UserName;
                             
+                            // Check if user can authenticate with Fingerprint (per-user + global settings)
+                            User matchedUser = null;
+                            if (userLookupByUsername != null)
+                            {
+                                userLookupByUsername.TryGetValue(userName, out matchedUser);
+                            }
+                            
+                            if (matchedUser != null && !CanUserAuthenticateWith(matchedUser, "FINGERPRINT"))
+                            {
+                                Console.WriteLine($"❌ Fingerprint authentication disabled for user {userName}");
+                                SetStatusText($"❌ Fingerprint authentication is disabled for {userName}. Please use RFID.");
+                                
+                                // Log denied access
+                                try
+                                {
+                                    if (dbManager != null)
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: matchedUser.EmployeeId,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: "Fingerprint authentication disabled for this user"
+                                        );
+                                    }
+                                }
+                                catch (Exception logEx)
+                                {
+                                    Console.WriteLine($"⚠️ Failed to log denied fingerprint access: {logEx.Message}");
+                                }
+                                
+                                // Reset flags and schedule next scan
+                                hasValidFingerPlacement = false;
+                                isFingerOnScanner = false;
+                                ScheduleNextGetBaseTemplate(1500);
+                                return;
+                            }
+                            
                             // MATCH VALIDATION: Check if this match is suspicious
                             // If we recently processed a different user and this match seems inconsistent,
                             // require a second scan for verification to prevent false matches
@@ -8631,6 +8982,7 @@ namespace FutronicAttendanceSystem
                             var content = new StringContent(json, Encoding.UTF8, "application/json");
                             await client.PostAsync(esp32Url, content);
                         }
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
                         if (i < 1) await System.Threading.Tasks.Task.Delay(5000);
                     }
                     catch { }
@@ -8666,6 +9018,8 @@ namespace FutronicAttendanceSystem
                 bool isSignInMode = currentSessionState == AttendanceSessionState.ActiveForStudents;
                 bool isSignOutMode = currentSessionState == AttendanceSessionState.ActiveForSignOut;
                 
+                Console.WriteLine($"🔍 OLED Blink Check: isSignIn={isSignInMode}, isSignOut={isSignOutMode}, state={currentSessionState}");
+                
                 if (!isSignInMode && !isSignOutMode)
                 {
                     // No active session, stop blinking
@@ -8678,35 +9032,61 @@ namespace FutronicAttendanceSystem
                 
                 // Check if display has been idle long enough (other messages have finished)
                 var timeSinceLastMessage = DateTime.Now - lastOledMessageTime;
+                Console.WriteLine($"🔍 Time since last message: {timeSinceLastMessage.TotalMilliseconds}ms (threshold: {OLED_IDLE_THRESHOLD_MS}ms)");
+                
                 if (timeSinceLastMessage.TotalMilliseconds < OLED_IDLE_THRESHOLD_MS)
                 {
                     // Display is still showing other messages, don't blink yet
+                    Console.WriteLine($"⏸️ OLED still busy, waiting... ({timeSinceLastMessage.TotalMilliseconds:F0}ms < {OLED_IDLE_THRESHOLD_MS}ms)");
                     return;
                 }
                 
-                // Display is idle and session is active - show blinking mode
+                // Display is idle and session is active - implement 20-second cycle
                 string esp32Ip = await DiscoverESP32();
                 if (string.IsNullOrEmpty(esp32Ip)) return;
                 
                 string esp32Url = $"http://{esp32Ip}/api/lock-control";
                 string modeText = isSignInMode ? "Sign In Mode" : "Sign Out Mode";
                 
-                // Toggle between visible and blank for blinking effect
-                if (isBlinkingModeVisible)
+                // Calculate time since last mode display
+                var timeSinceLastModeDisplay = DateTime.Now - lastModeDisplayTime;
+                Console.WriteLine($"🔍 Mode display timing: lastDisplay={lastModeDisplayTime}, elapsed={timeSinceLastModeDisplay.TotalMilliseconds}ms, visible={isBlinkingModeVisible}");
+                
+                // Determine if we should show or hide based on timing
+                bool shouldShowMode = false;
+                
+                if (lastModeDisplayTime == DateTime.MinValue)
                 {
-                    // Hide (send empty lines)
-                    var blankPayload = new { action = "status", line1 = "", line2 = "", line3 = "", line4 = "" };
-                    var blankJson = JsonSerializer.Serialize(blankPayload);
-                    using (var client = new HttpClient())
-                    {
-                        client.Timeout = TimeSpan.FromSeconds(5);
-                        client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
-                        var content = new StringContent(blankJson, Encoding.UTF8, "application/json");
-                        await client.PostAsync(esp32Url, content);
-                    }
-                    isBlinkingModeVisible = false;
+                    // Never shown, show it now
+                    shouldShowMode = true;
+                    Console.WriteLine("📺 First time showing mode");
+                }
+                else if (isBlinkingModeVisible && timeSinceLastModeDisplay.TotalMilliseconds < 10000)
+                {
+                    // Currently visible and within 10-second display window, keep visible
+                    Console.WriteLine($"⏳ Mode still visible, keeping it on ({timeSinceLastModeDisplay.TotalMilliseconds:F0}ms < 10000ms)");
+                    return;
+                }
+                else if (isBlinkingModeVisible && timeSinceLastModeDisplay.TotalMilliseconds >= 10000)
+                {
+                    // Visible for 10+ seconds, hide it now
+                    shouldShowMode = false;
+                    Console.WriteLine("🔚 Mode visible for 10s, hiding now");
+                }
+                else if (!isBlinkingModeVisible && timeSinceLastModeDisplay.TotalMilliseconds >= 20000)
+                {
+                    // Hidden and 20+ seconds have passed since first shown, show it again
+                    shouldShowMode = true;
+                    Console.WriteLine("🔄 20s elapsed, showing mode again");
                 }
                 else
+                {
+                    // Hidden but not yet 20 seconds since first shown, stay hidden
+                    Console.WriteLine($"⏳ Mode hidden, waiting for 20s ({timeSinceLastModeDisplay.TotalMilliseconds:F0}ms < 20000ms)");
+                    return;
+                }
+                
+                if (shouldShowMode)
                 {
                     // Show mode text
                     var modePayload = new { action = "status", line1 = "Currently in", line2 = modeText, line3 = "", line4 = "" };
@@ -8719,6 +9099,23 @@ namespace FutronicAttendanceSystem
                         await client.PostAsync(esp32Url, content);
                     }
                     isBlinkingModeVisible = true;
+                    lastModeDisplayTime = DateTime.Now;
+                    Console.WriteLine($"✅ OLED showing mode: {modeText}");
+                }
+                else
+                {
+                    // Hide (send empty lines)
+                    var blankPayload = new { action = "status", line1 = "", line2 = "", line3 = "", line4 = "" };
+                    var blankJson = JsonSerializer.Serialize(blankPayload);
+                    using (var client = new HttpClient())
+                    {
+                        client.Timeout = TimeSpan.FromSeconds(5);
+                        client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
+                        var content = new StringContent(blankJson, Encoding.UTF8, "application/json");
+                        await client.PostAsync(esp32Url, content);
+                    }
+                    isBlinkingModeVisible = false;
+                    Console.WriteLine("✅ OLED mode hidden (blank)");
                 }
             }
             catch (Exception ex)
@@ -8744,6 +9141,7 @@ namespace FutronicAttendanceSystem
                         Console.WriteLine("✅ OLED mode blinking started");
                         // Reset blinking state
                         isBlinkingModeVisible = false;
+                        lastModeDisplayTime = DateTime.MinValue;
                         // Reset last message time to allow blinking to start after idle threshold
                         lastOledMessageTime = DateTime.Now.AddMilliseconds(-OLED_IDLE_THRESHOLD_MS - 1000);
                     }
@@ -9349,7 +9747,7 @@ namespace FutronicAttendanceSystem
             {
 
                 // Scan common IP ranges (fast scan of likely IPs)
-                var likelyIPs = new List<int> { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 50, 100, 101, 102, 200, 254 };
+                var likelyIPs = new List<int> { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 50, 60, 61, 62, 63, 64, 65, 100, 101, 102, 200, 254 };
                 
                 Utils.Logger.Debug($"Scanning IPs: {string.Join(", ", likelyIPs.Select(ip => $"{networkPrefix}.{ip}"))}");
 
@@ -10574,6 +10972,43 @@ namespace FutronicAttendanceSystem
                 }
                 
                 Console.WriteLine($"✅ RFID found: {userInfo.Username} ({userInfo.UserType})");
+                
+                // Check if user can authenticate with RFID (per-user + global settings)
+                User fullUserObj = null;
+                if (userLookupByGuid != null)
+                {
+                    userLookupByGuid.TryGetValue(userInfo.EmployeeId, out fullUserObj);
+                }
+                
+                if (fullUserObj != null && !CanUserAuthenticateWith(fullUserObj, "RFID"))
+                {
+                    Console.WriteLine($"❌ RFID authentication disabled for user {userInfo.Username}");
+                    SetRfidStatusText($"❌ RFID authentication is disabled for {userInfo.Username}. Please use fingerprint.");
+                    AddRfidAttendanceRecord(userInfo.Username, "RFID Authentication Disabled", "Denied");
+                    
+                    // Log denied access
+                    try
+                    {
+                        if (dbManager != null)
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: userInfo.EmployeeId,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: "RFID authentication disabled for this user"
+                            );
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"⚠️ Failed to log denied RFID access: {logEx.Message}");
+                    }
+                    
+                    return;
+                }
                 
                 string userType = userInfo.UserType?.ToLower();
                 
@@ -14543,6 +14978,39 @@ namespace FutronicAttendanceSystem
                         
                         if (finalDbUser != null)
                         {
+                            // Check if user can authenticate with Fingerprint (per-user + global settings)
+                            if (!CanUserAuthenticateWith(finalDbUser, "FINGERPRINT"))
+                            {
+                                Console.WriteLine($"❌ Fingerprint authentication disabled for user {userName}");
+                                SetStatusText($"❌ Fingerprint authentication is disabled for {userName}. Please use RFID.");
+                                
+                                // Log denied access
+                                try
+                                {
+                                    if (dbManager != null)
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: finalDbUser.EmployeeId,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: location,
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: "Fingerprint authentication disabled for this user"
+                                        );
+                                    }
+                                }
+                                catch (Exception logEx)
+                                {
+                                    Console.WriteLine($"⚠️ Failed to log denied fingerprint access: {logEx.Message}");
+                                }
+                                
+                                return;
+                            }
+                        }
+                        
+                        if (finalDbUser != null)
+                        {
                             // Check if student is scanning at outside sensor - door access only, no attendance
                             if (finalDbUser.UserType?.ToLower() == "student" && location == "outside")
                             {
@@ -14998,7 +15466,103 @@ namespace FutronicAttendanceSystem
                 }
             }
 
+            // QUALITY SCORE GATING: Calculate entropy to measure template uniqueness
+            int qualityScore = CalculateTemplateQualityScore(template);
+            Console.WriteLine($"📊 Template quality score: {qualityScore}/100");
+            
+            // Minimum quality threshold for enrollment (60% = reasonable quality)
+            const int MIN_QUALITY_SCORE = 60;
+            if (qualityScore < MIN_QUALITY_SCORE)
+            {
+                Console.WriteLine($"⚠️ Template quality too low: {qualityScore}% (minimum: {MIN_QUALITY_SCORE}%)");
+                Console.WriteLine("   This may indicate: dry finger, partial placement, or smudged sensor");
+                return false;
+            }
+
             return true;
+        }
+
+        /// <summary>
+        /// Calculate template quality score based on entropy (data uniqueness).
+        /// Higher entropy = more unique features captured = better quality.
+        /// Returns score from 0-100.
+        /// </summary>
+        private int CalculateTemplateQualityScore(byte[] template)
+        {
+            if (template == null || template.Length == 0)
+                return 0;
+
+            // Build histogram of byte values (0-255)
+            int[] histogram = new int[256];
+            foreach (byte b in template)
+            {
+                histogram[b]++;
+            }
+
+            // Calculate Shannon entropy
+            double entropy = 0.0;
+            int totalBytes = template.Length;
+            
+            for (int i = 0; i < 256; i++)
+            {
+                if (histogram[i] > 0)
+                {
+                    double probability = (double)histogram[i] / totalBytes;
+                    entropy -= probability * Math.Log(probability, 2);
+                }
+            }
+
+            // Maximum possible entropy for 8-bit data is 8 bits
+            // Normalize to 0-100 scale (good fingerprint templates typically have entropy 5-7)
+            // Score = (entropy / 8) * 100, but we adjust the scale for fingerprint data
+            // Fingerprint templates with entropy < 4 are usually poor quality
+            // Fingerprint templates with entropy > 6 are usually good quality
+            
+            double normalizedScore;
+            if (entropy < 3.0)
+            {
+                // Very low entropy - poor quality
+                normalizedScore = entropy * 10; // 0-30
+            }
+            else if (entropy < 5.0)
+            {
+                // Low-medium entropy - acceptable but not great
+                normalizedScore = 30 + (entropy - 3.0) * 15; // 30-60
+            }
+            else if (entropy < 7.0)
+            {
+                // Good entropy - good quality
+                normalizedScore = 60 + (entropy - 5.0) * 15; // 60-90
+            }
+            else
+            {
+                // High entropy - excellent quality
+                normalizedScore = 90 + (entropy - 7.0) * 10; // 90-100
+            }
+
+            // Clamp to 0-100
+            int score = (int)Math.Max(0, Math.Min(100, normalizedScore));
+            
+            // Additional check: variance in byte distribution
+            // Good templates should have varied data, not just high entropy from noise
+            double mean = template.Average(b => (double)b);
+            double variance = template.Average(b => Math.Pow(b - mean, 2));
+            double stdDev = Math.Sqrt(variance);
+            
+            // If standard deviation is too low (< 30) or too high (> 100), penalize slightly
+            // Good fingerprint templates typically have stdDev between 40-80
+            if (stdDev < 30)
+            {
+                score = (int)(score * 0.85); // 15% penalty for low variance
+                Console.WriteLine($"   Low variance detected (stdDev={stdDev:F1}), quality adjusted");
+            }
+            else if (stdDev > 100)
+            {
+                score = (int)(score * 0.90); // 10% penalty for very high variance (possible noise)
+                Console.WriteLine($"   High variance detected (stdDev={stdDev:F1}), quality adjusted");
+            }
+
+            return Math.Max(0, Math.Min(100, score));
         }
         // ==================== END DUAL SENSOR MODE METHODS ====================
     }

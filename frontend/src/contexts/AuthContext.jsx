@@ -21,7 +21,7 @@ export const useAuth = () => {
 };
 
 // Configure axios defaults
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_BASE_URL = 'http://172.72.100.126:5000';
 axios.defaults.baseURL = API_BASE_URL;
 
 const SUPABASE_REDIRECT_URL =

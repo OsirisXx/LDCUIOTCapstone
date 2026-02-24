@@ -14,7 +14,7 @@ import {
 import axios from 'axios';
 import toast from 'react-hot-toast';
 
-axios.defaults.baseURL = 'http://localhost:5000';
+axios.defaults.baseURL = 'http://172.72.100.126:5000';
 
 function Archive() {
   const [loading, setLoading] = useState(true);

@@ -58,7 +58,7 @@ function Sessions() {
       const headers = { Authorization: `Bearer ${token}` };
 
       // Use the same unified data endpoint as the management page
-      const unifiedResponse = await axios.get('http://localhost:5000/api/unified/data', { headers });
+      const unifiedResponse = await axios.get('http://172.72.100.126:5000/api/unified/data', { headers });
       const unifiedData = unifiedResponse.data;
       
       // Extract data from unified response
