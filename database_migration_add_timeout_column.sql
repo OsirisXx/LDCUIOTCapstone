@@ -26,3 +26,7 @@ WHERE ACTIONTYPE = 'Sign Out'
 -- 2. Update the same record with TimeOut when student signs out
 -- 3. Preserve the original early arrival time in TimeIn column
 
+
+
+
+

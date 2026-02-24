@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+
+# Build outputs
+frontend/build/
+dist/
+
+# Cache
+.cache/
+*.pack
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# .NET
+bin/
+obj/
+*.exe
+*.pdb
+*.dll
+
+# Temporary files
+*.tmp
+*.temp
