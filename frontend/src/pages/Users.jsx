@@ -14,8 +14,7 @@ import {
   ExclamationTriangleIcon,
   EllipsisVerticalIcon,
   ChevronDownIcon,
-  Squares2X2Icon,
-  RectangleStackIcon
+  Squares2X2Icon
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';
@@ -120,7 +119,7 @@ function Users() {
         params.append('search', searchTerm);
       }
 
-      const response = await axios.get(`http://localhost:5000/api/users?${params}`, {
+      const response = await axios.get(`http://172.72.100.126:5000/api/users?${params}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
 
@@ -137,10 +136,10 @@ function Users() {
   const fetchDatabaseCounts = async () => {
     try {
       const [studentsResponse, instructorsResponse] = await Promise.all([
-        axios.get('http://localhost:5000/api/users/by-type/student', {
+        axios.get('http://172.72.100.126:5000/api/users/by-type/student', {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
         }),
-        axios.get('http://localhost:5000/api/users/by-type/instructor', {
+        axios.get('http://172.72.100.126:5000/api/users/by-type/instructor', {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
         })
       ]);
@@ -163,12 +162,12 @@ function Users() {
     
     try {
       if (editingUser) {
-        await axios.put(`http://localhost:5000/api/users/${editingUser.USERID}`, formData, {
+        await axios.put(`http://172.72.100.126:5000/api/users/${editingUser.USERID}`, formData, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
         });
         toast.success('User updated successfully');
       } else {
-        await axios.post('http://localhost:5000/api/users', formData, {
+        await axios.post('http://172.72.100.126:5000/api/users', formData, {
           headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
         });
         toast.success('User created successfully');
@@ -235,7 +234,7 @@ function Users() {
     setIsDeleting(true);
     
     try {
-      await axios.delete(`http://localhost:5000/api/users/${deleteItem.USERID}`, {
+      await axios.delete(`http://172.72.100.126:5000/api/users/${deleteItem.USERID}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       
@@ -338,7 +337,7 @@ function Users() {
     setIsBulkDeleting(true);
     
     try {
-      const response = await axios.delete('http://localhost:5000/api/users/bulk-delete', {
+      const response = await axios.delete('http://172.72.100.126:5000/api/users/bulk-delete', {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
         data: { ids: Array.from(selectedUsers) }
       });
@@ -390,7 +389,7 @@ function Users() {
     
     try {
       // First, fetch ALL users of the specified type from the database
-      const response = await axios.get(`http://localhost:5000/api/users/by-type/${deleteAllType}`, {
+      const response = await axios.get(`http://172.72.100.126:5000/api/users/by-type/${deleteAllType}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       
@@ -459,7 +458,7 @@ function Users() {
     formData.append('excelFile', uploadFile);
 
     try {
-      const response = await axios.post('http://localhost:5000/api/users/preview-excel', formData, {
+      const response = await axios.post('http://172.72.100.126:5000/api/users/preview-excel', formData, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`,
           'Content-Type': 'multipart/form-data'
@@ -494,7 +493,7 @@ function Users() {
     formData.append('excelFile', uploadFile);
 
     try {
-      const response = await axios.post('http://localhost:5000/api/users/upload-excel', formData, {
+      const response = await axios.post('http://172.72.100.126:5000/api/users/upload-excel', formData, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`,
           'Content-Type': 'multipart/form-data'

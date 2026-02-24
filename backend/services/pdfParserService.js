@@ -1414,6 +1414,12 @@ class PDFParserService {
             // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
             /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?\.)\s*([MF])([A-Z0-9\s\-().\/]+)$/,
             
+            // Specific pattern for names WITHOUT periods (must have comma and gender must be followed by course)
+            // e.g. "33.20245454337PEÑAMAYOR, FLORY JOHN M BSHM2" or "33.20245454337PEÑAMAYOR, FLORY JOHNMBSHM2"
+            // This ensures M/F is not part of the name (like "MAYOR" containing "M")
+            // Gender must be followed by a course code (starts with uppercase letter), optionally followed by year
+            /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?[A-Z])\s*([MF])([A-Z][A-Z0-9\s\-().\/]+)$/,
+            
             // More specific pattern for names with commas that might not end with period
             // e.g. "1.20255237912ADERO, JAMIMA CHLOE R.FBSPT1"
             /^(\d+)\.(\d{7,12})([A-ZÀ-ÿ\s,.'-]+?)\s*([MF])([A-Z0-9\s\-().\/]+)$/,
@@ -1464,6 +1470,19 @@ class PDFParserService {
                     // No gender version
                     [, count, studentId, fullName, course] = match;
                     gender = null;
+                } else if (i === 10) {
+                    // Specific pattern for names WITHOUT periods (PEÑAMAYOR case)
+                    // e.g. "33.20245454337PEÑAMAYOR, FLORY JOHN M BSHM2"
+                    [, count, studentId, fullName, gender, course] = match;
+                    // Extract year from course if it's at the end (e.g. "BSHM2" -> "BSHM" and "2")
+                    let year = null;
+                    if (course) {
+                        const yearMatch = course.match(/(\d+)\s*$/);
+                        if (yearMatch) {
+                            year = yearMatch[1];
+                            course = course.slice(0, course.length - yearMatch[0].length).trim();
+                        }
+                    }
                 } else if (i === tabularPatterns.length - 4) {
                     // Ultra-flexible pattern for complex course names
                     [, count, studentId, fullName, gender, course] = match;

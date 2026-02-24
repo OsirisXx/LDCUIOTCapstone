@@ -7,12 +7,14 @@ class BackupService {
   constructor() {
     this.backupDir = path.join(__dirname, '../backups');
     this.uploadsDir = path.join(__dirname, '../uploads');
+    this.archivedBackupDir = path.join(__dirname, '../archived_backups');
   }
 
   // Initialize backup directory
   async ensureBackupDir() {
     try {
       await fs.mkdir(this.backupDir, { recursive: true });
+      await fs.mkdir(this.archivedBackupDir, { recursive: true });
     } catch (error) {
       if (error.code !== 'EEXIST') {
         throw error;
@@ -101,49 +103,106 @@ class BackupService {
     }
   }
 
-  // Generate SQL dump
+  // List archived backups
+  async listArchivedBackups() {
+    try {
+      await this.ensureBackupDir();
+      const files = await fs.readdir(this.archivedBackupDir);
+      const backups = [];
+      for (const file of files) {
+        if (file.endsWith('.zip')) {
+          const filePath = path.join(this.archivedBackupDir, file);
+          const stats = await fs.stat(filePath);
+          backups.push({
+            filename: file,
+            size: Math.round(stats.size / 1024 / 1024 * 100) / 100,
+            date: stats.mtime
+          });
+        }
+      }
+      return backups.sort((a, b) => b.date - a.date);
+    } catch (error) {
+      console.error('Error listing archived backups:', error);
+      return [];
+    }
+  }
+
+  // Archive backup files (move from backups to archived_backups)
+  async archiveBackups(filenames = []) {
+    await this.ensureBackupDir();
+    let archivedCount = 0;
+    for (const name of filenames) {
+      const src = path.join(this.backupDir, name);
+      const dest = path.join(this.archivedBackupDir, name);
+      try {
+        await fs.rename(src, dest);
+        archivedCount++;
+      } catch (err) {
+        // skip missing files
+      }
+    }
+    return { archived: archivedCount };
+  }
+
+  // Generate SQL dump (schema + data)
   async generateSqlDump() {
     try {
       const tables = await this.getAllTables();
       let sqlDump = `-- IoT Attendance System Database Backup\n`;
       sqlDump += `-- Generated: ${new Date().toISOString()}\n\n`;
-      sqlDump += `SET FOREIGN_KEY_CHECKS=0;\n\n`;
+      sqlDump += `SET FOREIGN_KEY_CHECKS=0;\n`;
+      sqlDump += `SET UNIQUE_CHECKS=0;\n`;
+      sqlDump += `SET AUTOCOMMIT=0;\n\n`;
+
+      // Optional: include CREATE DATABASE and USE
+      try {
+        const dbNameRow = await getSingleResult('SELECT DATABASE() AS db');
+        const dbName = dbNameRow?.db;
+        if (dbName) {
+          sqlDump += `-- Database: ${dbName}\n`;
+          sqlDump += `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\n`;
+          sqlDump += `USE \`${dbName}\`;\n\n`;
+        }
+      } catch (_) {
+        // ignore if cannot fetch DB name
+      }
 
       for (const table of tables) {
         try {
+          // Schema: DROP + CREATE TABLE
+          const createResult = await getSingleResult(`SHOW CREATE TABLE \`${table}\``);
+          const createSql = createResult?.['Create Table'] || createResult?.['Create TABLE'] || createResult?.CreateTable;
+          if (createSql) {
+            sqlDump += `--\n-- Table structure for table \`${table}\`\n--\n`;
+            sqlDump += `DROP TABLE IF EXISTS \`${table}\`;\n`;
+            sqlDump += `${createSql};\n\n`;
+          }
+
+          // Data: INSERT rows
           const rows = await getResults(`SELECT * FROM \`${table}\``);
-          
           if (rows.length > 0) {
-            // Get column names
             const columns = Object.keys(rows[0]);
-            
-            sqlDump += `-- Table: ${table}\n`;
-            sqlDump += `TRUNCATE TABLE \`${table}\`;\n`;
-            
-            // Build INSERT statements
+            sqlDump += `--\n-- Dumping data for table \`${table}\`\n--\n`;
+
             for (const row of rows) {
               const values = columns.map(col => {
                 const value = row[col];
                 if (value === null) return 'NULL';
                 if (Buffer.isBuffer(value)) {
-                  // Handle BLOB columns (e.g., fingerprint templates) - convert to hex
                   const hex = value.toString('hex');
                   return hex ? `0x${hex}` : 'NULL';
                 }
                 if (typeof value === 'string') {
-                  // Escape single quotes properly
-                  return `'${value.replace(/'/g, "''").replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}'`;
+                  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "''").replace(/\n/g, '\\n').replace(/\r/g, '\\r')}'`;
                 }
                 if (value instanceof Date) return `'${value.toISOString().slice(0, 19).replace('T', ' ')}'`;
                 if (typeof value === 'boolean') return value ? '1' : '0';
-                if (typeof value === 'number') return value;
+                if (typeof value === 'number') return String(value);
                 return `'${String(value).replace(/'/g, "''")}'`;
               });
-              
               sqlDump += `INSERT INTO \`${table}\` (\`${columns.join('`, `')}\`) VALUES (${values.join(', ')});\n`;
             }
-            
-            sqlDump += '\n';
+            sqlDump += `\n`;
           }
         } catch (tableError) {
           console.error(`Error processing table ${table}:`, tableError);
@@ -152,6 +211,8 @@ class BackupService {
       }
 
       sqlDump += `SET FOREIGN_KEY_CHECKS=1;\n`;
+      sqlDump += `SET UNIQUE_CHECKS=1;\n`;
+      sqlDump += `COMMIT;\n`;
       return sqlDump;
     } catch (error) {
       console.error('Error generating SQL dump:', error);

@@ -62,12 +62,13 @@ function AttendanceLogs() {
         ...(statusFilter && { status: statusFilter })
       });
 
-      const response = await axios.get(`http://localhost:5000/api/logs/attendance?${params}`, {
+      const response = await axios.get(`http://172.72.100.126:5000/api/logs/attendance?${params}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
 
       setLogs(response.data.logs || []);
-      setTotalPages(Math.ceil((response.data.total || 0) / logsPerPage));
+      // Use totalPages from response if available, otherwise calculate from total
+      setTotalPages(response.data.totalPages || Math.ceil((response.data.total || 0) / logsPerPage));
       setLastUpdated(new Date());
     } catch (error) {
       console.error('Error fetching attendance logs:', error);
@@ -91,7 +92,7 @@ function AttendanceLogs() {
         ...(statusFilter && { status: statusFilter })
       });
 
-      const response = await axios.get(`http://localhost:5000/api/logs/attendance?${params}`, {
+      const response = await axios.get(`http://172.72.100.126:5000/api/logs/attendance?${params}`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
 
@@ -103,10 +104,11 @@ function AttendanceLogs() {
         return id && !currentIds.has(id);
       });
 
-      if (newItems.length > 0) {
+              if (newItems.length > 0) {
         const merged = [...newItems, ...logs].slice(0, logsPerPage);
         setLogs(merged);
-        setTotalPages(Math.ceil((response.data.total || 0) / logsPerPage));
+        // Use totalPages from response if available, otherwise calculate from total
+        setTotalPages(response.data.totalPages || Math.ceil((response.data.total || 0) / logsPerPage));
         setLastUpdated(new Date());
 
         // Animate only once per ID: pick the top-most unseen new ID
@@ -147,18 +149,42 @@ function AttendanceLogs() {
       ? `${mounted ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-8'} transition-all duration-500 ease-out will-change-transform will-change-opacity transform`
       : '';
 
+        const isUnknownScan = log.RECORD_TYPE === 'unknown_scan' || (log.FIRSTNAME === 'Unknown' && log.LASTNAME === 'User');
+        const isDeniedAccess = log.RECORD_TYPE === 'denied_access' || log.STATUS === 'Denied';
+    
+    // Extract RFID data from REASON field if available
+    let rfidData = null;
+    if (isUnknownScan && log.REASON) {
+      const match = log.REASON.match(/Unknown RFID card: (.+)/);
+      if (match) {
+        rfidData = match[1];
+      }
+    }
+
     return (
       <tr className={baseRowClasses + highlightClasses}>
         <td className="px-6 py-4 whitespace-nowrap">
           <div className={`flex items-center ${animateClasses}`}>
-            <UserIcon className="h-8 w-8 text-gray-400 mr-3" />
+            <UserIcon className={`h-8 w-8 mr-3 ${isUnknownScan ? 'text-red-400' : 'text-gray-400'}`} />
             <div>
-              <div className="text-sm font-medium text-gray-900">
-                {log.FIRSTNAME} {log.LASTNAME}
+              <div className={`text-sm font-medium ${isUnknownScan ? 'text-red-600' : 'text-gray-900'}`}>
+                {isUnknownScan ? 'Unknown User' : `${log.FIRSTNAME || ''} ${log.LASTNAME || ''}`.trim()}
               </div>
-              <div className="text-sm text-gray-500">
-                ID: {log.STUDENTID || 'N/A'}
-              </div>
+              {rfidData && (
+                <div className="text-xs text-red-600 font-medium">
+                  RFID: {rfidData}
+                </div>
+              )}
+              {!isUnknownScan && (
+                <div className="text-sm text-gray-500">
+                  ID: {log.STUDENTID || log.FACULTYID || 'N/A'}
+                </div>
+              )}
+              {isDeniedAccess && log.REASON && (
+                <div className="text-xs text-red-700 font-medium mt-1">
+                  Reason: {log.REASON}
+                </div>
+              )}
             </div>
           </div>
         </td>
@@ -166,11 +192,11 @@ function AttendanceLogs() {
           <div className={`flex items-center ${animateClasses}`}>
             <ClockIcon className="h-5 w-5 text-gray-400 mr-2" />
             <div>
-              <div className="text-sm text-gray-900">
-                {formatDateTime(log.SCANDATETIME)}
+              <div className="text-sm font-medium text-gray-900">
+                {formatDate(log.SCANDATETIME || log.TIMESTAMP || log.DATE)}
               </div>
               <div className="text-sm text-gray-500">
-                {log.DATE}
+                {formatTime(log.SCANDATETIME || log.TIMESTAMP)}
               </div>
             </div>
           </div>
@@ -178,17 +204,17 @@ function AttendanceLogs() {
         <td className="px-6 py-4 whitespace-nowrap">
           <div className={`flex items-center ${animateClasses}`}>
             {getStatusIcon(log.STATUS)}
-            <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(log.STATUS)}`}>
+            <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(log.STATUS)}`}>                                    
               {log.STATUS || 'Unknown'}
             </span>
           </div>
         </td>
         <td className="px-6 py-4 whitespace-nowrap">
-          <div className={`flex items-center ${animateClasses}`}>
-            <FingerPrintIcon className="h-5 w-5 text-purple-500 mr-2" />
-            <span className="text-sm text-gray-900">{log.AUTHMETHOD || 'Fingerprint'}</span>
+          <div className={`text-sm text-gray-900 ${animateClasses}`}>
+            {log.ACTIONTYPE || 'N/A'}
           </div>
         </td>
+        {/* Methods column removed */}
         <td className="px-6 py-4 whitespace-nowrap">
           <div className={`flex items-center ${animateClasses}`}>
             <MapPinIcon className="h-5 w-5 text-gray-400 mr-2" />
@@ -218,14 +244,18 @@ function AttendanceLogs() {
     );
   };
 
-  const getStatusIcon = (status) => {
+    const getStatusIcon = (status) => {
     switch (status?.toLowerCase()) {
       case 'present':
         return <CheckCircleIcon className="h-5 w-5 text-green-500" />;
       case 'late':
-        return <ExclamationTriangleIcon className="h-5 w-5 text-yellow-500" />;
+        return <ExclamationTriangleIcon className="h-5 w-5 text-yellow-500" />; 
       case 'absent':
         return <XCircleIcon className="h-5 w-5 text-red-500" />;
+      case 'unknown':
+        return <XCircleIcon className="h-5 w-5 text-red-500" />;
+      case 'denied':
+        return <XCircleIcon className="h-5 w-5 text-red-600" />;
       default:
         return <ClockIcon className="h-5 w-5 text-gray-500" />;
     }
@@ -239,6 +269,10 @@ function AttendanceLogs() {
         return 'bg-yellow-100 text-yellow-800';
       case 'absent':
         return 'bg-red-100 text-red-800';
+      case 'unknown':
+        return 'bg-red-100 text-red-800';
+      case 'denied':
+        return 'bg-red-200 text-red-900';
       default:
         return 'bg-gray-100 text-gray-800';
     }
@@ -257,7 +291,35 @@ function AttendanceLogs() {
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
-      second: '2-digit'
+      second: '2-digit',
+      hour12: true
+    });
+  };
+
+  const formatDate = (dateValue) => {
+    if (!dateValue) return '';
+    
+    // Handle both date strings and datetime strings
+    const date = new Date(dateValue);
+    
+    // Format as a simple date: "Nov 3, 2025"
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    });
+  };
+
+  const formatTime = (dateTime) => {
+    if (!dateTime) return '';
+    
+    const date = new Date(dateTime);
+    
+    // Format as time only: "08:14 PM"
+    return date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
     });
   };
 
@@ -339,6 +401,7 @@ function AttendanceLogs() {
               <option value="Present">Present</option>
               <option value="Late">Late</option>
               <option value="Absent">Absent</option>
+              <option value="Denied">Denied</option>
             </select>
           </div>
 
@@ -376,12 +439,12 @@ function AttendanceLogs() {
         ) : (
           <>
             <div className="overflow-x-auto">
-              <div className="max-h-96 overflow-y-auto">
+              <div>
                 <table className="min-w-full divide-y divide-gray-200 transition-opacity duration-300">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Student
+                      User
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Date & Time
@@ -390,8 +453,9 @@ function AttendanceLogs() {
                       Status
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Method
+                      Action Type
                     </th>
+                    {/* Methods column header removed */}
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Location
                     </th>

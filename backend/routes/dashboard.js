@@ -1,11 +1,11 @@
 const express = require('express');
 const { executeQuery, getSingleResult } = require('../config/database');
-const { authenticateToken, requireInstructor } = require('../middleware/auth');
+const { authenticateToken, requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
 // Get dashboard overview
-router.get('/overview', authenticateToken, requireInstructor, async (req, res) => {
+router.get('/overview', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { academic_year, semester } = req.query;
 
@@ -117,7 +117,7 @@ router.get('/overview', authenticateToken, requireInstructor, async (req, res) =
 });
 
 // Get real-time status
-router.get('/realtime', authenticateToken, requireInstructor, async (req, res) => {
+router.get('/realtime', authenticateToken, requireAdmin, async (req, res) => {
     try {
         // Active sessions with current attendance
         const activeSessions = await executeQuery(`
@@ -208,7 +208,7 @@ router.get('/realtime', authenticateToken, requireInstructor, async (req, res) =
 });
 
 // Get attendance analytics
-router.get('/analytics/attendance', authenticateToken, requireInstructor, async (req, res) => {
+router.get('/analytics/attendance', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { period = 'week', academic_year, semester } = req.query;
 
@@ -299,7 +299,7 @@ router.get('/analytics/attendance', authenticateToken, requireInstructor, async 
 });
 
 // Get system health metrics
-router.get('/system/health', authenticateToken, requireInstructor, async (req, res) => {
+router.get('/system/health', authenticateToken, requireAdmin, async (req, res) => {
     try {
         // Database metrics
         const dbStats = await executeQuery(`
@@ -378,7 +378,7 @@ router.get('/system/health', authenticateToken, requireInstructor, async (req, r
 });
 
 // Simple stats endpoint for frontend compatibility
-router.get('/stats', authenticateToken, async (req, res) => {
+router.get('/stats', authenticateToken, requireAdmin, async (req, res) => {
     try {
         // Get total users
         const totalUsersResult = await getSingleResult(
@@ -470,7 +470,7 @@ router.get('/stats', authenticateToken, async (req, res) => {
 });
 
 // Simple recent activity endpoint for frontend compatibility
-router.get('/recent-activity', authenticateToken, async (req, res) => {
+router.get('/recent-activity', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 10;
 

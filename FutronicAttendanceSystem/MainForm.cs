@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -25,6 +25,7 @@ namespace FutronicAttendanceSystem
         const string kCompanyName = "FutronicAttendance";
         const string kProductName = "AttendanceSystem";
         const string kDbName = "Users";
+        private const string LOCK_CONTROLLER_API_KEY = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567";
 
         // Current operation
         private FutronicSdkBase m_Operation;
@@ -43,9 +44,66 @@ namespace FutronicAttendanceSystem
         private bool m_OutsideSensorEnabled = true;
         private DualSensorPanel dualSensorPanel;
         private TabPage dualSensorTab;
+        private CheckBox chkAllowUnauthorizedFingerprints;
+        private CheckBox chkFingerprintOnly;
+        private CheckBox chkRfidOnly;
+        private CheckBox chkAllowInstructorDoorAccess;
+
+        private bool IsFingerprintOnlyMode => deviceConfig?.AllowFingerprintOnly == true;
+        private bool IsRfidOnlyMode => deviceConfig?.AllowRfidOnly == true;
+        private bool IsDualAuthRequired => !IsFingerprintOnlyMode && !IsRfidOnlyMode;
+        
+        // Helper method to check if a user can authenticate with a specific method
+        // Applies intersection of global device settings and per-user settings (Option B)
+        private bool CanUserAuthenticateWith(User user, string method)
+        {
+            if (user == null) return false;
+            
+            string methodUpper = method.ToUpper();
+            
+            // Check per-user settings first
+            bool userAllowsMethod = false;
+            if (methodUpper == "RFID")
+            {
+                userAllowsMethod = user.EnableRfid;
+            }
+            else if (methodUpper == "FINGERPRINT")
+            {
+                userAllowsMethod = user.EnableFingerprint;
+            }
+            
+            // If user has disabled this method, deny regardless of global settings
+            if (!userAllowsMethod)
+                return false;
+            
+            // Check global device settings
+            if (IsFingerprintOnlyMode && methodUpper == "RFID")
+                return false; // Global restricts RFID
+            
+            if (IsRfidOnlyMode && methodUpper == "FINGERPRINT")
+                return false; // Global restricts Fingerprint
+            
+            // Method is allowed both globally and per-user
+            return true;
+        }
+        
+        // Helper to check what authentication methods a user needs
+        private (bool needsRfid, bool needsFingerprint) GetUserAuthRequirements(User user)
+        {
+            if (user == null)
+                return (false, false);
+            
+            // Apply intersection: only require methods that are enabled both globally AND per-user
+            bool needsRfid = CanUserAuthenticateWith(user, "RFID");
+            bool needsFingerprint = CanUserAuthenticateWith(user, "FINGERPRINT");
+            
+            return (needsRfid, needsFingerprint);
+        }
         
         // Track which sensor detected the current fingerprint scan
         private string currentScanLocation = "inside";
+        private DateTime lastUnauthorizedDoorOpenTime = DateTime.MinValue;
+        private const int UNAUTHORIZED_DOOR_DEBOUNCE_MS = 10000;
         
         // Operation state tracking
         private bool m_bEnrollmentInProgress = false;
@@ -65,11 +123,13 @@ namespace FutronicAttendanceSystem
         private AttendanceSessionState currentSessionState = AttendanceSessionState.Inactive;
         private string currentInstructorId = null;
         private string currentScheduleId = null;
+        private string currentSubjectName = null;
+        private string currentInstructorName = null;
         
         // False positive detection prevention
         private DateTime m_lastPutOnTime = DateTime.MinValue;
         private bool m_bInitialStartup = true;
-        private const int MIN_PUTON_INTERVAL_MS = 1000; // Minimum 1 second between put-on events
+        private const int MIN_PUTON_INTERVAL_MS = 500; // Minimum 500ms between put-on events (reduced for better responsiveness)
         
         // Database and cloud storage
         private DatabaseManager dbManager;
@@ -98,7 +158,7 @@ namespace FutronicAttendanceSystem
                     testOperation.FakeDetection = false;
                     testOperation.FFDControl = false;
                     testOperation.FastMode = true;
-                    testOperation.FARN = 150;
+                    testOperation.FARN = 200; // Increased for stricter matching
                     testOperation.Version = VersionCompatible.ftr_version_compatible;
                     
                     // If we can create the object without exception, device is likely available
@@ -120,14 +180,19 @@ namespace FutronicAttendanceSystem
         private string lastProcessedUser = "";
         private DateTime lastProcessedTime = DateTime.MinValue;
         private const int DEBOUNCE_INTERVAL_MS = 1000; // 1 second between same user processing
+        
+        // Debouncing for unknown scans to prevent spam
+        private DateTime lastUnknownScanLogTime = DateTime.MinValue;
+        private const int UNKNOWN_SCAN_DEBOUNCE_MS = 5000; // 5 seconds between unknown scan logs
 
         // INSTRUCTOR SCAN BLOCKING: Prevent spam during 5-second delays
         private bool isProcessingInstructorScan = false;
         private bool isPausedForInstructorAction = false;
-
-        // TWO-SCAN VERIFICATION: For security and accuracy
-        private DateTime verificationScanStartTime = DateTime.MinValue;
-        private const int VERIFICATION_TIMEOUT_SECONDS = 15; // 15 seconds to complete verification
+        
+        // DOUBLE-SCAN VERIFICATION: For improved accuracy, especially for instructor actions
+        private string pendingVerificationUser = null;
+        private DateTime pendingVerificationTime = DateTime.MinValue;
+        private const int VERIFICATION_TIMEOUT_MS = 5000; // 5 seconds to complete verification
         
         // CROSS-TYPE DUAL-AUTHENTICATION: RFID OR Fingerprint first, then the OTHER type
         private bool awaitingCrossTypeVerification = false;
@@ -136,6 +201,31 @@ namespace FutronicAttendanceSystem
         private string pendingCrossVerificationGuid = "";
         private DateTime crossVerificationStartTime = DateTime.MinValue;
         private const int CROSS_VERIFICATION_TIMEOUT_SECONDS = 20; // 20 seconds to complete cross-type verification
+        
+        // EARLY-ARRIVAL DUAL-AUTHENTICATION (outside sensor, no active session)
+        private bool awaitingEarlyArrivalVerification = false;
+        private string earlyFirstScanType = ""; // "RFID" or "FINGERPRINT"
+        private string earlyPendingUser = "";
+        private string earlyPendingGuid = "";
+        private DateTime earlyVerificationStartTime = DateTime.MinValue;
+
+        private void ResetCrossVerificationState()
+        {
+            awaitingCrossTypeVerification = false;
+            firstScanType = "";
+            pendingCrossVerificationUser = "";
+            pendingCrossVerificationGuid = "";
+            crossVerificationStartTime = DateTime.MinValue;
+        }
+
+        private void ResetEarlyArrivalVerificationState()
+        {
+            awaitingEarlyArrivalVerification = false;
+            earlyFirstScanType = "";
+            earlyPendingUser = "";
+            earlyPendingGuid = "";
+            earlyVerificationStartTime = DateTime.MinValue;
+        }
         
         // Track student sign-in status to prevent duplicates
         // Track signed-in students by GUID to avoid name collisions and case issues
@@ -219,8 +309,6 @@ namespace FutronicAttendanceSystem
         private TabControl tabControl;
         private TabPage enrollmentTab;
         private TabPage attendanceTab;
-        private TabPage deviceManagementTab;
-        private TabPage fingerprintUsersTab;
         private TabPage scenariosTab; // NEW: Attendance Scenarios Configuration tab
         private PictureBox pictureFingerprint;
 		private Button btnEnroll;
@@ -273,21 +361,6 @@ namespace FutronicAttendanceSystem
         private ComboBox cmbRoom;
         private Button btnChangeRoom;
         private Label lblCurrentRoom;
-        
-        // Device Management controls
-        private ListView deviceListView;
-        private Button btnInitializeInRoom;
-        private ComboBox cmbDeviceRoom;
-        private TextBox txtDeviceName;
-        private Button btnRefreshDevices;
-
-        // Fingerprint users controls
-        private ListView fingerprintUsersListView;
-        private Button btnExportUsersCsv;
-        private Button btnDeleteFingerprint;
-        private Button btnRefreshFingerprintUsers;
-        private bool fingerprintUsersAccessGranted = false;
-        private List<User> fingerprintUsers = new List<User>();
 
         // Attendance Scenarios Configuration controls
         private NumericUpDown numInstructorEarlyWindow;
@@ -325,16 +398,35 @@ namespace FutronicAttendanceSystem
         private bool isInIdleMode = false;
         private DateTime lastScanAttemptTime = DateTime.Now;
         private const int IDLE_TIMEOUT_SECONDS = 30; // Go to idle mode after 30 seconds of no activity
-        private const int SCAN_INTERVAL_ACTIVE_MS = 300; // Fast scanning when active (3.3 scans/sec) - SDK-safe
+        private const int SCAN_INTERVAL_ACTIVE_MS = 500; // Increased from 300ms to 500ms for better processing time and accuracy
         private const int SCAN_INTERVAL_IDLE_MS = 2000; // Slow scanning when idle (0.5 scans/sec)
         
         // THREAD SAFETY: Prevent concurrent SDK calls
         private bool isGetBaseTemplateInProgress = false;
         private readonly object getBaseTemplateLock = new object();
         
+        // Finger detection state: Prevent repeated scans while finger is on scanner
+        private bool isFingerOnScanner = false;
+        private bool isFingerOnInsideSensor = false;
+        private bool isFingerOnOutsideSensor = false;
+        
+        // Quality-based validation: Track valid finger placement before accepting scans
+        // Only process scans if OnPutOn was called first (valid finger placement detected)
+        private bool hasValidFingerPlacement = false;
+        private DateTime lastValidPutOnTime = DateTime.MinValue;
+        private const int VALID_PLACEMENT_TIMEOUT_MS = 5000; // Increased from 2000ms to 5000ms to give more time for processing
+        
         // Background timers
         private System.Windows.Forms.Timer heartbeatTimer;
         private System.Windows.Forms.Timer syncTimer;
+        private System.Windows.Forms.Timer oledModeBlinkTimer;
+        
+        // OLED mode blinking tracking
+        private DateTime lastOledMessageTime = DateTime.MinValue;
+        private bool isBlinkingModeVisible = false;
+        private DateTime lastModeDisplayTime = DateTime.MinValue;
+        private const int OLED_IDLE_THRESHOLD_MS = 6000; // Display is considered idle after 6 seconds
+        private const int OLED_BLINK_INTERVAL_MS = 1000; // Check every second for timing control
 
         // HTTP client for backend communication
         private static readonly HttpClient http = new HttpClient();
@@ -354,6 +446,23 @@ namespace FutronicAttendanceSystem
             
             Utils.Logger.Info("MainForm constructor starting...");
             InitializeComponent();
+            try
+            {
+                var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "UI", "Resources", "ldcu.ico");
+                if (File.Exists(iconPath))
+                {
+                    this.Icon = new Icon(iconPath);
+                    Utils.Logger.Info($"Application icon set from {iconPath}");
+                }
+                else
+                {
+                    Utils.Logger.Warning($"Application icon not found at {iconPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.Logger.Warning($"Failed to set application icon: {ex.Message}");
+            }
             // Reduce flicker on WinForms by enabling optimized double buffering
             try
             {
@@ -381,12 +490,8 @@ namespace FutronicAttendanceSystem
                 }
                 
             // Configure HttpClient header for device heartbeat authentication
-            try
-            {
-                http.DefaultRequestHeaders.Remove("x-device-api-key");
-                http.DefaultRequestHeaders.Add("x-device-api-key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
-            }
-            catch { }
+            // API key is now added per-request in SendApiHeartbeatAsync
+            // Removed global API key setting to avoid duplication
 
                 Console.WriteLine("Initializing database connection...");
                 // Initialize database connection
@@ -397,9 +502,6 @@ namespace FutronicAttendanceSystem
                 
                 // Auto-assign room if needed
                 dbManager?.AutoAssignRoomIfNeeded();
-                
-                // Test specific instructor validation
-                dbManager?.TestInstructorValidation("harleyinstructor@gmail.com");
                 
                 m_bInitializationSuccess = true;
                 RefreshUserList();
@@ -527,6 +629,23 @@ namespace FutronicAttendanceSystem
             Console.WriteLine($"  Test Mode: {deviceConfig.TestMode}");
             
             InitializeComponent();
+            try
+            {
+                var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "UI", "Resources", "ldcu.ico");
+                if (File.Exists(iconPath))
+                {
+                    this.Icon = new Icon(iconPath);
+                    Utils.Logger.Info($"Application icon set from {iconPath}");
+                }
+                else
+                {
+                    Utils.Logger.Warning($"Application icon not found at {iconPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.Logger.Warning($"Failed to set application icon: {ex.Message}");
+            }
             
             // Reduce flicker
             try
@@ -542,12 +661,8 @@ namespace FutronicAttendanceSystem
                 config = ConfigManager.Instance;
                 
                 // Configure HttpClient
-                try
-                {
-                    http.DefaultRequestHeaders.Remove("x-device-api-key");
-                    http.DefaultRequestHeaders.Add("x-device-api-key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
-                }
-                catch { }
+                // API key is now added per-request in SendApiHeartbeatAsync
+                // Removed global API key setting to avoid duplication
                 
                 // Load users from database
                 Console.WriteLine("Loading users for dual sensor mode...");
@@ -616,38 +731,83 @@ namespace FutronicAttendanceSystem
             // Heartbeat timer
             heartbeatTimer = new System.Windows.Forms.Timer();
             heartbeatTimer.Interval = config.Application.HeartbeatInterval;
+            Console.WriteLine($"⏰ Starting heartbeat timer with interval: {config.Application.HeartbeatInterval}ms");
             heartbeatTimer.Tick += (s, e) => 
             {
                 try
                 {
+                    Console.WriteLine("⏰ Heartbeat timer triggered");
                     dbManager?.UpdateHeartbeat();
                     // Also send heartbeat to web backend for dashboard device presence
                     _ = SendApiHeartbeatAsync();
                 }
                 catch (Exception ex)
                 {
+                    Console.WriteLine($"❌ Heartbeat timer error: {ex.Message}");
                     System.Diagnostics.Debug.WriteLine($"Heartbeat failed: {ex.Message}");
                 }
             };
             heartbeatTimer.Start();
+            Console.WriteLine("✅ Heartbeat timer started");
 
             // Sync timer
             syncTimer = new System.Windows.Forms.Timer();
             syncTimer.Interval = config.Application.SyncInterval;
             syncTimer.Tick += (s, e) => SyncUsersFromCloud();
             syncTimer.Start();
+            
+            // OLED mode blinking timer
+            oledModeBlinkTimer = new System.Windows.Forms.Timer();
+            oledModeBlinkTimer.Interval = OLED_BLINK_INTERVAL_MS;
+            oledModeBlinkTimer.Tick += (s, e) => 
+            {
+                // Fire and forget async task
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await HandleOledModeBlinking();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"❌ OLED mode blinking error: {ex.Message}");
+                        Console.WriteLine($"   Stack trace: {ex.StackTrace}");
+                    }
+                });
+            };
+            // Timer will be started/stopped based on session state
+            Console.WriteLine("✅ OLED mode blink timer initialized");
         }
 
         private async Task SendApiHeartbeatAsync()
         {
             try
             {
+                Console.WriteLine("🔄 Sending heartbeat to backend...");
+                
+                // Get room information from device configuration
+                string roomNumber = null;
+                string roomId = null;
+                if (deviceConfig != null)
+                {
+                    roomNumber = deviceConfig.RoomName;
+                    roomId = deviceConfig.RoomId;
+                    Console.WriteLine($"📍 Using device config - Room: {roomNumber}, ID: {roomId}");
+                }
+                else
+                {
+                    // Fallback to ComboBox method for non-dual sensor mode
+                    roomNumber = GetCurrentRoomNumberSafe();
+                    Console.WriteLine($"📍 Using ComboBox fallback - Room: {roomNumber}");
+                }
+
                 var payload = new
                 {
                     deviceType = "Fingerprint_Scanner",
                     deviceId = config?.Device?.DeviceId ?? Environment.MachineName,
                     location = config?.Device?.Location ?? null,
-                    roomNumber = GetCurrentRoomNumberSafe(),
+                    roomId = roomId,
+                    roomNumber = roomNumber,
                     hostname = Environment.MachineName,
                     ipAddress = GetLocalIPv4Safe(),
                     appVersion = Application.ProductVersion,
@@ -655,11 +815,24 @@ namespace FutronicAttendanceSystem
                 };
 
                 var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"📤 Heartbeat payload: {json}");
+                
                 using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
                 {
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567".Trim();
+                    content.Headers.Add("x-device-api-key", apiKey);
+                    Console.WriteLine($"🔑 API Key being sent: '{apiKey}' (length: {apiKey.Length})");
                     var url = $"{backendBaseUrl}/api/devices/heartbeat";
+                    Console.WriteLine($"🌐 Sending to: {url}");
+                    
                     using (var response = await http.PostAsync(url, content))
                     {
+                        Console.WriteLine($"✅ Heartbeat sent - Status: {response.StatusCode}");
+                        if (response.StatusCode != System.Net.HttpStatusCode.Created)
+                        {
+                            var responseContent = await response.Content.ReadAsStringAsync();
+                            Console.WriteLine($"❌ Response content: {responseContent}");
+                        }
                         // No throw; best-effort
                         _ = response.StatusCode;
                     }
@@ -667,6 +840,7 @@ namespace FutronicAttendanceSystem
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"❌ SendApiHeartbeatAsync error: {ex.Message}");
                 System.Diagnostics.Debug.WriteLine($"SendApiHeartbeatAsync error: {ex.Message}");
             }
         }
@@ -729,7 +903,6 @@ namespace FutronicAttendanceSystem
                 RebuildUserLookupCaches(); // Rebuild even if empty
             }
         }
-        
         // PERFORMANCE: Build cached dictionaries for instant user lookups
         private void RebuildUserLookupCaches()
         {
@@ -799,22 +972,12 @@ namespace FutronicAttendanceSystem
             attendanceTab = new TabPage("Attendance");
             tabControl.TabPages.Add(attendanceTab);
 
-            // Create device management tab
-            deviceManagementTab = new TabPage("Device Management");
-            tabControl.TabPages.Add(deviceManagementTab);
-
-            // Create fingerprint users tab
-            fingerprintUsersTab = new TabPage("Fingerprint Users");
-            tabControl.TabPages.Add(fingerprintUsersTab);
-
             // Create attendance scenarios configuration tab
             scenariosTab = new TabPage("Attendance Scenarios");
             tabControl.TabPages.Add(scenariosTab);
 
             InitializeEnrollmentTab();
             InitializeAttendanceTab();
-            InitializeDeviceManagementTab();
-            InitializeFingerprintUsersTab();
             InitializeScenariosTab();
         }
 
@@ -834,6 +997,77 @@ namespace FutronicAttendanceSystem
             // LEFT PANEL: Fingerprint Preview and Controls
             var leftPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8) };
             mainLayout.Controls.Add(leftPanel, 0, 0);
+
+            // Control buttons
+            var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 50, FlowDirection = FlowDirection.LeftToRight };
+            
+            btnEnroll = new Button();
+            btnEnroll.Size = new Size(120, 35);
+            btnEnroll.Text = "Start Enrollment";
+            btnEnroll.BackColor = Color.LightBlue;
+            btnEnroll.Enabled = false; // Disabled until user is selected
+            btnEnroll.Click += BtnEnroll_Click;
+            buttonPanel.Controls.Add(btnEnroll);
+
+            btnStop = new Button();
+            btnStop.Size = new Size(80, 35);
+            btnStop.Text = "Stop";
+            btnStop.BackColor = Color.LightCoral;
+            btnStop.Enabled = false;
+            btnStop.Click += BtnStop_Click;
+            buttonPanel.Controls.Add(btnStop);
+
+            leftPanel.Controls.Add(buttonPanel);
+
+            // NEW: Registration instructions panel (below fingerprint image)
+            var registrationInstructionsPanel = new Panel { Dock = DockStyle.Top, Height = 220, Padding = new Padding(8, 8, 8, 8) };
+            registrationInstructionsPanel.BackColor = Color.FromArgb(249, 251, 253);
+            registrationInstructionsPanel.BorderStyle = BorderStyle.FixedSingle;
+            
+            var generalTip = new Label 
+            { 
+                Dock = DockStyle.Fill, 
+                Text = "💡 Tip: Users must register both fingerprint and RFID for dual authentication", 
+                Font = new Font("Segoe UI", 8, FontStyle.Italic),
+                ForeColor = Color.FromArgb(80, 100, 160),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 5, 0, 0)
+            };
+            registrationInstructionsPanel.Controls.Add(generalTip);
+            
+            var rfidInstructions = new Label 
+            { 
+                Dock = DockStyle.Top, 
+                Height = 45, 
+                Text = "🔑 RFID Card:\n• Double-click a user from the table\n• Click 'Assign RFID' in Actions column\n• Scan RFID card when prompted", 
+                Font = new Font("Segoe UI", 9, FontStyle.Regular),
+                ForeColor = Color.FromArgb(60, 90, 140),
+                Padding = new Padding(0, 5, 0, 0)
+            };
+            registrationInstructionsPanel.Controls.Add(rfidInstructions);
+            
+            var fingerprintInstructions = new Label 
+            { 
+                Dock = DockStyle.Top, 
+                Height = 60, 
+                Text = "📷 Fingerprint:\n• Double-click a user from the table\n• Click 'Start Enrollment'\n• Place thumb on sensor 3-4 times until complete", 
+                Font = new Font("Segoe UI", 9, FontStyle.Regular),
+                ForeColor = Color.FromArgb(60, 90, 140),
+                Padding = new Padding(0, 5, 0, 0)
+            };
+            registrationInstructionsPanel.Controls.Add(fingerprintInstructions);
+            
+            var instructionsTitle = new Label 
+            { 
+                Dock = DockStyle.Top, 
+                Height = 25, 
+                Text = "How to Register:", 
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(30, 60, 120)
+            };
+            registrationInstructionsPanel.Controls.Add(instructionsTitle);
+            
+            leftPanel.Controls.Add(registrationInstructionsPanel);
 
             // Fingerprint preview
             pictureFingerprint = new PictureBox();
@@ -864,27 +1098,6 @@ namespace FutronicAttendanceSystem
             instructionPanel.Controls.Add(lblEnrollStep);
             instructionPanel.Controls.Add(enrollProgressBar);
             leftPanel.Controls.Add(instructionPanel);
-
-            // Control buttons
-            var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 50, FlowDirection = FlowDirection.LeftToRight };
-            
-            btnEnroll = new Button();
-            btnEnroll.Size = new Size(120, 35);
-            btnEnroll.Text = "Start Enrollment";
-            btnEnroll.BackColor = Color.LightBlue;
-            btnEnroll.Enabled = false; // Disabled until user is selected
-            btnEnroll.Click += BtnEnroll_Click;
-            buttonPanel.Controls.Add(btnEnroll);
-
-            btnStop = new Button();
-            btnStop.Size = new Size(80, 35);
-            btnStop.Text = "Stop";
-            btnStop.BackColor = Color.LightCoral;
-            btnStop.Enabled = false;
-            btnStop.Click += BtnStop_Click;
-            buttonPanel.Controls.Add(btnStop);
-
-            leftPanel.Controls.Add(buttonPanel);
 
             // RIGHT PANEL: User Selection Table with proper spacing using TableLayoutPanel
             var rightPanel = new TableLayoutPanel();
@@ -1070,7 +1283,15 @@ namespace FutronicAttendanceSystem
                 DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter }
             });
             dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { 
-                Name = "HasFingerprint", HeaderText = "Enrolled", Width = 80,
+                Name = "EnableAuth", HeaderText = "Enable | RFID & FP", Width = 173,
+                ReadOnly = false,
+                DefaultCellStyle = new DataGridViewCellStyle { 
+                    Alignment = DataGridViewContentAlignment.MiddleCenter,
+                    Font = new Font("Segoe UI", 8F)
+                }
+            });
+            dgvUsers.Columns.Add(new DataGridViewTextBoxColumn { 
+                Name = "HasFingerprint", HeaderText = "Fingerprint", Width = 80,
                 DefaultCellStyle = new DataGridViewCellStyle { 
                     Alignment = DataGridViewContentAlignment.MiddleCenter,
                     Font = new Font("Segoe UI", 8F, FontStyle.Bold)
@@ -1088,7 +1309,7 @@ namespace FutronicAttendanceSystem
             var actionsColumn = new DataGridViewTextBoxColumn {
                 Name = "Actions",
                 HeaderText = "Actions",
-                Width = 200,
+                Width = 280,
                 ReadOnly = true
             };
             dgvUsers.Columns.Add(actionsColumn);
@@ -1144,9 +1365,9 @@ namespace FutronicAttendanceSystem
                 // Filter users based on search criteria
                 filteredUsers = FilterUsers(cloudUsers, txtSearchUsers?.Text ?? "", cmbSearchType?.SelectedItem?.ToString() ?? "All");
                 
-                // Sort users: enrolled users (with fingerprints) first
+                // Sort users: users with fingerprint OR RFID first (either one = top priority)
                 filteredUsers = filteredUsers.OrderByDescending(u => 
-                    u.FingerprintTemplate != null && u.FingerprintTemplate.Length > 0
+                    (u.FingerprintTemplate != null && u.FingerprintTemplate.Length > 0) || !string.IsNullOrEmpty(u.RfidTag)
                 ).ThenBy(u => u.LastName).ThenBy(u => u.FirstName).ToList();
                 
                 // Clear existing rows
@@ -1194,6 +1415,11 @@ namespace FutronicAttendanceSystem
                         dgvUsers.Rows[row].Cells["Status"].Style.ForeColor = Color.FromArgb(114, 28, 36);
                     }
                     
+                    // Per-user authentication settings (stored as string for custom rendering)
+                    // Format: "enableRfid|enableFingerprint" (will be rendered as checkboxes)
+                    dgvUsers.Rows[row].Cells["EnableAuth"].Value = $"{user.EnableRfid}|{user.EnableFingerprint}";
+                    dgvUsers.Rows[row].Cells["EnableAuth"].Style.BackColor = Color.FromArgb(240, 248, 255);
+                    
                     // Fingerprint enrollment status
                     var hasFingerprint = user.FingerprintTemplate != null && user.FingerprintTemplate.Length > 0;
                     dgvUsers.Rows[row].Cells["HasFingerprint"].Value = hasFingerprint ? "✓ YES" : "✗ NO";
@@ -1225,10 +1451,25 @@ namespace FutronicAttendanceSystem
                     // Set actions text based on fingerprint and RFID status
                     string actionsText = "";
                     
-                    // Fingerprint action
+                    // Get fingerprint count
+                    int fingerprintCount = 0;
+                    if (!string.IsNullOrEmpty(user.EmployeeId))
+                    {
+                        fingerprintCount = dbManager.GetFingerprintCount(user.EmployeeId);
+                    }
+                    
+                    // Fingerprint action - use "Manage FP" for multiple, "Delete FP" for single
                     if (hasFingerprint)
                     {
-                        actionsText = "Delete FP";
+                        if (fingerprintCount > 1)
+                        {
+                            // Use shorter text for multiple fingerprints - badge will show count
+                            actionsText = "Manage FP";
+                        }
+                        else
+                        {
+                            actionsText = "Delete FP";
+                        }
                     }
                     else
                     {
@@ -1245,7 +1486,9 @@ namespace FutronicAttendanceSystem
                         actionsText += " | Assign RFID";
                     }
                     
+                    // Store fingerprint count in cell tag for badge rendering
                     dgvUsers.Rows[row].Cells["Actions"].Value = actionsText;
+                    dgvUsers.Rows[row].Cells["Actions"].Tag = fingerprintCount;
                     
                     // Store the user object in the row tag for easy access
                     dgvUsers.Rows[row].Tag = user;
@@ -1397,8 +1640,152 @@ namespace FutronicAttendanceSystem
             
             var columnName = dgvUsers.Columns[e.ColumnIndex].Name;
             
+            // Check if EnableAuth column was clicked
+            if (columnName == "EnableAuth")
+            {
+                var row = dgvUsers.Rows[e.RowIndex];
+                var user = row.Tag as User;
+                
+                if (user == null) return;
+                
+                // Parse current values
+                var cellValue = row.Cells["EnableAuth"].Value?.ToString() ?? "True|True";
+                var parts = cellValue.Split('|');
+                bool enableRfid = parts.Length > 0 && bool.Parse(parts[0]);
+                bool enableFingerprint = parts.Length > 1 && bool.Parse(parts[1]);
+                
+                var cellBounds = dgvUsers.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, false);
+                var clickX = dgvUsers.PointToClient(Control.MousePosition).X - cellBounds.Left;
+                var cellWidth = cellBounds.Width;
+                
+                // Determine which checkbox was clicked (left = RFID, right = Fingerprint)
+                bool clickedRfid = clickX < cellWidth / 2;
+                
+                // Toggle the clicked checkbox
+                if (clickedRfid)
+                {
+                    // User wants to toggle RFID
+                    bool newRfidValue = !enableRfid;
+                    
+                    // Validate: at least one must remain checked
+                    if (!newRfidValue && !enableFingerprint)
+                    {
+                        MessageBox.Show("At least one authentication method must be enabled for the user.",
+                            "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    
+                    // Ask for confirmation before toggling
+                    string action = newRfidValue ? "enable" : "disable";
+                    string confirmMessage = $"Are you sure you want to {action} RFID authentication for {user.FirstName} {user.LastName}?";
+                    
+                    var confirmResult = MessageBox.Show(
+                        confirmMessage,
+                        "Confirm Change",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+                    
+                    if (confirmResult != DialogResult.Yes)
+                        return;
+                    
+                    // Check if user has RFID registered
+                    bool hasRfid = !string.IsNullOrEmpty(user.RfidTag);
+                    if (newRfidValue && !hasRfid)
+                    {
+                        var result = MessageBox.Show(
+                            $"User {user.FirstName} {user.LastName} does not have an RFID card registered.\n\n" +
+                            "Enabling RFID will allow them to use it once they register a card.\n\n" +
+                            "Do you want to continue?",
+                            "Warning: RFID Not Registered",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning);
+                        
+                        if (result != DialogResult.Yes)
+                            return;
+                    }
+                    
+                    enableRfid = newRfidValue;
+                }
+                else
+                {
+                    // User wants to toggle Fingerprint
+                    bool newFingerprintValue = !enableFingerprint;
+                    
+                    // Validate: at least one must remain checked
+                    if (!newFingerprintValue && !enableRfid)
+                    {
+                        MessageBox.Show("At least one authentication method must be enabled for the user.",
+                            "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    
+                    // Ask for confirmation before toggling
+                    string action = newFingerprintValue ? "enable" : "disable";
+                    string confirmMessage = $"Are you sure you want to {action} Fingerprint authentication for {user.FirstName} {user.LastName}?";
+                    
+                    var confirmResult = MessageBox.Show(
+                        confirmMessage,
+                        "Confirm Change",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+                    
+                    if (confirmResult != DialogResult.Yes)
+                        return;
+                    
+                    // Check if user has fingerprint enrolled
+                    bool hasFingerprint = user.FingerprintTemplate != null && user.FingerprintTemplate.Length > 0;
+                    if (newFingerprintValue && !hasFingerprint)
+                    {
+                        var result = MessageBox.Show(
+                            $"User {user.FirstName} {user.LastName} does not have a fingerprint enrolled.\n\n" +
+                            "Enabling Fingerprint will allow them to use it once they enroll.\n\n" +
+                            "Do you want to continue?",
+                            "Warning: Fingerprint Not Enrolled",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning);
+                        
+                        if (result != DialogResult.Yes)
+                            return;
+                    }
+                    
+                    enableFingerprint = newFingerprintValue;
+                }
+                
+                // Save to database
+                try
+                {
+                    if (dbManager.UpdateUserAuthSettings(user.EmployeeId, enableRfid, enableFingerprint))
+                    {
+                        // Update the user object
+                        user.EnableRfid = enableRfid;
+                        user.EnableFingerprint = enableFingerprint;
+                        
+                        // Update the cell value
+                        row.Cells["EnableAuth"].Value = $"{enableRfid}|{enableFingerprint}";
+                        
+                        // Refresh the cell to show updated checkboxes
+                        dgvUsers.InvalidateCell(e.ColumnIndex, e.RowIndex);
+                        
+                        // Reload cloudUsers from database to ensure consistency
+                        cloudUsers = dbManager.LoadAllUsers();
+                        RebuildUserLookupCaches();
+                        
+                        SetStatusText($"Updated auth settings for {user.FirstName} {user.LastName}: RFID={enableRfid}, Fingerprint={enableFingerprint}");
+                    }
+                    else
+                    {
+                        MessageBox.Show("Failed to update authentication settings in database.",
+                            "Database Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error updating authentication settings: {ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
             // Check if Actions column was clicked
-            if (columnName == "Actions")
+            else if (columnName == "Actions")
             {
                 var row = dgvUsers.Rows[e.RowIndex];
                 var user = row.Tag as User;
@@ -1419,7 +1806,23 @@ namespace FutronicAttendanceSystem
                     // Left half clicked - Fingerprint action
                     if (hasFingerprint)
                     {
-                        DeleteUserFingerprint(user);
+                        // Check if user has multiple fingerprints
+                        int fingerprintCount = 0;
+                        if (!string.IsNullOrEmpty(user.EmployeeId))
+                        {
+                            fingerprintCount = dbManager.GetFingerprintCount(user.EmployeeId);
+                        }
+                        
+                        if (fingerprintCount > 1)
+                        {
+                            // Show dialog for multiple fingerprints
+                            ShowFingerprintManagementDialog(user, fingerprintCount);
+                        }
+                        else
+                        {
+                            // Single fingerprint - delete directly
+                            DeleteUserFingerprint(user);
+                        }
                     }
                     else
                     {
@@ -1440,11 +1843,111 @@ namespace FutronicAttendanceSystem
                 }
             }
         }
-
         private void DgvUsers_CellPainting(object sender, DataGridViewCellPaintingEventArgs e)
         {
-            // Only paint the Actions column
-            if (e.ColumnIndex >= 0 && e.RowIndex >= 0 && dgvUsers.Columns[e.ColumnIndex].Name == "Actions")
+            // Paint the EnableAuth column with checkboxes
+            if (e.ColumnIndex >= 0 && e.RowIndex >= 0 && dgvUsers.Columns[e.ColumnIndex].Name == "EnableAuth")
+            {
+                var cellBounds = e.CellBounds;
+                var cellValue = e.Value?.ToString() ?? "True|True";
+                
+                // Parse the stored value (format: "enableRfid|enableFingerprint")
+                var parts = cellValue.Split('|');
+                bool enableRfid = parts.Length > 0 && bool.Parse(parts[0]);
+                bool enableFingerprint = parts.Length > 1 && bool.Parse(parts[1]);
+                
+                // Clear the cell background
+                e.PaintBackground(cellBounds, true);
+                
+                // Check if row is selected
+                bool isSelected = (e.State & DataGridViewElementStates.Selected) == DataGridViewElementStates.Selected;
+                Color textColor = isSelected ? Color.White : Color.FromArgb(52, 58, 64);
+                Color dividerColor = isSelected ? Color.White : Color.LightGray;
+                
+                // Calculate positions for two checkboxes side by side
+                int halfWidth = cellBounds.Width / 2;
+                int checkboxSize = 14;
+                int labelHeight = 12; // Height for label text
+                int totalContentHeight = checkboxSize + labelHeight + 2; // checkbox + gap + label
+                int verticalCenter = cellBounds.Top + (cellBounds.Height - totalContentHeight) / 2;
+                
+                // Left checkbox (RFID)
+                int leftCheckX = cellBounds.Left + (halfWidth - checkboxSize) / 2;
+                Rectangle leftCheckRect = new Rectangle(leftCheckX, verticalCenter, checkboxSize, checkboxSize);
+                
+                // Draw RFID checkbox
+                using (var pen = new Pen(textColor, 1.5f))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    e.Graphics.FillRectangle(brush, leftCheckRect);
+                    e.Graphics.DrawRectangle(pen, leftCheckRect);
+                    
+                    if (enableRfid)
+                    {
+                        // Draw checkmark
+                        using (var checkBrush = new SolidBrush(Color.FromArgb(40, 167, 69)))
+                        using (var checkFont = new Font("Segoe UI", 10F, FontStyle.Bold))
+                        {
+                            e.Graphics.DrawString("✓", checkFont, checkBrush, 
+                                leftCheckRect.Left - 1, leftCheckRect.Top - 2);
+                        }
+                    }
+                }
+                
+                // Draw "RFID" label below checkbox
+                using (var labelBrush = new SolidBrush(textColor))
+                using (var labelFont = new Font("Segoe UI", 7F))
+                {
+                    var labelRect = new Rectangle(cellBounds.Left, verticalCenter + checkboxSize + 2, 
+                        halfWidth, labelHeight);
+                    var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    e.Graphics.DrawString("RFID", labelFont, labelBrush, labelRect, sf);
+                }
+                
+                // Divider line
+                using (var pen = new Pen(dividerColor))
+                {
+                    e.Graphics.DrawLine(pen, cellBounds.Left + halfWidth, cellBounds.Top + 3, 
+                        cellBounds.Left + halfWidth, cellBounds.Bottom - 3);
+                }
+                
+                // Right checkbox (Fingerprint)
+                int rightCheckX = cellBounds.Left + halfWidth + (halfWidth - checkboxSize) / 2;
+                Rectangle rightCheckRect = new Rectangle(rightCheckX, verticalCenter, checkboxSize, checkboxSize);
+                
+                // Draw Fingerprint checkbox
+                using (var pen = new Pen(textColor, 1.5f))
+                using (var brush = new SolidBrush(Color.White))
+                {
+                    e.Graphics.FillRectangle(brush, rightCheckRect);
+                    e.Graphics.DrawRectangle(pen, rightCheckRect);
+                    
+                    if (enableFingerprint)
+                    {
+                        // Draw checkmark
+                        using (var checkBrush = new SolidBrush(Color.FromArgb(40, 167, 69)))
+                        using (var checkFont = new Font("Segoe UI", 10F, FontStyle.Bold))
+                        {
+                            e.Graphics.DrawString("✓", checkFont, checkBrush, 
+                                rightCheckRect.Left - 1, rightCheckRect.Top - 2);
+                        }
+                    }
+                }
+                
+                // Draw "FP" label below checkbox
+                using (var labelBrush = new SolidBrush(textColor))
+                using (var labelFont = new Font("Segoe UI", 7F))
+                {
+                    var labelRect = new Rectangle(cellBounds.Left + halfWidth, verticalCenter + checkboxSize + 2, 
+                        halfWidth, labelHeight);
+                    var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    e.Graphics.DrawString("FP", labelFont, labelBrush, labelRect, sf);
+                }
+                
+                e.Handled = true;
+            }
+            // Paint the Actions column
+            else if (e.ColumnIndex >= 0 && e.RowIndex >= 0 && dgvUsers.Columns[e.ColumnIndex].Name == "Actions")
             {
                 var cellBounds = e.CellBounds;
                 var actionsText = e.Value?.ToString() ?? "";
@@ -1460,6 +1963,17 @@ namespace FutronicAttendanceSystem
                 Color rightColor = isSelected ? Color.White : Color.FromArgb(40, 167, 69);
                 Color dividerColor = isSelected ? Color.White : Color.Gray;
                 
+                // Get fingerprint count from cell tag
+                int fingerprintCount = 0;
+                if (e.RowIndex >= 0 && e.ColumnIndex >= 0)
+                {
+                    var cell = dgvUsers.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                    if (cell.Tag != null && int.TryParse(cell.Tag.ToString(), out int count))
+                    {
+                        fingerprintCount = count;
+                    }
+                }
+                
                 // Check if we need to split the text into two parts
                 if (actionsText.Contains("|"))
                 {
@@ -1467,14 +1981,58 @@ namespace FutronicAttendanceSystem
                     var leftText = splitText[0].Trim();
                     var rightText = splitText[1].Trim();
                     
-                    // Draw left part (Delete) with conditional color
-                    var leftRect = new Rectangle(cellBounds.Left + 5, cellBounds.Top + 3, cellBounds.Width / 2 - 5, cellBounds.Height - 6);
-                    using (var brush = new SolidBrush(leftColor))
+                    // Use amber/yellow color for "Manage FP" (multiple fingerprints)
+                    Color textColor = leftColor;
+                    if (fingerprintCount > 1 && leftText == "Manage FP")
+                    {
+                        textColor = isSelected ? Color.White : Color.FromArgb(255, 193, 7); // Yellow/Amber for multiple
+                    }
+                    
+                    // Draw left part - adjust width if badge will be shown
+                    int badgeSize = fingerprintCount > 1 ? 18 : 0;
+                    int leftSectionWidth = cellBounds.Width / 2 - 5;
+                    int textAreaWidth = leftSectionWidth - (badgeSize > 0 ? badgeSize + 5 : 0);
+                    
+                    var leftRect = new Rectangle(cellBounds.Left + 5, cellBounds.Top + 3, textAreaWidth, cellBounds.Height - 6);
+                    using (var brush = new SolidBrush(textColor))
                     {
                         e.Graphics.DrawString(leftText, e.CellStyle.Font, brush, leftRect, new StringFormat { 
                             Alignment = StringAlignment.Center, 
                             LineAlignment = StringAlignment.Center 
                         });
+                    }
+                    
+                    // Draw badge indicator for multiple fingerprints (positioned at top-right of left section)
+                    if (fingerprintCount > 1)
+                    {
+                        // Position badge at top-right corner of left section
+                        int badgeX = cellBounds.Left + cellBounds.Width / 2 - badgeSize - 3;
+                        int badgeY = cellBounds.Top + 3;
+                        
+                        // Badge background (amber/yellow)
+                        Color badgeColor = isSelected ? Color.White : Color.FromArgb(255, 193, 7);
+                        Color badgeTextColor = isSelected ? Color.FromArgb(255, 193, 7) : Color.White;
+                        
+                        using (var brush = new SolidBrush(badgeColor))
+                        {
+                            e.Graphics.FillEllipse(brush, badgeX, badgeY, badgeSize, badgeSize);
+                        }
+                        
+                        // Badge border
+                        using (var pen = new Pen(isSelected ? Color.White : Color.FromArgb(255, 152, 0), 1.5f))
+                        {
+                            e.Graphics.DrawEllipse(pen, badgeX, badgeY, badgeSize, badgeSize);
+                        }
+                        
+                        // Badge text (count)
+                        using (var font = new Font(e.CellStyle.Font.FontFamily, 8, FontStyle.Bold))
+                        using (var brush = new SolidBrush(badgeTextColor))
+                        {
+                            var textSize = e.Graphics.MeasureString(fingerprintCount.ToString(), font);
+                            var textX = badgeX + (badgeSize - textSize.Width) / 2;
+                            var textY = badgeY + (badgeSize - textSize.Height) / 2;
+                            e.Graphics.DrawString(fingerprintCount.ToString(), font, brush, textX, textY);
+                        }
                     }
                     
                     // Draw divider with conditional color
@@ -1484,7 +2042,7 @@ namespace FutronicAttendanceSystem
                                             cellBounds.Left + cellBounds.Width / 2, cellBounds.Bottom - 3);
                     }
                     
-                    // Draw right part (Re-enroll) with conditional color
+                    // Draw right part (RFID action) with conditional color
                     var rightRect = new Rectangle(cellBounds.Left + cellBounds.Width / 2 + 5, cellBounds.Top + 3, 
                                                  cellBounds.Width / 2 - 10, cellBounds.Height - 6);
                     using (var brush = new SolidBrush(rightColor))
@@ -1671,6 +2229,192 @@ namespace FutronicAttendanceSystem
             }
         }
 
+        // Show fingerprint management dialog for users with multiple fingerprints
+        private void ShowFingerprintManagementDialog(User user, int fingerprintCount)
+        {
+            var fingerprints = dbManager.GetUserFingerprints(user.EmployeeId);
+            
+            var dialog = new Form
+            {
+                Text = $"Manage Fingerprints - {user.FirstName} {user.LastName}",
+                Size = new Size(500, 400),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false
+            };
+            
+            var mainPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10),
+                RowCount = 4,
+                ColumnCount = 1
+            };
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            
+            // Header
+            var lblHeader = new Label
+            {
+                Text = $"This user has {fingerprintCount} fingerprint(s) registered:",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                AutoSize = true,
+                Padding = new Padding(0, 0, 0, 10)
+            };
+            mainPanel.Controls.Add(lblHeader, 0, 0);
+            
+            // List of fingerprints
+            var lstFingerprints = new ListBox
+            {
+                Dock = DockStyle.Fill,
+                Font = new Font("Segoe UI", 9)
+            };
+            
+            foreach (var fp in fingerprints)
+            {
+                string displayText = $"Fingerprint #{fp.FingerprintNumber} - Registered: {fp.DateRegistered:MM/dd/yyyy HH:mm}";
+                lstFingerprints.Items.Add(new ListItem { Text = displayText, AuthId = fp.AuthId });
+            }
+            
+            mainPanel.Controls.Add(lstFingerprints, 0, 1);
+            
+            // Buttons panel
+            var buttonPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(0, 10, 0, 0)
+            };
+            
+            var btnAddAnother = new Button
+            {
+                Text = "➕ Add Another Fingerprint",
+                Size = new Size(180, 35),
+                BackColor = Color.FromArgb(0, 123, 255),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            btnAddAnother.Click += (s, e) =>
+            {
+                dialog.DialogResult = DialogResult.OK;
+                dialog.Close();
+                // Start enrollment for adding another fingerprint
+                selectedUser = user;
+                isUserSelected = true;
+                StartEnrollment();
+            };
+            
+            var btnDeleteSelected = new Button
+            {
+                Text = "🗑️ Delete Selected",
+                Size = new Size(150, 35),
+                BackColor = Color.FromArgb(220, 53, 69),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Enabled = lstFingerprints.SelectedIndex >= 0
+            };
+            btnDeleteSelected.Click += (s, e) =>
+            {
+                if (lstFingerprints.SelectedItem != null)
+                {
+                    var selectedItem = lstFingerprints.SelectedItem as ListItem;
+                    if (MessageBox.Show(
+                        $"Are you sure you want to delete this fingerprint?",
+                        "Confirm Delete",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question) == DialogResult.Yes)
+                    {
+                        if (dbManager.DeleteFingerprint(selectedItem.AuthId))
+                        {
+                            MessageBox.Show("Fingerprint deleted successfully.", "Success", 
+                                MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            cloudUsers = dbManager.LoadAllUsers();
+                            LoadUsersIntoTable();
+                            dialog.Close();
+                        }
+                        else
+                        {
+                            MessageBox.Show("Failed to delete fingerprint.", "Error", 
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            };
+            
+            var btnDeleteAll = new Button
+            {
+                Text = "🗑️ Delete All",
+                Size = new Size(120, 35),
+                BackColor = Color.FromArgb(220, 53, 69),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            btnDeleteAll.Click += (s, e) =>
+            {
+                if (MessageBox.Show(
+                    $"Are you sure you want to delete ALL {fingerprintCount} fingerprint(s) for this user?",
+                    "Confirm Delete All",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    if (dbManager.DeleteAllFingerprints(user.EmployeeId))
+                    {
+                        MessageBox.Show("All fingerprints deleted successfully.", "Success", 
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        try
+                        {
+                            cloudUsers = dbManager.LoadAllUsers();
+                            RebuildUserLookupCaches();
+                        }
+                        catch (Exception reloadEx)
+                        {
+                            SetStatusText($"Fingerprints deleted but failed to refresh user list: {reloadEx.Message}");
+                        }
+                        LoadUsersIntoTable();
+                        dialog.Close();
+                    }
+                    else
+                    {
+                        MessageBox.Show("Failed to delete all fingerprints.", "Error", 
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            };
+            
+            var btnCancel = new Button
+            {
+                Text = "Cancel",
+                Size = new Size(100, 35),
+                DialogResult = DialogResult.Cancel
+            };
+            
+            lstFingerprints.SelectedIndexChanged += (s, e) =>
+            {
+                btnDeleteSelected.Enabled = lstFingerprints.SelectedIndex >= 0;
+            };
+            
+            buttonPanel.Controls.Add(btnAddAnother);
+            buttonPanel.Controls.Add(btnDeleteSelected);
+            buttonPanel.Controls.Add(btnDeleteAll);
+            buttonPanel.Controls.Add(btnCancel);
+            
+            mainPanel.Controls.Add(buttonPanel, 0, 2);
+            
+            dialog.Controls.Add(mainPanel);
+            dialog.ShowDialog();
+        }
+
+        // Helper class for ListBox items
+        private class ListItem
+        {
+            public string Text { get; set; }
+            public string AuthId { get; set; }
+            public override string ToString() => Text;
+        }
+
         private void AssignUserRfid(User user)
         {
             try
@@ -1730,6 +2474,21 @@ namespace FutronicAttendanceSystem
                     if (string.IsNullOrEmpty(rfidTag))
                     {
                         MessageBox.Show("Please enter an RFID tag code.", "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    // Check if RFID tag is already assigned to another user
+                    var existingUser = dbManager.GetUserByRfidTag(rfidTag);
+                    if (existingUser != null && existingUser.EmployeeId != user.EmployeeId)
+                    {
+                        var assignedTo = (!string.IsNullOrWhiteSpace(existingUser.FirstName) || !string.IsNullOrWhiteSpace(existingUser.LastName))
+                            ? ($"{existingUser.FirstName} {existingUser.LastName}".Trim())
+                            : (!string.IsNullOrWhiteSpace(existingUser.Username) ? existingUser.Username : "another user");
+                        MessageBox.Show(
+                            $"RFID tag '{rfidTag}' is already assigned to {assignedTo}.\n\nPlease use a different RFID tag or remove it from the existing user first.",
+                            "Duplicate RFID Tag",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
                         return;
                     }
 
@@ -2196,142 +2955,7 @@ namespace FutronicAttendanceSystem
             }
             return maxWidth;
         }
-
         // Removed obsolete SetRfidComboBoxDropDownWidths() - RFID uses unified location/room controls
-
-        private void InitializeDeviceManagementTab()
-        {
-            // Title label
-            var lblTitle = new Label();
-            lblTitle.Location = new Point(20, 20);
-            lblTitle.Size = new Size(400, 25);
-            lblTitle.Text = "Multi-Device Management";
-            lblTitle.Font = new Font(lblTitle.Font, FontStyle.Bold);
-            lblTitle.ForeColor = Color.DarkBlue;
-            deviceManagementTab.Controls.Add(lblTitle);
-
-            // Device name input
-            var lblDeviceName = new Label();
-            lblDeviceName.Location = new Point(20, 55);
-            lblDeviceName.Size = new Size(100, 20);
-            lblDeviceName.Text = "Device Name:";
-            deviceManagementTab.Controls.Add(lblDeviceName);
-
-            txtDeviceName = new TextBox();
-            txtDeviceName.Location = new Point(125, 53);
-            txtDeviceName.Size = new Size(200, 25);
-            txtDeviceName.Text = config?.Device?.DeviceId ?? "Device1";
-            deviceManagementTab.Controls.Add(txtDeviceName);
-
-            // Room selection for device
-            var lblDeviceRoom = new Label();
-            lblDeviceRoom.Location = new Point(340, 55);
-            lblDeviceRoom.Size = new Size(50, 20);
-            lblDeviceRoom.Text = "Room:";
-            deviceManagementTab.Controls.Add(lblDeviceRoom);
-
-            cmbDeviceRoom = new ComboBox();
-            cmbDeviceRoom.Location = new Point(395, 53);
-            cmbDeviceRoom.Size = new Size(250, 25);
-            cmbDeviceRoom.DropDownStyle = ComboBoxStyle.DropDownList;
-            deviceManagementTab.Controls.Add(cmbDeviceRoom);
-
-            // Initialize device button
-            btnInitializeInRoom = new Button();
-            btnInitializeInRoom.Location = new Point(655, 52);
-            btnInitializeInRoom.Size = new Size(120, 27);
-            btnInitializeInRoom.Text = "Initialize Device";
-            btnInitializeInRoom.BackColor = Color.LightGreen;
-            btnInitializeInRoom.Click += BtnInitializeInRoom_Click;
-            deviceManagementTab.Controls.Add(btnInitializeInRoom);
-
-            // Refresh devices button
-            btnRefreshDevices = new Button();
-            btnRefreshDevices.Location = new Point(785, 52);
-            btnRefreshDevices.Size = new Size(80, 27);
-            btnRefreshDevices.Text = "Refresh";
-            btnRefreshDevices.BackColor = Color.LightCyan;
-            btnRefreshDevices.Click += BtnRefreshDevices_Click;
-            deviceManagementTab.Controls.Add(btnRefreshDevices);
-
-            // Device list
-            deviceListView = new ListView();
-            deviceListView.Location = new Point(20, 90);
-            deviceListView.Size = new Size(850, 400);
-            deviceListView.View = View.Details;
-            deviceListView.FullRowSelect = true;
-            deviceListView.GridLines = true;
-
-            deviceListView.Columns.Add("Device Name", 150);
-            deviceListView.Columns.Add("Type", 120);
-            deviceListView.Columns.Add("Room", 200);
-            deviceListView.Columns.Add("Building", 150);
-            deviceListView.Columns.Add("IP Address", 120);
-            deviceListView.Columns.Add("Status", 80);
-            deviceListView.Columns.Add("Last Seen", 130);
-
-            deviceManagementTab.Controls.Add(deviceListView);
-
-            // Instructions
-            var lblInstructions = new Label();
-            lblInstructions.Location = new Point(20, 500);
-            lblInstructions.Size = new Size(850, 60);
-            lblInstructions.Text = "Instructions:\n" +
-                "1. Enter a unique device name for each fingerprint scanner\n" +
-                "2. Select the room where this device will be installed\n" +
-                "3. Click 'Initialize Device' to register it in the database\n" +
-                "4. Copy this application to each device location with different device names in appsettings.json";
-            lblInstructions.ForeColor = Color.DarkGreen;
-            deviceManagementTab.Controls.Add(lblInstructions);
-        }
-
-        private void InitializeFingerprintUsersTab()
-        {
-            var title = new Label();
-            title.Location = new Point(20, 20);
-            title.Size = new Size(400, 25);
-            title.Text = "Users With Enrolled Fingerprints";
-            title.Font = new Font(title.Font, FontStyle.Bold);
-            fingerprintUsersTab.Controls.Add(title);
-
-            btnExportUsersCsv = new Button();
-            btnExportUsersCsv.Location = new Point(20, 55);
-            btnExportUsersCsv.Size = new Size(140, 27);
-            btnExportUsersCsv.Text = "Export to CSV";
-            btnExportUsersCsv.BackColor = Color.LightYellow;
-            btnExportUsersCsv.Click += (s, e) => ExportFingerprintUsersToCsv();
-            fingerprintUsersTab.Controls.Add(btnExportUsersCsv);
-
-            btnDeleteFingerprint = new Button();
-            btnDeleteFingerprint.Location = new Point(170, 55);
-            btnDeleteFingerprint.Size = new Size(170, 27);
-            btnDeleteFingerprint.Text = "Delete Selected";
-            btnDeleteFingerprint.BackColor = Color.MistyRose;
-            btnDeleteFingerprint.Click += (s, e) => DeleteSelectedFingerprint();
-            fingerprintUsersTab.Controls.Add(btnDeleteFingerprint);
-
-            btnRefreshFingerprintUsers = new Button();
-            btnRefreshFingerprintUsers.Location = new Point(350, 55);
-            btnRefreshFingerprintUsers.Size = new Size(90, 27);
-            btnRefreshFingerprintUsers.Text = "Refresh";
-            btnRefreshFingerprintUsers.BackColor = Color.LightCyan;
-            btnRefreshFingerprintUsers.Click += (s, e) => LoadFingerprintUsers();
-            fingerprintUsersTab.Controls.Add(btnRefreshFingerprintUsers);
-
-            fingerprintUsersListView = new ListView();
-            fingerprintUsersListView.Location = new Point(20, 90);
-            fingerprintUsersListView.Size = new Size(850, 450);
-            fingerprintUsersListView.View = View.Details;
-            fingerprintUsersListView.FullRowSelect = true;
-            fingerprintUsersListView.GridLines = true;
-            fingerprintUsersListView.Columns.Add("Name", 220);
-            // Email column removed - not available in PDF parse data
-            fingerprintUsersListView.Columns.Add("User Type", 100);
-            fingerprintUsersListView.Columns.Add("Department", 150);
-            fingerprintUsersListView.Columns.Add("GUID", 140);
-            fingerprintUsersTab.Controls.Add(fingerprintUsersListView);
-        }
-
         private void InitializeScenariosTab()
         {
             scenariosTab.Controls.Clear();
@@ -2350,7 +2974,7 @@ namespace FutronicAttendanceSystem
             lblDescription.Location = new Point(20, 55);
             lblDescription.Size = new Size(800, 40);
             lblDescription.Text = "Configure time windows and tolerances for different attendance scenarios. " +
-                                 "All values are in minutes. Use 'Reset to Defaults' to restore original values.";
+                                   "All values are in minutes. Use 'Reset to Defaults' to restore original values.";
             lblDescription.ForeColor = Color.DarkSlateGray;
             scenariosTab.Controls.Add(lblDescription);
 
@@ -2526,14 +3150,20 @@ namespace FutronicAttendanceSystem
             txtDescriptions.ReadOnly = true;
             txtDescriptions.ScrollBars = ScrollBars.Vertical;
             txtDescriptions.BackColor = Color.White;
-            txtDescriptions.Text = @"1. Instructor Early Window: How early an instructor can start a session before scheduled time
-2. Student Grace Period: How late a student can arrive and still be marked 'Present'
-3. Instructor Late Tolerance: How late an instructor can be and still start a session (marked as 'Unscheduled')
-4. Auto Close Delay: How long after scheduled end time the system will auto-close an active session
-5. Student Early Arrival Window: How early students can scan and be marked as 'Early Arrival'
-6. Instructor End Tolerance: How early/late an instructor can end a session relative to scheduled end time
-
-These settings allow you to customize the attendance system behavior for different academic policies and requirements.";
+            txtDescriptions.Text = "1. Instructor Early Window\r\n" +
+"   How early an instructor can start a session before scheduled time.\r\n\r\n" +
+"2. Student Grace Period\r\n" +
+"   How late a student can arrive and still be marked as 'Present'.\r\n\r\n" +
+"3. Instructor Late Tolerance\r\n" +
+"   How late an instructor can be and still start a session (marked as 'Unscheduled').\r\n\r\n" +
+"4. Auto Close Delay\r\n" +
+"   How long after scheduled end time the system will auto-close an active session.\r\n\r\n" +
+"5. Student Early Arrival Window\r\n" +
+"   How early students can scan and be marked as 'Early Arrival'.\r\n\r\n" +
+"6. Instructor End Tolerance\r\n" +
+"   How early/late an instructor can end a session relative to scheduled end time.\r\n\r\n" +
+"\r\n" +
+"These settings allow you to customize the attendance system behavior for different academic policies and requirements.";
             descriptionPanel.Controls.Add(txtDescriptions);
 
             // Load current settings
@@ -2674,165 +3304,6 @@ These settings allow you to customize the attendance system behavior for differe
         }
 
         // ============= End of Attendance Scenarios Configuration Methods =============
-
-        private bool PromptForAdminPassword()
-        {
-            using (var form = new Form())
-            using (var lbl = new Label())
-            using (var txt = new TextBox())
-            using (var ok = new Button())
-            using (var cancel = new Button())
-            {
-                form.Text = "Admin Authentication";
-                form.StartPosition = FormStartPosition.CenterParent;
-                form.FormBorderStyle = FormBorderStyle.FixedDialog;
-                form.MinimizeBox = false;
-                form.MaximizeBox = false;
-                form.ClientSize = new Size(360, 140);
-
-                lbl.Text = "Enter admin password:";
-                lbl.SetBounds(12, 15, 320, 20);
-                txt.UseSystemPasswordChar = true;
-                txt.SetBounds(15, 40, 330, 24);
-                ok.Text = "OK";
-                ok.SetBounds(190, 85, 70, 28);
-                ok.DialogResult = DialogResult.OK;
-                cancel.Text = "Cancel";
-                cancel.SetBounds(275, 85, 70, 28);
-                cancel.DialogResult = DialogResult.Cancel;
-
-                form.Controls.AddRange(new Control[] { lbl, txt, ok, cancel });
-                form.AcceptButton = ok;
-                form.CancelButton = cancel;
-
-                var result = form.ShowDialog(this);
-                if (result == DialogResult.OK)
-                {
-                    return txt.Text == "admin123";
-                }
-                return false;
-            }
-        }
-
-        private void LoadFingerprintUsers()
-        {
-            try
-            {
-                SetStatusText("Loading fingerprint users...");
-                fingerprintUsers = dbManager?.LoadAllUsers() ?? new List<User>();
-
-                fingerprintUsersListView.Items.Clear();
-                foreach (var u in fingerprintUsers)
-                {
-                    var fullName = ($"{u.FirstName} {u.LastName}").Trim();
-                    if (string.IsNullOrWhiteSpace(fullName)) fullName = u.Username ?? u.Email;
-                    var item = new ListViewItem(fullName);
-                    item.SubItems.Add(u.Email ?? "");
-                    item.SubItems.Add(u.UserType ?? "");
-                    item.SubItems.Add(u.Department ?? "");
-                    item.SubItems.Add(u.EmployeeId ?? "");
-                    fingerprintUsersListView.Items.Add(item);
-                }
-                SetStatusText($"Loaded {fingerprintUsers.Count} users with fingerprints.");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Failed to load users: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void ExportFingerprintUsersToCsv()
-        {
-            if (fingerprintUsers == null || fingerprintUsers.Count == 0)
-            {
-                MessageBox.Show("No users to export.", "No Data", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            var dlg = new SaveFileDialog();
-            dlg.Filter = "CSV files (*.csv)|*.csv";
-            dlg.FileName = $"FingerprintUsers_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
-            if (dlg.ShowDialog() == DialogResult.OK)
-            {
-                try
-                {
-                    using (var writer = new System.IO.StreamWriter(dlg.FileName, false, Encoding.UTF8))
-                    {
-                        writer.WriteLine("FirstName,LastName,UserType,Department,UserGUID");
-                        foreach (var u in fingerprintUsers)
-                        {
-                            string first = (u.FirstName ?? "").Replace(",", " ");
-                            string last = (u.LastName ?? "").Replace(",", " ");
-                            // Email removed - not available in PDF parse data
-                            string type = (u.UserType ?? "").Replace(",", " ");
-                            string dept = (u.Department ?? "").Replace(",", " ");
-                            string guid = (u.EmployeeId ?? "").Replace(",", " ");
-                            writer.WriteLine($"{first},{last},{type},{dept},{guid}");
-                        }
-                    }
-                    MessageBox.Show($"Exported to {dlg.FileName}", "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Failed to export: {ex.Message}", "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
-
-        private void DeleteSelectedFingerprint()
-        {
-            try
-            {
-                if (fingerprintUsersListView == null || fingerprintUsersListView.SelectedItems.Count == 0)
-                {
-                    MessageBox.Show("Select a user first.", "No Selection", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-
-                var selected = fingerprintUsersListView.SelectedItems[0];
-                var guid = selected.SubItems.Count >= 5 ? selected.SubItems[4].Text : null;
-                if (string.IsNullOrWhiteSpace(guid))
-                {
-                    MessageBox.Show("Selected user has no GUID.", "Invalid Selection", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                var confirm = MessageBox.Show("Permanently delete the fingerprint for this user?", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-                if (confirm != DialogResult.Yes) return;
-
-                if (dbManager.DeleteUserFingerprintByGuid(guid))
-                {
-                    SetStatusText("Fingerprint deleted. Refreshing users and scanner...");
-                    // Refresh cloud users and restart identification so removed templates are not used
-                    System.Threading.Tasks.Task.Run(() =>
-                    {
-                        try
-                        {
-                            SyncUsersFromCloud();
-                            this.Invoke(new Action(() =>
-                            {
-                                LoadFingerprintUsers();
-                                // If attendance loop exists, restart to reload templates
-                                if (m_AttendanceOperation != null)
-                                {
-                                    RestartIdentification();
-                                }
-                            }));
-                        }
-                        catch { }
-                    });
-                }
-                else
-                {
-                    MessageBox.Show("No changes made.", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Failed to delete: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
 		private void BtnEnroll_Click(object sender, EventArgs e)
         {
 			// NEW: Check if a user is selected from the table
@@ -2876,6 +3347,13 @@ These settings allow you to customize the attendance system behavior for differe
         {
             try
             {
+                // Prevent starting enrollment if already in progress
+                if (m_bEnrollmentInProgress || isEnrollmentActive)
+                {
+                    SetStatusText("Enrollment already in progress. Please wait...");
+                    return;
+                }
+                
                 // Set enrollment state
                 m_bEnrollmentInProgress = true;
                 // Reset guidance UI
@@ -2909,12 +3387,12 @@ These settings allow you to customize the attendance system behavior for differe
 
                 m_Operation = new FutronicEnrollment();
 
-                // Set properties (tuned to avoid false fake-finger detections)
+                // Set properties (tuned for better accuracy)
                 m_Operation.FakeDetection = false; // Disable fake finger detection to reduce false positives
                 m_Operation.FFDControl = false;    // Let device manage FFD internally
-                m_Operation.FastMode = true;
+                m_Operation.FastMode = false; // DISABLED: Prioritize accuracy over speed for enrollment
                 // INCREASED: Higher FARN for stricter matching to prevent false positives
-                m_Operation.FARN = 150; // Increased from 100 to 150
+                m_Operation.FARN = 200; // Increased from 150 to 200 for stricter matching
                 m_Operation.Version = VersionCompatible.ftr_version_compatible;
                 ((FutronicEnrollment)m_Operation).MIOTControlOff = true; // Turn off MIOT control per SDK guidance
 
@@ -3060,16 +3538,16 @@ These settings allow you to customize the attendance system behavior for differe
                         // Create new operation with proper initialization
                         m_AttendanceOperation = new FutronicIdentification();
 
-                        // Set properties (tuned to avoid false fake-finger detections)
+                        // Set properties (tuned for better accuracy)
                         m_AttendanceOperation.FakeDetection = false; // Disable fake finger detection to reduce false positives
                         m_AttendanceOperation.FFDControl = false;    // Let device manage FFD internally
-                        m_AttendanceOperation.FastMode = true;
-                        // INCREASED: Higher FARN for stricter matching to prevent false positives
-                        m_AttendanceOperation.FARN = 150; // Increased from 100 to 150
+                        m_AttendanceOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
+                        // FARN for matching accuracy - increased to 200 for stricter matching to prevent false positives
+                        m_AttendanceOperation.FARN = 200; // Increased from 150 to 200 for stricter matching
                         m_AttendanceOperation.Version = VersionCompatible.ftr_version_compatible;
                         
                         // Additional settings to reduce false positives
-                        // FARN already set to 150 above
+                        // FARN already set to 200 above
                         
                         // Add a small delay to ensure proper initialization
                         System.Threading.Thread.Sleep(100);
@@ -3203,43 +3681,6 @@ These settings allow you to customize the attendance system behavior for differe
             }
         }
 
-        private void BtnInitializeInRoom_Click(object sender, EventArgs e)
-        {
-            if (string.IsNullOrWhiteSpace(txtDeviceName.Text))
-            {
-                MessageBox.Show("Please enter a device name.", "Missing Device Name", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (cmbDeviceRoom.SelectedItem == null)
-            {
-                MessageBox.Show("Please select a room for the device.", "No Room Selected", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            var selectedRoom = (Database.Models.Room)cmbDeviceRoom.SelectedItem;
-            var deviceName = txtDeviceName.Text.Trim();
-
-            if (dbManager.InitializeDeviceInRoom(selectedRoom.RoomId, deviceName))
-            {
-                SetStatusText($"Device '{deviceName}' initialized in room '{selectedRoom.DisplayName}'");
-                RefreshDeviceList();
-                UpdateCurrentRoomDisplay();
-            }
-            else
-            {
-                MessageBox.Show("Failed to initialize device. Check the logs for details.", "Initialization Failed", 
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void BtnRefreshDevices_Click(object sender, EventArgs e)
-        {
-            RefreshDeviceList();
-        }
-
         private void BtnExportAttendance_Click(object sender, EventArgs e)
         {
             if (attendanceRecords.Count == 0)
@@ -3285,6 +3726,8 @@ These settings allow you to customize the attendance system behavior for differe
                     currentSessionState = AttendanceSessionState.Inactive;
                     currentInstructorId = null;
                     currentScheduleId = null;
+                    currentSubjectName = null;
+                    currentInstructorName = null;
                     
                     // Reset cross-type verification state
                     awaitingCrossTypeVerification = false;
@@ -3292,6 +3735,8 @@ These settings allow you to customize the attendance system behavior for differe
                     pendingCrossVerificationGuid = "";
                     firstScanType = "";
                     crossVerificationStartTime = DateTime.MinValue;
+                    
+                    UpdateOledModeBlinkingState(); // Stop OLED mode blinking
                     
                     UpdateSessionStateDisplay();
                     SetStatusText("Session force ended by administrator.");
@@ -3401,9 +3846,89 @@ These settings allow you to customize the attendance system behavior for differe
                     return;
                 }
                 
-                // Update debouncing variables
+                // DOUBLE-SCAN VERIFICATION: For instructor actions, require two matching scans for accuracy
+                if (userInfo?.UserType?.ToLower() == "instructor")
+                {
+                    var timeSincePending = DateTime.Now - pendingVerificationTime;
+                    
+                    // Check if this is a verification scan (same user within timeout)
+                    if (pendingVerificationUser == userName && timeSincePending.TotalMilliseconds < VERIFICATION_TIMEOUT_MS)
+                    {
+                        // Verification successful - clear pending and proceed
+                        Console.WriteLine($"✅ Verification successful for instructor {userName}");
+                        pendingVerificationUser = null;
+                        pendingVerificationTime = DateTime.MinValue;
+                        
+                        // Reset finger detection flags now that verification is complete
+                        // This allows normal processing to continue
+                        hasValidFingerPlacement = false;
+                        isFingerOnScanner = false;
+                        
+                        // Continue to process instructor scan below
+                    }
+                    else
+                    {
+                        // Check if pending verification expired
+                        if (pendingVerificationUser != null && timeSincePending.TotalMilliseconds >= VERIFICATION_TIMEOUT_MS)
+                        {
+                            // Verification expired - reset and start new verification
+                            Console.WriteLine($"⏱️ Verification expired for {pendingVerificationUser}, starting new verification for {userName}");
+                            pendingVerificationUser = null;
+                            pendingVerificationTime = DateTime.MinValue;
+                        }
+                        
+                        // First scan - require verification (unless pending verification expired or different user)
+                        if (pendingVerificationUser != null && pendingVerificationUser != userName)
+                        {
+                            // Different user scanned - reset verification
+                            Console.WriteLine($"⚠️ Verification reset: Different user {userName} scanned (was {pendingVerificationUser})");
+                            pendingVerificationUser = null;
+                            pendingVerificationTime = DateTime.MinValue;
+                        }
+                        
+                        pendingVerificationUser = userName;
+                        pendingVerificationTime = DateTime.Now;
+                        SetStatusText($"⏳ Instructor verification required. Please scan again to confirm: {userName}");
+                        Console.WriteLine($"⏳ Instructor scan requires verification. Waiting for second scan from {userName}");
+                        
+                        // DO NOT reset finger-on flags here - keep finger detected so scanner continues
+                        // The flags will be reset after verification succeeds or in OnGetBaseTemplateComplete
+                        // if verification is pending, we'll handle it there
+                        
+                        // Send verification message to OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await RequestInfoDisplay(userInfo.EmployeeId, userName, "Verification required. Scan again to confirm.");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"⚠️ Failed to send verification message to OLED: {ex.Message}");
+                            }
+                        });
+                        
+                        ScheduleNextGetBaseTemplate(300); // Very short delay to detect second scan quickly
+                        return; // Don't process yet - wait for verification
+                    }
+                }
+                else
+                {
+                    // For non-instructors, clear any pending verification if user changed
+                    if (pendingVerificationUser != null && pendingVerificationUser != userName)
+                    {
+                        pendingVerificationUser = null;
+                        pendingVerificationTime = DateTime.MinValue;
+                    }
+                }
+                
+                // Update debouncing variables (only after successful processing)
                 lastProcessedUser = userName;
                 lastProcessedTime = DateTime.Now;
+                
+                // Reset finger-on flag after processing to allow next scan
+                // This ensures we don't block subsequent scans unnecessarily
+                isFingerOnScanner = false;
                 
                 // Console.WriteLine($"Processing attendance scan for: {userName}");
                 
@@ -3420,6 +3945,13 @@ These settings allow you to customize the attendance system behavior for differe
                 string userGuid = userInfo.EmployeeId;
                 
                 // Console.WriteLine($"User type: {userType}, Session state: {currentSessionState}");
+
+                if (deviceConfig?.AllowUnauthorizedFingerprints == true)
+                {
+                    GrantDoorOverrideForKnownUser(userInfo.Username, userGuid, currentScanLocation ?? "inside");
+                    ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                    return;
+                }
                 
                 // Process based on user type and current session state
                 if (userType == "instructor")
@@ -3458,7 +3990,6 @@ These settings allow you to customize the attendance system behavior for differe
                 ScheduleNextGetBaseTemplate(1000);
             }
         }
-        
         private void ProcessInstructorScan(string userName, string userGuid)
         {
             try
@@ -3475,12 +4006,14 @@ These settings allow you to customize the attendance system behavior for differe
 
                 Console.WriteLine($"✅ VERIFIED: {userName} is confirmed as instructor ({userInfo.UserType})");
 
+                // Note: Security check for session ownership is now handled within each session state
+                // to allow door access for instructors with no scheduled class while preventing session control interference
+
                 // Set flag to block additional instructor scans during processing
                 isProcessingInstructorScan = true;
                 isPausedForInstructorAction = true; // NEW: Stop all scanning
 
                 SetStatusText($"Processing instructor scan for {userName}...");
-                
                 switch (currentSessionState)
                 {
                     case AttendanceSessionState.Inactive:
@@ -3494,6 +4027,29 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Timeout - reset verification state
                                 Console.WriteLine($"⏱️ INSTRUCTOR VERIFICATION TIMEOUT: {pendingCrossVerificationUser} took too long");
                                 SetStatusText($"⏱️ Verification timeout for {pendingCrossVerificationUser}. Starting over...");
+                                
+                                // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                                if (dbManager != null && !string.IsNullOrEmpty(pendingCrossVerificationGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: pendingCrossVerificationGuid,
+                                            roomId: null,
+                                            authMethod: firstScanType == "FINGERPRINT" ? "Fingerprint" : "RFID",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: $"Instructor verification timeout: {pendingCrossVerificationUser} did not complete dual authentication within {CROSS_VERIFICATION_TIMEOUT_SECONDS} seconds"
+                                        );
+                                        Console.WriteLine($"📝 Logged denied instructor verification timeout to ACCESSLOGS for {pendingCrossVerificationUser}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                    }
+                                }
+                                
                                 awaitingCrossTypeVerification = false;
                                 pendingCrossVerificationUser = "";
                                 pendingCrossVerificationGuid = "";
@@ -3509,91 +4065,133 @@ These settings allow you to customize the attendance system behavior for differe
                             // RFID was scanned first, now verifying with fingerprint
                             if (userName == pendingCrossVerificationUser && userGuid == pendingCrossVerificationGuid)
                             {
-                                // Verified! Reset state and proceed with session start
                                 Console.WriteLine($"✅ INSTRUCTOR VERIFIED: {userName} (RFID + Fingerprint match)");
                                 SetStatusText($"✅ Verified: {userName}. Starting session...");
                                 
-                                awaitingCrossTypeVerification = false;
-                                firstScanType = "";
-                                pendingCrossVerificationUser = "";
-                                pendingCrossVerificationGuid = "";
-                                crossVerificationStartTime = DateTime.MinValue;
-                                
-                                // Proceed with session start - schedule verification and start
-                                SetStatusText($"Verifying instructor schedule for {userName}...");
-                                
-                                if (dbManager != null)
+                                // Check if instructor has scheduled class, if not and door access is enabled, grant door access only
+                                var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userGuid);
+                                if (scheduleValidation == null || !scheduleValidation.IsValid || string.IsNullOrEmpty(scheduleValidation.ScheduleId))
                                 {
-                                    var validationResult = dbManager.TryRecordAttendanceByGuid(userGuid, "Instructor Schedule Check", null);
-                                    
-                                    if (!validationResult.Success)
+                                    // No scheduled class - check if door access is allowed
+                                    if (deviceConfig?.AllowInstructorDoorAccess == true)
                                     {
-                                        SetStatusText($"❌ {userName}: {validationResult.Reason}. Cannot start attendance session.");
-                                        Console.WriteLine($"❌ INSTRUCTOR {userName} DENIED: {validationResult.Reason}");
+                                        Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS: {userName} - No scheduled class, door access granted");
+                                        SetStatusText($"🚪 Instructor {userName} - Door access granted (no scheduled class).");
                                         
-                                        var denialRecord = new Database.Models.AttendanceRecord
+                                        // Create door access record
+                                        var doorAccessRecord = new Database.Models.AttendanceRecord
                                         {
                                             UserId = 0,
                                             Username = userName,
                                             Timestamp = DateTime.Now,
-                                            Action = "Instructor Sign-In (Session Start)",
-                                            Status = $"Denied: {validationResult.Reason}"
+                                            Action = "Door Access",
+                                            Status = "Instructor Door Access (No Schedule)"
                                         };
-                                        attendanceRecords.Add(denialRecord);
-                                        UpdateAttendanceDisplay(denialRecord);
+                                        attendanceRecords.Add(doorAccessRecord);
+                                        UpdateAttendanceDisplay(doorAccessRecord);
+                                        
+                                        // Log successful door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userGuid,
+                                                    roomId: null,
+                                                    authMethod: "Fingerprint",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class)"
+                                                );
+                                                Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userName}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Also record attendance so it appears in web logs (ATTENDANCERECORDS)
+                                        RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                        
+                                        // Trigger door access
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControl(userGuid, "Instructor Door Access");
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                            }
+                                        });
+                                        
+                                        // Reset verification state
+                                        awaitingCrossTypeVerification = false;
+                                        pendingCrossVerificationUser = "";
+                                        pendingCrossVerificationGuid = "";
+                                        firstScanType = "";
+                                        crossVerificationStartTime = DateTime.MinValue;
                                         
                                         ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                                         return;
                                     }
-                                    
-                                    // Instructor has valid schedule - proceed with session start
-                                    currentInstructorId = userGuid;
-                                    currentScheduleId = validationResult.ScheduleId ?? "manual_session";
-                                    currentSessionState = AttendanceSessionState.ActiveForStudents;
-                                    
-                                    signedInStudentGuids.Clear();
-                                    signedOutStudentGuids.Clear();
-                                    
-                                    awaitingCrossTypeVerification = false;
-                                    pendingCrossVerificationUser = "";
-                                    pendingCrossVerificationGuid = "";
-                                    firstScanType = "";
-                                    crossVerificationStartTime = DateTime.MinValue;
-                                    
-                                    UpdateSessionStateDisplay();
-                                    SetStatusText($"✅ Instructor {userName} signed in. Session started for {validationResult.SubjectName}. Students can now sign in.");
-                                    Console.WriteLine($"✅ SESSION STARTED - Students can now sign in for {validationResult.SubjectName}");
-                                    
-                                    _ = System.Threading.Tasks.Task.Run(async () => {
-                                        try
+                                    else
+                                    {
+                                        // Door access not enabled - deny
+                                        SetStatusText($"❌ {userName}: No scheduled class. Door access not enabled.");
+                                        Console.WriteLine($"❌ INSTRUCTOR {userName} DENIED: No scheduled class and door access not enabled");
+                                        
+                                        // Log denied access attempt to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
                                         {
-                                            RecordAttendance(userName, "Instructor Sign-In (Session Start)");
-                                            await RequestLockControl(userGuid, "Instructor Sign-In (Session Start)");
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userGuid,
+                                                    roomId: null,
+                                                    authMethod: "Fingerprint",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                );
+                                                Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                            }
                                         }
-                                        catch (Exception ex)
+                                        
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () =>
                                         {
-                                            Console.WriteLine($"Warning: Could not record instructor sign-in: {ex.Message}");
-                                        }
-                                    });
-                                }
-                                else
-                                {
-                                    SetStatusText($"⚠️ Warning: Cannot verify schedule. Database not available.");
-                                    currentInstructorId = userGuid;
-                                    currentScheduleId = "manual_session";
-                                    currentSessionState = AttendanceSessionState.ActiveForStudents;
-                                    signedInStudentGuids.Clear();
-                                    
-                                    awaitingCrossTypeVerification = false;
-                                    pendingCrossVerificationUser = "";
-                                    pendingCrossVerificationGuid = "";
-                                    firstScanType = "";
-                                    crossVerificationStartTime = DateTime.MinValue;
-                                    
-                                    UpdateSessionStateDisplay();
-                                    SetStatusText($"✅ Instructor {userName} signed in (unverified). Students can now sign in.");
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        // Reset verification state
+                                        awaitingCrossTypeVerification = false;
+                                        pendingCrossVerificationUser = "";
+                                        pendingCrossVerificationGuid = "";
+                                        firstScanType = "";
+                                        crossVerificationStartTime = DateTime.MinValue;
+                                        
+                                        ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                        return;
+                                    }
                                 }
                                 
+                                // Has scheduled class - proceed with session start
+                                CompleteInstructorSessionStart(userName, userGuid);
                                 ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                                 return;
                             }
@@ -3602,6 +4200,28 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Mismatch
                                 Console.WriteLine($"❌ INSTRUCTOR VERIFICATION FAILED: RFID={pendingCrossVerificationUser}, Fingerprint={userName}");
                                 SetStatusText($"❌ Verification failed! RFID: {pendingCrossVerificationUser}, Fingerprint: {userName}. Please try again.");
+                                
+                                // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                                if (dbManager != null && !string.IsNullOrEmpty(pendingCrossVerificationGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: pendingCrossVerificationGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: $"Instructor verification failed: RFID ({pendingCrossVerificationUser}) and Fingerprint ({userName}) mismatch"
+                                        );
+                                        Console.WriteLine($"📝 Logged denied instructor verification failure to ACCESSLOGS for {pendingCrossVerificationUser}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                    }
+                                }
                                 
                                 // Reset verification state
                                 awaitingCrossTypeVerification = false;
@@ -3616,28 +4236,149 @@ These settings allow you to customize the attendance system behavior for differe
                         }
                         else if (!awaitingCrossTypeVerification)
                         {
-                            // Fingerprint scanned first - wait for RFID
-                            Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID");
-                            SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to start session.");
-                            
-                            // Add record to show "Waiting for RFID" status
-                            var waitingRecord = new Database.Models.AttendanceRecord
+                            if (IsDualAuthRequired)
                             {
-                                UserId = 0,
-                                Username = userName,
-                                Timestamp = DateTime.Now,
-                                Action = "Waiting for RFID",
-                                Status = "Fingerprint First"
-                            };
-                            attendanceRecords.Add(waitingRecord);
-                            UpdateAttendanceDisplay(waitingRecord);
-                            
-                            awaitingCrossTypeVerification = true;
-                            firstScanType = "FINGERPRINT";
-                            pendingCrossVerificationUser = userName;
-                            pendingCrossVerificationGuid = userGuid;
-                            crossVerificationStartTime = DateTime.Now;
-                            
+                                Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID");
+                                SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to start session.");
+                                
+                                var waitingRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Waiting for RFID",
+                                    Status = "Fingerprint First"
+                                };
+                                attendanceRecords.Add(waitingRecord);
+                                UpdateAttendanceDisplay(waitingRecord);
+                                
+                                awaitingCrossTypeVerification = true;
+                                firstScanType = "FINGERPRINT";
+                                pendingCrossVerificationUser = userName;
+                                pendingCrossVerificationGuid = userGuid;
+                                crossVerificationStartTime = DateTime.Now;
+                                
+                                User user;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                                }
+                            }
+                            else
+                            {
+                                // Fingerprint-only mode - check schedule first
+                                var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userGuid);
+                                if (scheduleValidation == null || !scheduleValidation.IsValid || string.IsNullOrEmpty(scheduleValidation.ScheduleId))
+                                {
+                                    // No scheduled class - check if door access is allowed
+                                    if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                    {
+                                        Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS: {userName} - No scheduled class, door access granted");
+                                        SetStatusText($"🚪 Instructor {userName} - Door access granted (no scheduled class).");
+                                        
+                                        // Create door access record
+                                        var doorAccessRecord = new Database.Models.AttendanceRecord
+                                        {
+                                            UserId = 0,
+                                            Username = userName,
+                                            Timestamp = DateTime.Now,
+                                            Action = "Door Access",
+                                            Status = "Instructor Door Access (No Schedule)"
+                                        };
+                                        attendanceRecords.Add(doorAccessRecord);
+                                        UpdateAttendanceDisplay(doorAccessRecord);
+                                        
+                                        // Log successful door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userGuid,
+                                                    roomId: null,
+                                                    authMethod: "Fingerprint",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class)"
+                                                );
+                                                Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userName}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Also record attendance so it appears in web logs (ATTENDANCERECORDS)
+                                        RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                        
+                                        // Trigger door access
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControl(userGuid, "Instructor Door Access");
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                            }
+                                        });
+                                        
+                                        ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        // Door access not enabled - deny
+                                        SetStatusText($"❌ {userName}: No scheduled class. Door access not enabled.");
+                                        Console.WriteLine($"❌ INSTRUCTOR {userName} DENIED: No scheduled class and door access not enabled");
+                                        
+                                        // Log denied access attempt to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userGuid,
+                                                    roomId: null,
+                                                    authMethod: "Fingerprint",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                );
+                                                Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                        return;
+                                    }
+                                }
+                                
+                                // Has scheduled class - proceed with session start
+                                Console.WriteLine($"✅ Fingerprint-only mode active - completing instructor session start for {userName}");
+                                CompleteInstructorSessionStart(userName, userGuid);
+                            }
+
                             ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                             return;
                         }
@@ -3657,6 +4398,29 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Timeout - reset verification state
                                 Console.WriteLine($"⏱️ INSTRUCTOR FINGERPRINT SIGN-OUT VERIFICATION TIMEOUT: {pendingCrossVerificationUser} took too long");
                                 SetStatusText($"⏱️ Verification timeout for {pendingCrossVerificationUser}. Starting over...");
+                                
+                                // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                                if (dbManager != null && !string.IsNullOrEmpty(pendingCrossVerificationGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: pendingCrossVerificationGuid,
+                                            roomId: null,
+                                            authMethod: firstScanType == "FINGERPRINT" ? "Fingerprint" : "RFID",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: $"Instructor sign-out verification timeout: {pendingCrossVerificationUser} did not complete dual authentication within {CROSS_VERIFICATION_TIMEOUT_SECONDS} seconds"
+                                        );
+                                        Console.WriteLine($"📝 Logged denied instructor verification timeout to ACCESSLOGS for {pendingCrossVerificationUser}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                    }
+                                }
+                                
                                 awaitingCrossTypeVerification = false;
                                 pendingCrossVerificationUser = "";
                                 pendingCrossVerificationGuid = "";
@@ -3665,6 +4429,188 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Don't return - treat this as a new first scan
                             }
                         }
+                        else if (!IsDualAuthRequired)
+                        {
+                            // SECURITY CHECK: If not session owner, check if door access is allowed
+                            if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
+                            {
+                                // Different instructor - check if they have scheduled class
+                                var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userGuid);
+                                bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                
+                                if (hasScheduledClass)
+                                {
+                                    // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                    
+                                    // Log this security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                            Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Create denial record
+                                    var denialRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Access Denied",
+                                        Status = $"Session owned by {sessionOwnerName}"
+                                    };
+                                    attendanceRecords.Add(denialRecord);
+                                    UpdateAttendanceDisplay(denialRecord);
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                {
+                                    // No scheduled class but door access enabled - allow door access only
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint-only mode): {userName} - Door access granted (no schedule, different session active)");
+                                    SetStatusText($"🚪 Instructor {userName} - Door access granted. Session remains active for students.");
+                                    
+                                    // Create door access record
+                                    var doorAccessRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Door Access",
+                                        Status = "Instructor Door Access (No Schedule)"
+                                    };
+                                    attendanceRecords.Add(doorAccessRecord);
+                                    UpdateAttendanceDisplay(doorAccessRecord);
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted (no scheduled class, different session active, fingerprint-only mode)"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without changing session state
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestLockControl(userGuid, "Instructor Door Access (No Schedule)");
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                    return;
+                                }
+                                else
+                                {
+                                    // No scheduled class and door access not enabled - deny
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} attempted to open sign-out for session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can open sign-out.");
+                                    
+                                    // Log security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to open sign-out for session owned by different instructor. No scheduled class and door access not enabled. (Session Owner: {sessionOwnerName})"
+                                            );
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Create denial record
+                                    var denialRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Access Denied",
+                                        Status = $"Session owned by {sessionOwnerName}"
+                                    };
+                                    attendanceRecords.Add(denialRecord);
+                                    UpdateAttendanceDisplay(denialRecord);
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                            }
+                            
+                            Console.WriteLine($"✅ Fingerprint-only mode - opening sign-out for {userName}");
+
+                            awaitingCrossTypeVerification = false;
+                            firstScanType = "";
+                            pendingCrossVerificationUser = "";
+                            pendingCrossVerificationGuid = "";
+                            crossVerificationStartTime = DateTime.MinValue;
+
+                            currentSessionState = AttendanceSessionState.ActiveForSignOut;
+                            UpdateSessionStateDisplay();
+                            UpdateOledModeBlinkingState(); // Update OLED mode blinking
+                            SetStatusText($"✅ Instructor {userName} opened sign-out. Students can now sign out.");
+
+                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                            return;
+                        }
                         
                         // Check if completing dual-auth for sign-out
                         if (awaitingCrossTypeVerification && firstScanType == "RFID")
@@ -3672,6 +4618,50 @@ These settings allow you to customize the attendance system behavior for differe
                             // RFID was scanned first, now verifying with fingerprint
                             if (userName == pendingCrossVerificationUser && userGuid == pendingCrossVerificationGuid)
                             {
+                                // SECURITY CHECK: Only session owner can open sign-out
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
+                                {
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} attempted to open sign-out for session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can open sign-out.");
+                                    
+                                    // Reset verification state
+                                    awaitingCrossTypeVerification = false;
+                                    firstScanType = "";
+                                    pendingCrossVerificationUser = "";
+                                    pendingCrossVerificationGuid = "";
+                                    crossVerificationStartTime = DateTime.MinValue;
+                                    
+                                    // Log security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to open sign-out for session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                
                                 // Verified! Reset state and proceed with sign-out
                                 Console.WriteLine($"✅ INSTRUCTOR VERIFIED FOR SIGN-OUT: {userName} (RFID + Fingerprint match)");
                                 SetStatusText($"✅ Verified: {userName}. Opening sign-out...");
@@ -3685,6 +4675,7 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Proceed with sign-out
                                 currentSessionState = AttendanceSessionState.ActiveForSignOut;
                                 UpdateSessionStateDisplay();
+                                UpdateOledModeBlinkingState(); // Update OLED mode blinking
                                 SetStatusText($"✅ Instructor {userName} opened sign-out. Students can now sign out.");
                                 
                                 Console.WriteLine($"🔄 SIGN-OUT PHASE ACTIVE - Students can now sign out");
@@ -3698,6 +4689,28 @@ These settings allow you to customize the attendance system behavior for differe
                                 Console.WriteLine($"❌ INSTRUCTOR VERIFICATION FAILED: RFID={pendingCrossVerificationUser}, Fingerprint={userName}");
                                 SetStatusText($"❌ Verification failed! RFID: {pendingCrossVerificationUser}, Fingerprint: {userName}. Please try again.");
                                 
+                                // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                                if (dbManager != null && !string.IsNullOrEmpty(pendingCrossVerificationGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: pendingCrossVerificationGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: $"Instructor sign-out verification failed: RFID ({pendingCrossVerificationUser}) and Fingerprint ({userName}) mismatch"
+                                        );
+                                        Console.WriteLine($"📝 Logged denied instructor verification failure to ACCESSLOGS for {pendingCrossVerificationUser}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                    }
+                                }
+                                
                                 awaitingCrossTypeVerification = false;
                                 pendingCrossVerificationUser = "";
                                 pendingCrossVerificationGuid = "";
@@ -3710,30 +4723,260 @@ These settings allow you to customize the attendance system behavior for differe
                         }
                         else if (!awaitingCrossTypeVerification)
                         {
-                            // Fingerprint scanned first - wait for RFID
-                            Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID to open sign-out");
-                            SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to open sign-out.");
-                            
-                            // Add record to show "Waiting for RFID" status
-                            var waitingRecord = new Database.Models.AttendanceRecord
+                            // SECURITY CHECK: If not session owner, check if door access is allowed
+                            if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
                             {
-                                UserId = 0,
-                                Username = userName,
-                                Timestamp = DateTime.Now,
-                                Action = "Waiting for RFID",
-                                Status = "Fingerprint First"
-                            };
-                            attendanceRecords.Add(waitingRecord);
-                            UpdateAttendanceDisplay(waitingRecord);
+                                // Different instructor - check if they have scheduled class
+                                var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userGuid);
+                                bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                
+                                if (hasScheduledClass)
+                                {
+                                    // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                    
+                                    // Log this security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                            Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Create denial record
+                                    var denialRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Access Denied",
+                                        Status = $"Session owned by {sessionOwnerName}"
+                                    };
+                                    attendanceRecords.Add(denialRecord);
+                                    UpdateAttendanceDisplay(denialRecord);
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                {
+                                    // No scheduled class but door access enabled - allow door access only
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint): {userName} - Door access granted (no schedule, different session active)");
+                                    SetStatusText($"🚪 Instructor {userName} - Door access granted. Session remains active for students.");
+                                    
+                                    // Create door access record
+                                    var doorAccessRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Door Access",
+                                        Status = "Instructor Door Access (No Schedule)"
+                                    };
+                                    attendanceRecords.Add(doorAccessRecord);
+                                    UpdateAttendanceDisplay(doorAccessRecord);
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted (no scheduled class, different session active)"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without changing session state
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestLockControl(userGuid, "Instructor Door Access (No Schedule)");
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                    return;
+                                }
+                                else
+                                {
+                                    // No scheduled class and door access not enabled - deny
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                    
+                                    // Log denied access
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled."
+                                            );
+                                            Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                            }
                             
-                            awaitingCrossTypeVerification = true;
-                            firstScanType = "FINGERPRINT";
-                            pendingCrossVerificationUser = userName;
-                            pendingCrossVerificationGuid = userGuid;
-                            crossVerificationStartTime = DateTime.Now;
-                            
-                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
-                            return;
+                            // Session owner or no active session - proceed with normal flow
+                            // NEW LOGIC: During active session, single scan grants door access without changing state
+                            if (IsDualAuthRequired)
+                            {
+                                Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint): {userName} - Door access granted, session remains active");
+                                SetStatusText($"🚪 Instructor {userName} - Door access granted. Session remains active for students.");
+                                
+                                // Create door access record
+                                var doorAccessRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Door Access",
+                                    Status = "Instructor Door Access (Session Active)"
+                                };
+                                attendanceRecords.Add(doorAccessRecord);
+                                UpdateAttendanceDisplay(doorAccessRecord);
+                                
+                                // Log door access to ACCESSLOGS
+                                if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: userGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "success",
+                                            reason: "Instructor door access granted during active session"
+                                        );
+                                        Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                    }
+                                }
+                                
+                                // Record attendance for door access
+                                RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                
+                                // Trigger door access without changing session state
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestLockControl(userGuid, "Instructor Door Access (Session Active)");
+                                    }
+                                    catch (Exception lockEx)
+                                    {
+                                        Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                    }
+                                });
+                                
+                                // Start waiting for second scan to open sign-out
+                                awaitingCrossTypeVerification = true;
+                                firstScanType = "FINGERPRINT";
+                                pendingCrossVerificationUser = userName;
+                                pendingCrossVerificationGuid = userGuid;
+                                crossVerificationStartTime = DateTime.Now;
+                                
+                                ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                return;
+                            }
+                            else
+                            {
+                                // Fingerprint-only mode: This shouldn't happen in ActiveForStudents state with single auth
+                                // but keeping original logic as fallback
+                                Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID to open sign-out");
+                                SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to open sign-out.");
+                                
+                                // Add record to show "Waiting for RFID" status
+                                var waitingRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Waiting for RFID",
+                                    Status = "Fingerprint First"
+                                };
+                                attendanceRecords.Add(waitingRecord);
+                                UpdateAttendanceDisplay(waitingRecord);
+                                
+                                awaitingCrossTypeVerification = true;
+                                firstScanType = "FINGERPRINT";
+                                pendingCrossVerificationUser = userName;
+                                pendingCrossVerificationGuid = userGuid;
+                                crossVerificationStartTime = DateTime.Now;
+                                
+                                // Send intermediate status to ESP32
+                                User user;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "FINGERPRINT", "RFID", "/api/lock-control"));
+                                }
+                                
+                                ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                return;
+                            }
                         }
                         
                         // If we reach here, we're still awaiting verification from first scan
@@ -3751,6 +4994,29 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Timeout - reset verification state
                                 Console.WriteLine($"⏱️ INSTRUCTOR FINGERPRINT SESSION-END VERIFICATION TIMEOUT: {pendingCrossVerificationUser} took too long");
                                 SetStatusText($"⏱️ Verification timeout for {pendingCrossVerificationUser}. Starting over...");
+                                
+                                // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                                if (dbManager != null && !string.IsNullOrEmpty(pendingCrossVerificationGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: pendingCrossVerificationGuid,
+                                            roomId: null,
+                                            authMethod: firstScanType == "FINGERPRINT" ? "Fingerprint" : "RFID",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: $"Instructor session-end verification timeout: {pendingCrossVerificationUser} did not complete dual authentication within {CROSS_VERIFICATION_TIMEOUT_SECONDS} seconds"
+                                        );
+                                        Console.WriteLine($"📝 Logged denied instructor verification timeout to ACCESSLOGS for {pendingCrossVerificationUser}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                    }
+                                }
+                                
                                 awaitingCrossTypeVerification = false;
                                 pendingCrossVerificationUser = "";
                                 pendingCrossVerificationGuid = "";
@@ -3759,6 +5025,211 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Don't return - treat this as a new first scan
                             }
                         }
+                        else if (!IsDualAuthRequired)
+                        {
+                            // Fingerprint-only mode
+                            // SECURITY CHECK: If not session owner, check if door access is allowed
+                            if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
+                            {
+                                // Different instructor - check if they have scheduled class
+                                var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userGuid);
+                                bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                
+                                if (hasScheduledClass)
+                                {
+                                    // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                    
+                                    // Log this security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                            Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Create denial record
+                                    var denialRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Access Denied",
+                                        Status = $"Session owned by {sessionOwnerName}"
+                                    };
+                                    attendanceRecords.Add(denialRecord);
+                                    UpdateAttendanceDisplay(denialRecord);
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                {
+                                    // No scheduled class but door access enabled - allow door access only
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint-only mode, sign-out state): {userName} - Door access granted (no schedule, different session active)");
+                                    SetStatusText($"🚪 Instructor {userName} - Door access granted. Sign-out session remains active.");
+                                    
+                                    // Create door access record
+                                    var doorAccessRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Door Access",
+                                        Status = "Instructor Door Access (No Schedule)"
+                                    };
+                                    attendanceRecords.Add(doorAccessRecord);
+                                    UpdateAttendanceDisplay(doorAccessRecord);
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted (no scheduled class, different session active, fingerprint-only mode, sign-out state)"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without ending session
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestLockControl(userGuid, "Instructor Door Access (No Schedule)");
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                    return;
+                                }
+                                else
+                                {
+                                    // No scheduled class and door access not enabled - deny
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                    
+                                    // Log denied access
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled. (Session Owner: {sessionOwnerName})"
+                                            );
+                                            Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Create denial record
+                                    var denialRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Access Denied",
+                                        Status = $"Session owned by {sessionOwnerName}"
+                                    };
+                                    attendanceRecords.Add(denialRecord);
+                                    UpdateAttendanceDisplay(denialRecord);
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                            }
+                            
+                            Console.WriteLine($"✅ Fingerprint-only mode - ending session for {userName}");
+
+                            awaitingCrossTypeVerification = false;
+                            firstScanType = "";
+                            pendingCrossVerificationUser = "";
+                            pendingCrossVerificationGuid = "";
+                            crossVerificationStartTime = DateTime.MinValue;
+
+                            currentSessionState = AttendanceSessionState.Inactive;
+                            currentInstructorId = null;
+                            currentScheduleId = null;
+                            currentSubjectName = null;
+                            currentInstructorName = null;
+
+                            signedInStudentGuids.Clear();
+                            signedOutStudentGuids.Clear();
+
+                            UpdateSessionStateDisplay();
+                            UpdateOledModeBlinkingState(); // Stop OLED mode blinking
+                            SetStatusText($"✅ Instructor {userName} signed out. Session ended.");
+
+                            _ = System.Threading.Tasks.Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    RecordAttendance(userName, "Instructor Sign-Out (Session End)");
+                                    await RequestLockControl(userGuid, "Instructor Sign-Out (Session End)");
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Warning: Could not record instructor sign-out: {ex.Message}");
+                                }
+                            });
+
+                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                            return;
+                        }
                         
                         // Check if completing dual-auth for session-end
                         if (awaitingCrossTypeVerification && firstScanType == "RFID")
@@ -3766,6 +5237,50 @@ These settings allow you to customize the attendance system behavior for differe
                             // RFID was scanned first, now verifying with fingerprint
                             if (userName == pendingCrossVerificationUser && userGuid == pendingCrossVerificationGuid)
                             {
+                                // SECURITY CHECK: Only session owner can end session
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
+                                {
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} attempted to end session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can end the session.");
+                                    
+                                    // Reset verification state
+                                    awaitingCrossTypeVerification = false;
+                                    firstScanType = "";
+                                    pendingCrossVerificationUser = "";
+                                    pendingCrossVerificationGuid = "";
+                                    crossVerificationStartTime = DateTime.MinValue;
+                                    
+                                    // Log security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to end session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                
                                 // Verified! Reset state and proceed with session-end
                                 Console.WriteLine($"✅ INSTRUCTOR VERIFIED FOR SESSION-END: {userName} (RFID + Fingerprint match)");
                                 SetStatusText($"✅ Verified: {userName}. Ending session...");
@@ -3780,11 +5295,14 @@ These settings allow you to customize the attendance system behavior for differe
                                 currentSessionState = AttendanceSessionState.Inactive;
                                 currentInstructorId = null;
                                 currentScheduleId = null;
+                                currentSubjectName = null;
+                                currentInstructorName = null;
                                 
                                 signedInStudentGuids.Clear();
                                 signedOutStudentGuids.Clear();
                                 
                                 UpdateSessionStateDisplay();
+                                UpdateOledModeBlinkingState(); // Stop OLED mode blinking
                                 SetStatusText($"✅ Instructor {userName} signed out. Session ended.");
                                 
                                 Console.WriteLine($"🔚 SESSION CLOSED - Instructor signed out, all students cleared");
@@ -3811,6 +5329,28 @@ These settings allow you to customize the attendance system behavior for differe
                                 Console.WriteLine($"❌ INSTRUCTOR VERIFICATION FAILED: RFID={pendingCrossVerificationUser}, Fingerprint={userName}");
                                 SetStatusText($"❌ Verification failed! RFID: {pendingCrossVerificationUser}, Fingerprint: {userName}. Please try again.");
                                 
+                                // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                                if (dbManager != null && !string.IsNullOrEmpty(pendingCrossVerificationGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: pendingCrossVerificationGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: $"Instructor session-end verification failed: RFID ({pendingCrossVerificationUser}) and Fingerprint ({userName}) mismatch"
+                                        );
+                                        Console.WriteLine($"📝 Logged denied instructor verification failure to ACCESSLOGS for {pendingCrossVerificationUser}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                    }
+                                }
+                                
                                 awaitingCrossTypeVerification = false;
                                 pendingCrossVerificationUser = "";
                                 pendingCrossVerificationGuid = "";
@@ -3823,30 +5363,227 @@ These settings allow you to customize the attendance system behavior for differe
                         }
                         else if (!awaitingCrossTypeVerification)
                         {
-                            // Fingerprint scanned first - wait for RFID
-                            Console.WriteLine($"🔍 INSTRUCTOR FINGERPRINT: {userName} - Waiting for RFID to end session");
-                            SetStatusText($"Instructor fingerprint: {userName}. Please scan RFID to end session.");
-                            
-                            // Add record to show "Waiting for RFID" status
-                            var waitingRecord = new Database.Models.AttendanceRecord
+                            // SECURITY CHECK: If not session owner, check if door access is allowed
+                            if (!string.IsNullOrEmpty(currentInstructorId) && userGuid != currentInstructorId)
                             {
-                                UserId = 0,
-                                Username = userName,
-                                Timestamp = DateTime.Now,
-                                Action = "Waiting for RFID",
-                                Status = "Fingerprint First"
-                            };
-                            attendanceRecords.Add(waitingRecord);
-                            UpdateAttendanceDisplay(waitingRecord);
+                                // Different instructor - check if they have scheduled class
+                                var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userGuid);
+                                bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                
+                                if (hasScheduledClass)
+                                {
+                                    // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                    
+                                    // Log this security event
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                            );
+                                            Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Create denial record
+                                    var denialRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Access Denied",
+                                        Status = $"Session owned by {sessionOwnerName}"
+                                    };
+                                    attendanceRecords.Add(denialRecord);
+                                    UpdateAttendanceDisplay(denialRecord);
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                                else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                {
+                                    // No scheduled class but door access enabled - allow door access only
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint): {userName} - Door access granted (no schedule, different session active)");
+                                    SetStatusText($"🚪 Instructor {userName} - Door access granted. Sign-out session remains active.");
+                                    
+                                    // Create door access record
+                                    var doorAccessRecord = new Database.Models.AttendanceRecord
+                                    {
+                                        UserId = 0,
+                                        Username = userName,
+                                        Timestamp = DateTime.Now,
+                                        Action = "Door Access",
+                                        Status = "Instructor Door Access (No Schedule)"
+                                    };
+                                    attendanceRecords.Add(doorAccessRecord);
+                                    UpdateAttendanceDisplay(doorAccessRecord);
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted (no scheduled class, different session active)"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without ending session
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestLockControl(userGuid, "Instructor Door Access (No Schedule)");
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                    return;
+                                }
+                                else
+                                {
+                                    // No scheduled class and door access not enabled - deny
+                                    string sessionOwnerName = userName;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                    {
+                                        sessionOwnerName = sessionOwner.Username;
+                                    }
+                                    
+                                    Console.WriteLine($"⚠️ SECURITY: Instructor {userName} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                    SetStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                    
+                                    // Log denied access
+                                    if (dbManager != null)
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userGuid,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled."
+                                            );
+                                            Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    ScheduleNextGetBaseTemplate(1000);
+                                    return;
+                                }
+                            }
                             
-                            awaitingCrossTypeVerification = true;
-                            firstScanType = "FINGERPRINT";
-                            pendingCrossVerificationUser = userName;
-                            pendingCrossVerificationGuid = userGuid;
-                            crossVerificationStartTime = DateTime.Now;
-                            
-                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
-                            return;
+                            // Session owner or no active session - proceed with normal flow
+                            // NEW LOGIC: During active sign-out session, single scan grants door access without ending session
+                            if (IsDualAuthRequired)
+                            {
+                                Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (Fingerprint): {userName} - Door access granted, session remains active");
+                                SetStatusText($"🚪 Instructor {userName} - Door access granted. Sign-out session remains active.");
+                                
+                                // Create door access record
+                                var doorAccessRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = 0,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Door Access",
+                                    Status = "Instructor Door Access (Sign-Out Active)"
+                                };
+                                attendanceRecords.Add(doorAccessRecord);
+                                UpdateAttendanceDisplay(doorAccessRecord);
+                                
+                                // Log door access to ACCESSLOGS
+                                if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: userGuid,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "success",
+                                            reason: "Instructor door access granted during sign-out session"
+                                        );
+                                        Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userName}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                    }
+                                }
+                                
+                                // Record attendance for door access
+                                RecordAttendance(userName, "Door Access", true, currentScanLocation);
+                                
+                                // Trigger door access without ending session
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestLockControl(userGuid, "Instructor Door Access (Sign-Out Active)");
+                                    }
+                                    catch (Exception lockEx)
+                                    {
+                                        Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                    }
+                                });
+                                
+                                // Start waiting for second scan to end session
+                                awaitingCrossTypeVerification = true;
+                                firstScanType = "FINGERPRINT";
+                                pendingCrossVerificationUser = userName;
+                                pendingCrossVerificationGuid = userGuid;
+                                crossVerificationStartTime = DateTime.Now;
+                                
+                                ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                return;
+                            }
+                            // Note: Fingerprint-only mode is already handled in the earlier else if (!IsDualAuthRequired) block
+                            // This else block is only reached for dual-auth mode (IsDualAuthRequired == true)
                         }
                         
                         // If we reach here, we're still awaiting verification from first scan
@@ -3874,6 +5611,155 @@ These settings allow you to customize the attendance system behavior for differe
             }
         }
         
+        private bool CompleteInstructorSessionStart(string userName, string userGuid, bool isRfidFlow = false, string rfidData = null)
+        {
+            ResetCrossVerificationState();
+
+            if (dbManager != null)
+            {
+                SetStatusText($"Verifying instructor schedule for {userName}...");
+
+                var validationResult = dbManager.TryRecordAttendanceByGuid(userGuid, "Instructor Schedule Check", null);
+                if (validationResult == null || !validationResult.Success)
+                {
+                    var failureReason = validationResult?.Reason ?? "Cannot start attendance session";
+                    SetStatusText($"❌ {userName}: {failureReason}. Cannot start attendance session.");
+                    Console.WriteLine($"❌ INSTRUCTOR {userName} DENIED: {failureReason}");
+
+                    // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                    {
+                        try
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: userGuid,
+                                roomId: null,
+                                authMethod: isRfidFlow ? "RFID" : "Fingerprint",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Instructor session start denied: {failureReason}"
+                            );
+                            Console.WriteLine($"📝 Logged denied instructor session start attempt to ACCESSLOGS for {userName}");
+                        }
+                        catch (Exception logEx)
+                        {
+                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                        }
+                    }
+
+                    if (isRfidFlow)
+                    {
+                        AddRfidAttendanceRecord(userName, "Session Start Denied", failureReason);
+                    }
+                    else
+                    {
+                        var denialRecord = new Database.Models.AttendanceRecord
+                        {
+                            UserId = 0,
+                            Username = userName,
+                            Timestamp = DateTime.Now,
+                            Action = "Instructor Sign-In (Session Start)",
+                            Status = $"Denied: {failureReason}"
+                        };
+                        attendanceRecords.Add(denialRecord);
+                        UpdateAttendanceDisplay(denialRecord);
+                    }
+
+                    _ = System.Threading.Tasks.Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await RequestLockControlDenial(userGuid, userName, failureReason, "instructor");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                        }
+                    });
+
+                    return false;
+                }
+
+                currentInstructorId = userGuid;
+                currentScheduleId = validationResult.ScheduleId ?? "manual_session";
+                currentSessionState = AttendanceSessionState.ActiveForStudents;
+                
+                // Store session info for OLED display
+                currentSubjectName = string.IsNullOrWhiteSpace(validationResult.SubjectName) ? "Current Subject" : validationResult.SubjectName;
+                currentInstructorName = userName;
+
+                signedInStudentGuids.Clear();
+                signedOutStudentGuids.Clear();
+
+                UpdateSessionStateDisplay();
+                UpdateOledModeBlinkingState(); // Start OLED mode blinking
+                var subjectName = string.IsNullOrWhiteSpace(validationResult.SubjectName) ? "current subject" : validationResult.SubjectName;
+                SetStatusText($"✅ Instructor {userName} signed in. Session started for {subjectName}. Students can now sign in.");
+                Console.WriteLine($"✅ SESSION STARTED - Students can now sign in for {subjectName}");
+
+                if (isRfidFlow)
+                {
+                    AddRfidAttendanceRecord(userName, "Session Started", $"Active - {subjectName}");
+
+                    _ = System.Threading.Tasks.Task.Run(async () =>
+                    {
+                        try
+                        {
+                            RecordAttendance(userName, "Instructor Sign-In (Session Start)");
+                            await RequestRfidLockControl(userGuid, "Instructor Sign-In (Session Start)", rfidData);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not record instructor sign-in: {ex.Message}");
+                        }
+                    });
+                }
+                else
+                {
+                    _ = System.Threading.Tasks.Task.Run(async () =>
+                    {
+                        try
+                        {
+                            RecordAttendance(userName, "Instructor Sign-In (Session Start)");
+                            await RequestLockControl(userGuid, "Instructor Sign-In (Session Start)");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not record instructor sign-in: {ex.Message}");
+                        }
+                    });
+                }
+                
+                return true;
+            }
+            else
+            {
+                SetStatusText($"⚠️ Warning: Cannot verify schedule. Database not available.");
+                currentInstructorId = userGuid;
+                currentScheduleId = "manual_session";
+                currentSessionState = AttendanceSessionState.ActiveForStudents;
+                
+                // Store session info for OLED display
+                currentSubjectName = "Manual Session";
+                currentInstructorName = userName;
+
+                signedInStudentGuids.Clear();
+                signedOutStudentGuids.Clear();
+
+                UpdateSessionStateDisplay();
+                UpdateOledModeBlinkingState(); // Start OLED mode blinking
+                SetStatusText($"✅ Instructor {userName} signed in (unverified). Students can now sign in.");
+                
+                if (isRfidFlow)
+                {
+                    AddRfidAttendanceRecord(userName, "Session Started", "Active (Unverified)");
+                }
+                
+                return true;
+            }
+        }
+
         private void ProcessCustodianScan(string userName, string userGuid)
         {
             try
@@ -3904,6 +5790,9 @@ These settings allow you to customize the attendance system behavior for differe
                         Console.WriteLine($"Lock control failed: {lockEx.Message}");
                     }
                 });
+                
+                // Also record attendance so it appears in web logs
+                RecordAttendance(userName, "Door Access", true, currentScanLocation);
                 
                 ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
             }
@@ -3950,6 +5839,9 @@ These settings allow you to customize the attendance system behavior for differe
                     };
                     attendanceRecords.Add(doorAccessRecord);
                     UpdateAttendanceDisplay(doorAccessRecord);
+
+                    // Also record administrative access as attendance for visibility
+                    RecordAttendance(userName, "Door Access", true, currentScanLocation);
                 }
                 
                 // Always trigger door access for deans
@@ -3973,7 +5865,6 @@ These settings allow you to customize the attendance system behavior for differe
                 ScheduleNextGetBaseTemplate(1000);
             }
         }
-        
         private void ProcessStudentScan(string userName, string userGuid)
         {
             try
@@ -3988,8 +5879,88 @@ These settings allow you to customize the attendance system behavior for differe
                         currentSessionState != AttendanceSessionState.ActiveForSignOut &&
                         currentSessionState != AttendanceSessionState.WaitingForInstructorSignOut)
                     {
-                        Console.WriteLine($"❌ No active session - denying door access for student {userName}");
-                        SetStatusText($"❌ No active session. Door access denied for {userName}.");
+                        // No active session - handle EARLY ARRIVAL dual-auth
+                        if (IsFingerprintOnlyMode && !awaitingEarlyArrivalVerification)
+                        {
+                            awaitingEarlyArrivalVerification = true;
+                            earlyFirstScanType = "RFID";
+                            earlyPendingUser = userName;
+                            earlyPendingGuid = userGuid;
+                            earlyVerificationStartTime = DateTime.Now;
+                        }
+                        
+                        // Timeout check
+                        if (awaitingEarlyArrivalVerification)
+                        {
+                            var elapsed = DateTime.Now - earlyVerificationStartTime;
+                            if (elapsed.TotalSeconds > CROSS_VERIFICATION_TIMEOUT_SECONDS)
+                            {
+                                Console.WriteLine($"⏱️ EARLY ARRIVAL VERIFICATION TIMEOUT: {earlyPendingUser} took too long");
+                                SetStatusText($"⏱️ Verification timeout for {earlyPendingUser}. Starting over...");
+                                awaitingEarlyArrivalVerification = false;
+                                earlyFirstScanType = "";
+                                earlyPendingUser = "";
+                                earlyPendingGuid = "";
+                            }
+                        }
+
+                            if (awaitingEarlyArrivalVerification && earlyFirstScanType == "RFID")
+                            {
+                                // RFID was scanned first, now verifying with fingerprint
+                                if (userName == earlyPendingUser && userGuid == earlyPendingGuid)
+                                {
+                                    Console.WriteLine($"✅ EARLY ARRIVAL VERIFIED: {userName} (RFID + Fingerprint)");
+                                    SetStatusText($"✅ Verified: {userName}. Recording early arrival...");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+
+                                    System.Threading.Tasks.Task.Run(async () => {
+                                        try { await RecordEarlyArrivalFingerprint(userName, userGuid); } catch (Exception ex) { Console.WriteLine($"Early arrival record failed: {ex.Message}"); }
+                                    });
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"❌ EARLY ARRIVAL VERIFICATION FAILED: RFID={earlyPendingUser}, Fingerprint={userName}");
+                                    SetStatusText($"❌ Verification failed! RFID: {earlyPendingUser}, Fingerprint: {userName}. Please try again.");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+                                }
+                            }
+                        else if (awaitingEarlyArrivalVerification && earlyFirstScanType == "FINGERPRINT")
+                        {
+                            // Already waiting for RFID - ignore this fingerprint scan
+                            Console.WriteLine($"⏳ Early arrival: Waiting for RFID for {earlyPendingUser}. Ignoring duplicate fingerprint scan.");
+                            SetStatusText($"Waiting for RFID scan. Please scan your RFID card to complete early arrival.");
+                            
+                            // Remind user on OLED to scan RFID
+                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                try { await RequestInfoDisplay(userGuid, userName, "Waiting for RFID scan..."); } catch { }
+                            });
+                            
+                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                            return;
+                        }
+                        else if (!awaitingEarlyArrivalVerification)
+                        {
+                            // Start early-arrival verification with fingerprint first
+                            awaitingEarlyArrivalVerification = true;
+                            earlyFirstScanType = "FINGERPRINT";
+                            earlyPendingUser = userName;
+                            earlyPendingGuid = userGuid;
+                            earlyVerificationStartTime = DateTime.Now;
+                            Console.WriteLine($"🧭 EARLY ARRIVAL: Fingerprint captured for {userName}. Awaiting RFID...");
+                            SetStatusText($"Fingerprint OK. Please scan RFID to complete early arrival.");
+
+                            // Show first scan acceptance on OLED
+                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                try { await RequestInfoDisplay(userGuid, userName, "Fingerprint OK. Scan RFID now."); } catch { }
+                            });
+                        }
+
                         ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
                         return;
                     }
@@ -4029,6 +6000,45 @@ These settings allow you to customize the attendance system behavior for differe
                 switch (currentSessionState)
                 {
                     case AttendanceSessionState.ActiveForStudents:
+                        if (IsFingerprintOnlyMode)
+                        {
+                            if (signedInStudentGuids.Contains(userGuid))
+                            {
+                                SetStatusText($"⚠️ Student {userName} already signed in - allowing door access.");
+                                Console.WriteLine($"⚠️ STUDENT {userName} ALREADY SIGNED IN - ALLOWING DOOR ACCESS");
+
+                                System.Threading.Tasks.Task.Run(() =>
+                                {
+                                    try
+                                    {
+                                        RecordAttendance(userName, "Student Already Signed In - Door Access", false);
+
+                                        System.Threading.Tasks.Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+                                                await RequestLockControl(userGuid, "Student Already Signed In - Door Access");
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control request failed for already signed in student: {lockEx.Message}");
+                                            }
+                                        });
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"Warning: Could not record attendance: {ex.Message}");
+                                    }
+                                });
+                            }
+                            else
+                            {
+                                ProcessVerifiedStudentSignIn(userName, userGuid);
+                            }
+
+                            break;
+                        }
+
                         // Check for cross-type verification timeout first
                         if (awaitingCrossTypeVerification)
                         {
@@ -4243,6 +6253,13 @@ These settings allow you to customize the attendance system behavior for differe
                                 pendingCrossVerificationUser = userName;
                                 pendingCrossVerificationGuid = userGuid;
                                 crossVerificationStartTime = DateTime.Now;
+                                
+                                // Send intermediate status to ESP32
+                                User userForStatus;
+                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out userForStatus))
+                                {
+                                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(userForStatus, "FINGERPRINT", "RFID", "/api/lock-control"));
+                                }
                             }
                         }
                         
@@ -4250,69 +6267,110 @@ These settings allow you to customize the attendance system behavior for differe
                         break;
                         
                     case AttendanceSessionState.ActiveForSignOut:
-                        // CRITICAL: DUAL-AUTHENTICATION REQUIRED FOR STUDENT SIGN-OUT
-                        // Check for verification timeout first
-                        if (awaitingCrossTypeVerification)
+                        // Check if fingerprint-only mode - process sign-out immediately
+                        if (IsFingerprintOnlyMode)
                         {
-                            var verificationElapsed = DateTime.Now - crossVerificationStartTime;
-                            if (verificationElapsed.TotalSeconds > CROSS_VERIFICATION_TIMEOUT_SECONDS)
+                            if (signedOutStudentGuids.Contains(userGuid))
                             {
-                                // Timeout - reset verification state
-                                Console.WriteLine($"⏱️ STUDENT FINGERPRINT SIGN-OUT VERIFICATION TIMEOUT: {pendingCrossVerificationUser} took too long");
-                                SetStatusText($"⏱️ Verification timeout for {pendingCrossVerificationUser}. Starting over...");
-                                awaitingCrossTypeVerification = false;
-                                pendingCrossVerificationUser = "";
-                                pendingCrossVerificationGuid = "";
-                                firstScanType = "";
-                                crossVerificationStartTime = DateTime.MinValue;
-                                // Don't return - treat this as a new first scan
+                                SetStatusText($"⚠️ Student {userName} already signed out - allowing door access.");
+                                Console.WriteLine($"⚠️ STUDENT {userName} ALREADY SIGNED OUT - ALLOWING DOOR ACCESS");
+
+                                System.Threading.Tasks.Task.Run(() =>
+                                {
+                                    try
+                                    {
+                                        RecordAttendance(userName, "Student Already Signed Out - Door Access", false);
+
+                                        System.Threading.Tasks.Task.Run(async () =>
+                                        {
+                                            try
+                                            {
+                                                await RequestLockControl(userGuid, "Student Already Signed Out - Door Access");
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control request failed for already signed out student: {lockEx.Message}");
+                                            }
+                                        });
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"Warning: Could not record attendance: {ex.Message}");
+                                    }
+                                });
                             }
-                        }
-                        
-                        // If already signed out in this session, show message but still allow door access
-                        if (signedOutStudentGuids.Contains(userGuid))
-                        {
-                            SetStatusText($"⚠️ Student {userName} already signed out - allowing door access.");
-                            System.Threading.Tasks.Task.Run(() => {
-                                try { 
-                                    RecordAttendance(userName, "Student Already Signed Out - Door Access", false);
+                            else
+                            {
+                                // CRITICAL FIX: Validate student enrollment before processing sign-out
+                                // Get user info for validation
+                                User user = null;
+                                if (userLookupByUsername != null)
+                                {
+                                    userLookupByUsername.TryGetValue(userName, out user);
+                                }
+                                
+                                if (user != null && !string.IsNullOrEmpty(user.EmployeeId) && dbManager != null)
+                                {
+                                    // Validate enrollment using the same method as sign-in
+                                    var validationAttempt = dbManager.TryRecordAttendanceByGuid(user.EmployeeId, "Student Sign-In", null);
                                     
-                                    // STILL SEND LOCK CONTROL REQUEST for already signed out students
-                                    // This allows them to go in and out during the session
-                                    System.Threading.Tasks.Task.Run(async () => {
+                                    if (validationAttempt == null || !validationAttempt.Success)
+                                    {
+                                        // Student is not enrolled - deny sign-out
+                                        var reason = validationAttempt?.Reason ?? "Student is not enrolled in any class scheduled at this time";
+                                        SetStatusText($"❌ Student {userName}: {reason}");
+                                        Console.WriteLine($"❌ STUDENT {userName} SIGN-OUT DENIED: {reason}");
+                                        
+                                        // Log denied access attempt to ACCESSLOGS
                                         try
                                         {
-                                            await RequestLockControl(userGuid, "Student Already Signed Out - Door Access");
+                                            dbManager.LogAccessAttempt(
+                                                userId: user.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: reason
+                                            );
+                                            Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
                                         }
-                                        catch (Exception lockEx)
+                                        catch (Exception logEx)
                                         {
-                                            Console.WriteLine($"Lock control request failed for already signed out student: {lockEx.Message}");
+                                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
                                         }
-                                    });
-                                } catch {}
-                            });
-                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
-                            break;
-                        }
-                        
-                        // Check if completing RFID-first verification for sign-out
-                        if (awaitingCrossTypeVerification && firstScanType == "RFID")
-                        {
-                            // RFID was scanned first, now verifying with fingerprint
-                            if (userName == pendingCrossVerificationUser && userGuid == pendingCrossVerificationGuid)
-                            {
-                                // ✅ VERIFIED: RFID + Fingerprint match!
-                                Console.WriteLine($"✅ CROSS-TYPE VERIFICATION SUCCESS FOR SIGN-OUT: {userName} (RFID + Fingerprint match)");
-                                SetStatusText($"✅ Verified: {userName}. Processing sign-out...");
+                                        
+                                        // Create denial record
+                                        int userIdInt = user.Id;
+                                        var denialRecord = new Database.Models.AttendanceRecord
+                                        {
+                                            UserId = userIdInt,
+                                            Username = userName,
+                                            Timestamp = DateTime.Now,
+                                            Action = "Student Sign-Out",
+                                            Status = $"Denied: {reason}"
+                                        };
+                                        attendanceRecords.Add(denialRecord);
+                                        UpdateAttendanceDisplay(denialRecord);
+                                        
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, reason, "student");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                        break;
+                                    }
+                                }
                                 
-                                // Reset verification state
-                                awaitingCrossTypeVerification = false;
-                                pendingCrossVerificationUser = "";
-                                pendingCrossVerificationGuid = "";
-                                firstScanType = "";
-                                crossVerificationStartTime = DateTime.MinValue;
-                                
-                                // Process verified sign-out
+                                // Process sign-out immediately with fingerprint-only (only if validation passed)
                                 System.Threading.Tasks.Task.Run(() => {
                                     try
                                     {
@@ -4386,6 +6444,251 @@ These settings allow you to customize the attendance system behavior for differe
                                                 UpdateAttendanceDisplay(local);
                                             }
                                         }));
+                                        
+                                        // Show session mode display after scan (both success and denied)
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await System.Threading.Tasks.Task.Delay(6000); // Wait for scan result to display
+                                                await RequestSessionModeDisplay(isRfid: false);
+                                            }
+                                            catch { }
+                                        });
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"Warning: Could not record sign-out: {ex.Message}");
+                                        this.Invoke(new Action(() => SetStatusText($"❌ Error during sign-out: {ex.Message}")));
+                                    }
+                                });
+                            }
+
+                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                            break;
+                        }
+
+                        // CRITICAL: DUAL-AUTHENTICATION REQUIRED FOR STUDENT SIGN-OUT (dual-auth mode only)
+                        // Check for verification timeout first
+                        if (awaitingCrossTypeVerification)
+                        {
+                            var verificationElapsed = DateTime.Now - crossVerificationStartTime;
+                            if (verificationElapsed.TotalSeconds > CROSS_VERIFICATION_TIMEOUT_SECONDS)
+                            {
+                                // Timeout - reset verification state
+                                Console.WriteLine($"⏱️ STUDENT FINGERPRINT SIGN-OUT VERIFICATION TIMEOUT: {pendingCrossVerificationUser} took too long");
+                                SetStatusText($"⏱️ Verification timeout for {pendingCrossVerificationUser}. Starting over...");
+                                awaitingCrossTypeVerification = false;
+                                pendingCrossVerificationUser = "";
+                                pendingCrossVerificationGuid = "";
+                                firstScanType = "";
+                                crossVerificationStartTime = DateTime.MinValue;
+                                // Don't return - treat this as a new first scan
+                            }
+                        }
+                        
+                        // If already signed out in this session, show message but still allow door access
+                        if (signedOutStudentGuids.Contains(userGuid))
+                        {
+                            SetStatusText($"⚠️ Student {userName} already signed out - allowing door access.");
+                            System.Threading.Tasks.Task.Run(() => {
+                                try { 
+                                    RecordAttendance(userName, "Student Already Signed Out - Door Access", false);
+                                    
+                                    // STILL SEND LOCK CONTROL REQUEST for already signed out students
+                                    // This allows them to go in and out during the session
+                                    System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestLockControl(userGuid, "Student Already Signed Out - Door Access");
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control request failed for already signed out student: {lockEx.Message}");
+                                        }
+                                    });
+                                } catch {}
+                            });
+                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                            break;
+                        }
+                        
+                        // Check if completing RFID-first verification for sign-out
+                        if (awaitingCrossTypeVerification && firstScanType == "RFID")
+                        {
+                            // RFID was scanned first, now verifying with fingerprint
+                            if (userName == pendingCrossVerificationUser && userGuid == pendingCrossVerificationGuid)
+                            {
+                                // ✅ VERIFIED: RFID + Fingerprint match!
+                                Console.WriteLine($"✅ CROSS-TYPE VERIFICATION SUCCESS FOR SIGN-OUT: {userName} (RFID + Fingerprint match)");
+                                SetStatusText($"✅ Verified: {userName}. Processing sign-out...");
+                                
+                                // Reset verification state
+                                awaitingCrossTypeVerification = false;
+                                pendingCrossVerificationUser = "";
+                                pendingCrossVerificationGuid = "";
+                                firstScanType = "";
+                                crossVerificationStartTime = DateTime.MinValue;
+                                
+                                // CRITICAL FIX: Validate student enrollment before processing sign-out
+                                // Get user info for validation
+                                User user = null;
+                                if (userLookupByUsername != null)
+                                {
+                                    userLookupByUsername.TryGetValue(userName, out user);
+                                }
+                                
+                                if (user != null && !string.IsNullOrEmpty(user.EmployeeId) && dbManager != null)
+                                {
+                                    // Validate enrollment using the same method as sign-in
+                                    var validationAttempt = dbManager.TryRecordAttendanceByGuid(user.EmployeeId, "Student Sign-In", null);
+                                    
+                                    if (validationAttempt == null || !validationAttempt.Success)
+                                    {
+                                        // Student is not enrolled - deny sign-out
+                                        var reason = validationAttempt?.Reason ?? "Student is not enrolled in any class scheduled at this time";
+                                        SetStatusText($"❌ Student {userName}: {reason}");
+                                        Console.WriteLine($"❌ STUDENT {userName} SIGN-OUT DENIED: {reason}");
+                                        
+                                        // Reset verification state
+                                        awaitingCrossTypeVerification = false;
+                                        pendingCrossVerificationUser = "";
+                                        pendingCrossVerificationGuid = "";
+                                        firstScanType = "";
+                                        crossVerificationStartTime = DateTime.MinValue;
+                                        
+                                        // Log denied access attempt to ACCESSLOGS
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: user.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "Fingerprint",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "denied",
+                                                reason: reason
+                                            );
+                                            Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                        }
+                                        
+                                        // Create denial record
+                                        int userIdInt = user.Id;
+                                        var denialRecord = new Database.Models.AttendanceRecord
+                                        {
+                                            UserId = userIdInt,
+                                            Username = userName,
+                                            Timestamp = DateTime.Now,
+                                            Action = "Student Sign-Out",
+                                            Status = $"Denied: {reason}"
+                                        };
+                                        attendanceRecords.Add(denialRecord);
+                                        UpdateAttendanceDisplay(denialRecord);
+                                        
+                                        // Send denial message to ESP32 for OLED display
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestLockControlDenial(userGuid, userName, reason, "student");
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                        return;
+                                    }
+                                }
+                                
+                                // Process verified sign-out (only if validation passed)
+                                System.Threading.Tasks.Task.Run(() => {
+                                    try
+                                    {
+                                        var attempt = dbManager?.TryRecordAttendanceByGuid(userGuid, "Student Sign-Out", null);
+                                        this.Invoke(new Action(() => {
+                                            if (attempt != null && attempt.Success)
+                                            {
+                                                // Success: update local state and UI
+                                                // Only remove from signed in if they were actually signed in
+                                                bool wasSignedIn = signedInStudentGuids.Contains(userGuid);
+                                                if (wasSignedIn)
+                                                {
+                                                    signedInStudentGuids.Remove(userGuid);
+                                                }
+                                                signedOutStudentGuids.Add(userGuid);
+                                                
+                                                string successMessage = wasSignedIn 
+                                                    ? $"✅ Student {userName} signed out."
+                                                    : $"✅ Student {userName} signed out (was not signed in).";
+                                                SetStatusText(successMessage);
+
+                                                // Add local record for display
+                                                int userIdInt = 0;
+                                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out var u))
+                                                {
+                                                    userIdInt = u.Id;
+                                                }
+                                                var local = new Database.Models.AttendanceRecord
+                                                {
+                                                    UserId = userIdInt,
+                                                    Username = userName,
+                                                    Timestamp = DateTime.Now,
+                                                    Action = "Student Sign-Out",
+                                                    Status = "Success"
+                                                };
+                                                attendanceRecords.Add(local);
+                                                UpdateAttendanceDisplay(local);
+                                                
+                                                // Request lock control for successful student sign-out
+                                                System.Threading.Tasks.Task.Run(async () => {
+                                                    try
+                                                    {
+                                                        await RequestLockControl(userGuid, "Student Sign-Out");
+                                                    }
+                                                    catch (Exception lockEx)
+                                                    {
+                                                        Console.WriteLine($"Lock control request failed: {lockEx.Message}");
+                                                    }
+                                                });
+                                            }
+                                            else
+                                            {
+                                                // Denied: do not mark as signed out
+                                                var reason = attempt?.Reason ?? "Denied";
+                                                SetStatusText($"❌ {userName}: {reason}");
+
+                                                int userIdInt = 0;
+                                                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out var u2))
+                                                {
+                                                    userIdInt = u2.Id;
+                                                }
+                                                var local = new Database.Models.AttendanceRecord
+                                                {
+                                                    UserId = userIdInt,
+                                                    Username = userName,
+                                                    Timestamp = DateTime.Now,
+                                                    Action = "Student Sign-Out",
+                                                    Status = $"Denied: {reason}"
+                                                };
+                                                attendanceRecords.Add(local);
+                                                UpdateAttendanceDisplay(local);
+                                            }
+                                        }));
+                                        
+                                        // Show session mode display after scan (both success and denied)
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await System.Threading.Tasks.Task.Delay(6000); // Wait for scan result to display
+                                                await RequestSessionModeDisplay(isRfid: false);
+                                            }
+                                            catch { }
+                                        });
                                     }
                                     catch (Exception ex)
                                     {
@@ -4440,6 +6743,13 @@ These settings allow you to customize the attendance system behavior for differe
                         attendanceRecords.Add(studentSignOutWaitingRecord);
                         UpdateAttendanceDisplay(studentSignOutWaitingRecord);
                         
+                        // Send intermediate status to ESP32
+                        User userForSignOut;
+                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out userForSignOut))
+                        {
+                            _ = Task.Run(async () => await SendIntermediateStatusToESP32(userForSignOut, "FINGERPRINT", "RFID", "/api/lock-control"));
+                        }
+                        
                         // Set cross-type verification state
                         awaitingCrossTypeVerification = true;
                         firstScanType = "FINGERPRINT";
@@ -4453,15 +6763,95 @@ These settings allow you to customize the attendance system behavior for differe
                     case AttendanceSessionState.Inactive:
                     case AttendanceSessionState.WaitingForInstructor:
                         SetStatusText("❌ No active session. Instructor must start the session first.");
+                        
+                        // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                        {
+                            try
+                            {
+                                dbManager.LogAccessAttempt(
+                                    userId: userGuid,
+                                    roomId: null,
+                                    authMethod: "Fingerprint",
+                                    location: currentScanLocation ?? "inside",
+                                    accessType: "attendance_scan",
+                                    result: "denied",
+                                    reason: "No active session. Instructor must start the session first."
+                                );
+                                Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                            }
+                            catch (Exception logEx)
+                            {
+                                Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                            }
+                        }
+                        
+                        // Send denial message to ESP32 for OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestLockControlDenial(userGuid, userName, "No active session. Instructor must start the session first.", "student");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                            }
+                        });
                         break;
                         
                     case AttendanceSessionState.WaitingForInstructorSignOut:
                     case AttendanceSessionState.WaitingForInstructorClose:
                         SetStatusText("❌ Session not ready for student actions. Please wait for instructor.");
+                        
+                        // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                        if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                        {
+                            try
+                            {
+                                dbManager.LogAccessAttempt(
+                                    userId: userGuid,
+                                    roomId: null,
+                                    authMethod: "Fingerprint",
+                                    location: currentScanLocation ?? "inside",
+                                    accessType: "attendance_scan",
+                                    result: "denied",
+                                    reason: "Session not ready for student actions. Please wait for instructor."
+                                );
+                                Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                            }
+                            catch (Exception logEx)
+                            {
+                                Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                            }
+                        }
+                        
+                        // Send denial message to ESP32 for OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestLockControlDenial(userGuid, userName, "Session not ready for student actions. Please wait for instructor.", "student");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                            }
+                        });
                         break;
                         
                     default:
                         SetStatusText("❌ Invalid session state for student action.");
+                        
+                        // Send denial message to ESP32 for OLED display
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestLockControlDenial(userGuid, userName, "Invalid session state for student action.", "student");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                            }
+                        });
                         break;
                 }
             }
@@ -4518,28 +6908,38 @@ These settings allow you to customize the attendance system behavior for differe
                                 };
                                 attendanceRecords.Add(local);
                                 UpdateAttendanceDisplay(local);
-                                
-                                // Request lock control for successful student sign-in
-                                System.Threading.Tasks.Task.Run(async () => {
-                                    try
-                                    {
-                                        await RequestLockControl(user.EmployeeId, "Student Sign-In");
-                                    }
-                                    catch (Exception lockEx)
-                                    {
-                                        Console.WriteLine($"Lock control request failed: {lockEx.Message}");
-                                    }
-                                });
                             }
                             else
                             {
+                                // Student validation failed - send denial message to ESP32
                                 // DENIED: Ensure not marked as signed-in
                                 signedInStudentGuids.Remove(userGuid);
-                                SetStatusText($"❌ {userName}: {attempt.Reason}");
-                                Console.WriteLine($"❌ STUDENT {userName} DENIED: {attempt.Reason}");
+                                SetStatusText($"❌ Student {userName}: {attempt.Reason}");
+                                Console.WriteLine($"❌ STUDENT {userName} SIGN-IN DENIED: {attempt.Reason}");
                                 
-                                // Record denial for display
-                                var local = new Database.Models.AttendanceRecord
+                                // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                                if (dbManager != null && !string.IsNullOrEmpty(user.EmployeeId))
+                                {
+                                    try
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: user.EmployeeId,
+                                            roomId: null, // Will use CurrentRoomId from DatabaseManager
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: attempt.Reason ?? "Validation failed"
+                                        );
+                                        Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                                    }
+                                    catch (Exception logEx)
+                                    {
+                                        Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                    }
+                                }
+                                
+                                var denialRecord = new Database.Models.AttendanceRecord
                                 {
                                     UserId = user.Id,
                                     Username = userName,
@@ -4547,10 +6947,47 @@ These settings allow you to customize the attendance system behavior for differe
                                     Action = "Student Sign-In",
                                     Status = $"Denied: {attempt.Reason}"
                                 };
-                                attendanceRecords.Add(local);
-                                UpdateAttendanceDisplay(local);
+                                attendanceRecords.Add(denialRecord);
+                                UpdateAttendanceDisplay(denialRecord);
+                                
+                                // Send denial message to ESP32 for OLED display
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestLockControlDenial(userGuid, userName, attempt.Reason ?? "Validation failed", "student");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                    }
+                                });
                             }
                         }));
+                        
+                        // Request lock control for successful student sign-in (only if successful, outside UI thread)
+                        if (attempt.Success)
+                        {
+                            System.Threading.Tasks.Task.Run(async () => {
+                                try
+                                {
+                                    await RequestLockControl(user.EmployeeId, "Student Sign-In");
+                                }
+                                catch (Exception lockEx)
+                                {
+                                    Console.WriteLine($"Lock control request failed: {lockEx.Message}");
+                                }
+                            });
+                        }
+                        
+                        // Show session mode display after scan (both success and denied)
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await System.Threading.Tasks.Task.Delay(6000); // Wait for scan result to display
+                                await RequestSessionModeDisplay(isRfid: false);
+                            }
+                            catch { }
+                        });
                     }
                 }
                 catch (Exception ex)
@@ -4587,8 +7024,6 @@ These settings allow you to customize the attendance system behavior for differe
                 return null;
             }
         }
-
-
         private void OnEnrollmentComplete(bool success, int retCode)
         {
             try
@@ -4620,12 +7055,16 @@ These settings allow you to customize the attendance system behavior for differe
 						// Add fingerprint to existing user (don't create new user)
 						if (selectedUser != null && !string.IsNullOrEmpty(selectedUser.EmployeeId))
 						{
+							// Get existing fingerprint count before adding
+							int existingCount = dbManager.GetFingerprintCount(selectedUser.EmployeeId);
+							
 							bool fingerprintAdded = dbManager.AddFingerprintToExistingUser(selectedUser.EmployeeId, userRecord.Template);
 							
 							if (fingerprintAdded)
 							{
-								SetStatusText($"Enrollment successful! Fingerprint added for '{selectedUser.FirstName} {selectedUser.LastName}'.");
-								UpdateEnrollmentGuidance(5, "Done! You can proceed to attendance.");
+								int newCount = existingCount + 1;
+								SetStatusText($"Enrollment successful! Fingerprint #{newCount} added for '{selectedUser.FirstName} {selectedUser.LastName}'.");
+								UpdateEnrollmentGuidance(5, $"Done! Fingerprint #{newCount} saved. You can add another fingerprint or proceed.");
 								
 								// Refresh user data from database and update display
 								try
@@ -4641,9 +7080,99 @@ These settings allow you to customize the attendance system behavior for differe
 								{
 									SetStatusText($"Enrollment successful, but failed to refresh user list: {ex.Message}");
 								}
+
+                        // Force refresh users immediately so identification sees the new template
+                        try
+                        {
+                            SyncUsersFromCloud();
+                            this.Invoke(new Action(() =>
+                            {
+                                RefreshUserList();
+                            }));
+                        }
+                        catch (Exception ex)
+                        {
+                            SetStatusText($"Error refreshing users: {ex.Message}");
+                        }
 								
-								// Clear selection after refresh
-								ClearSelection();
+								// Perform cleanup BEFORE showing dialog to avoid conflicts
+								// This ensures the operation is fully disposed before we try to restart
+								try
+								{
+									UnregisterEnrollmentEvents();
+									if (m_Operation != null)
+									{
+										try { m_Operation.Dispose(); } catch { }
+										m_Operation = null;
+									}
+									m_OperationObj = null;
+								}
+								catch (Exception cleanupEx)
+								{
+									Console.WriteLine($"Cleanup error: {cleanupEx.Message}");
+								}
+								
+								// Reset enrollment flags
+								m_bEnrollmentInProgress = false;
+								isEnrollmentActive = false;
+								
+								// Show option to add another fingerprint after cleanup is complete
+								// Use BeginInvoke to avoid blocking the background thread
+								if (this.IsHandleCreated && !this.IsDisposed)
+								{
+									this.BeginInvoke(new Action(() =>
+									{
+										EnableControls(true);
+										
+										var result = MessageBox.Show(
+											$"Fingerprint #{newCount} successfully enrolled!\n\n" +
+											$"Total fingerprints for this user: {newCount}\n\n" +
+											$"Would you like to enroll another fingerprint for this user?",
+											"Enrollment Complete",
+											MessageBoxButtons.YesNo,
+											MessageBoxIcon.Question);
+										
+										if (result == DialogResult.Yes)
+										{
+											// Ensure user is still selected and form fields are populated
+											if (selectedUser != null && isUserSelected)
+											{
+												// Re-populate form fields to ensure they're set
+												PopulateFormFields(selectedUser);
+												
+												// Update UI to show selected user
+												lblSelectedUser.Text = $"Selected: {selectedUser.FirstName} {selectedUser.LastName} ({selectedUser.UserType})";
+												lblSelectedUser.ForeColor = Color.DarkGreen;
+												btnEnroll.Enabled = true;
+												btnEnroll.Text = $"Start Enrollment for {selectedUser.FirstName}";
+												
+												// Start new enrollment - operation is already cleaned up
+												if (!m_bEnrollmentInProgress && !isEnrollmentActive)
+												{
+													StartEnrollment();
+												}
+												else
+												{
+													SetStatusText("Please wait for current enrollment to complete.");
+												}
+											}
+											else
+											{
+												SetStatusText("User selection lost. Please select the user again.");
+												MessageBox.Show(
+													"User selection was lost. Please select the user from the table again.",
+													"Selection Lost",
+													MessageBoxButtons.OK,
+													MessageBoxIcon.Warning);
+											}
+										}
+										else
+										{
+											// Clear selection
+											ClearSelection();
+										}
+									}));
+								}
 							}
 							else
 							{
@@ -4656,22 +7185,6 @@ These settings allow you to customize the attendance system behavior for differe
 							SetStatusText("Error: No user selected for enrollment.");
 							UpdateEnrollmentGuidance(0, "Please select a user first.");
 						}
-
-                        // Force refresh users immediately so identification sees the new template
-                        try
-                        {
-                            SyncUsersFromCloud();
-                            this.Invoke(new Action(() =>
-                            {
-                                RefreshUserList();
-                                // If admin has fingerprint users tab open/access, refresh it too
-                                LoadFingerprintUsers();
-                            }));
-                        }
-                        catch (Exception ex)
-                        {
-                            SetStatusText($"Error refreshing users: {ex.Message}");
-                        }
 					}
 					catch (Exception dbEx)
 					{
@@ -4684,6 +7197,7 @@ These settings allow you to customize the attendance system behavior for differe
                     UpdateEnrollmentGuidance(0, "Enrollment failed. Press 'Start Enrollment' to try again.");
                     isEnrollmentActive = false;
                     try { enrollProgressTimer?.Stop(); } catch { }
+                    // Don't reset m_bEnrollmentInProgress here - let finally block handle cleanup
                 }
             }
             catch (Exception ex)
@@ -4693,13 +7207,33 @@ These settings allow you to customize the attendance system behavior for differe
             }
             finally
             {
-                // Reset enrollment state
-                m_bEnrollmentInProgress = false;
-                isEnrollmentActive = false;
-                try { enrollProgressTimer?.Stop(); } catch { }
-                
-                UnregisterEnrollmentEvents();
-                EnableControls(true);
+                // Reset enrollment state (only if not already reset in success path)
+                // The success path handles cleanup, but we need to ensure flags are reset for failure cases
+                if (m_bEnrollmentInProgress || isEnrollmentActive)
+                {
+                    m_bEnrollmentInProgress = false;
+                    isEnrollmentActive = false;
+                    try { enrollProgressTimer?.Stop(); } catch { }
+                    
+                    // Clean up enrollment operation (only if not already cleaned up)
+                    try
+                    {
+                        if (m_Operation != null)
+                        {
+                            UnregisterEnrollmentEvents();
+                            try { m_Operation.Dispose(); } catch { }
+                            m_Operation = null;
+                        }
+                        m_OperationObj = null;
+                    }
+                    catch { }
+                    
+                    // Only enable controls if we're handling cleanup here (failure case)
+                    if (this.IsHandleCreated && !this.IsDisposed)
+                    {
+                        this.BeginInvoke(new Action(() => EnableControls(true)));
+                    }
+                }
                 
                 // CRITICAL: Reset identifying flag to allow attendance restart
                 isIdentifying = false;
@@ -4711,11 +7245,14 @@ These settings allow you to customize the attendance system behavior for differe
                     {
                         if (!m_bExit && alwaysOnAttendance && !m_bEnrollmentInProgress)
                         {
-                            this.Invoke(new Action(() => 
+                            if (this.IsHandleCreated && !this.IsDisposed)
                             {
-                                SetStatusText("Restarting attendance after enrollment...");
-                                StartIdentification();
-                            }));
+                                this.BeginInvoke(new Action(() => 
+                                {
+                                    SetStatusText("Restarting attendance after enrollment...");
+                                    StartIdentification();
+                                }));
+                            }
                         }
                     });
                 }
@@ -4757,10 +7294,67 @@ These settings allow you to customize the attendance system behavior for differe
                     ExitIdleMode();
                 }
                 
-                if (success)
+                // QUALITY VALIDATION: Only process SUCCESSFUL scans if we had a valid finger placement
+                // Failed scans (retCode != 0) don't require valid placement - they're errors that need to be handled
+                // EXCEPTION: During verification, allow processing even if placement timeout expired (finger stays on)
+                bool isVerificationPendingForPlacement = pendingVerificationUser != null && 
+                                        (DateTime.Now - pendingVerificationTime).TotalMilliseconds < VERIFICATION_TIMEOUT_MS;
+                bool placementStillValid = (hasValidFingerPlacement && 
+                                         (DateTime.Now - lastValidPutOnTime).TotalMilliseconds < VALID_PLACEMENT_TIMEOUT_MS) ||
+                                         isVerificationPendingForPlacement; // Allow during verification
+                
+                // For failed scans, always show error message and reset flags
+                if (!success)
                 {
+                    // Reset flags on failure to allow retry
+                    hasValidFingerPlacement = false;
+                    isFingerOnScanner = false;
+                    
+                    // Show appropriate error message based on retCode
+                    string errorMsg = retCode == 0 ? "No finger detected" : $"Template capture failed: {retCode}";
+                    SetStatusText($"{errorMsg}. Please place finger firmly and try again.");
+                    Console.WriteLine($"⚠️ {errorMsg}");
+                    // Increased delay to give user time to reposition finger properly
+                    ScheduleNextGetBaseTemplate(1500);
+                    return;
+                }
+                
+                // For successful template capture, require valid finger placement
+                if (success && placementStillValid)
+                {
+                    // Fingerprint-only/RFID-only gating
+                    if (deviceConfig?.AllowRfidOnly == true)
+                    {
+                        SetStatusText("RFID-only mode: please scan your RFID card.");
+                        Console.WriteLine("⚠️ Fingerprint scan blocked - RFID-only mode active. Sending OLED denial warning...");
+                        _ = ShowModeRestrictionWarningAsync(true);
+                        // Reset flags to allow subsequent scans
+                        hasValidFingerPlacement = false;
+                        isFingerOnScanner = false;
+                        ScheduleNextGetBaseTemplate(800);
+                        return;
+                    }
+                    
                     lastScanTime = DateTime.Now;
                     SetStatusText("Processing identification...");
+                    
+                    // Check if verification is pending - if so, don't reset flags yet
+                    // This allows the scanner to continue detecting the finger for the second scan
+                    bool isVerificationPending = pendingVerificationUser != null && 
+                                        (DateTime.Now - pendingVerificationTime).TotalMilliseconds < VERIFICATION_TIMEOUT_MS;
+                    
+                    // Reset valid placement flag since we're processing the scan
+                    // BUT: Keep flags true if verification is pending to allow second scan detection
+                    if (!isVerificationPending)
+                    {
+                        hasValidFingerPlacement = false;
+                        isFingerOnScanner = false;
+                    }
+                    else
+                    {
+                        // Keep finger detected during verification - will be reset after verification completes
+                        Console.WriteLine("⏳ Verification pending - keeping finger detected for second scan");
+                    }
                     
                     // Take a snapshot to avoid concurrent modifications
                     var users = m_IdentificationUsers != null ? new List<UserRecord>(m_IdentificationUsers) : null;
@@ -4865,6 +7459,61 @@ These settings allow you to customize the attendance system behavior for differe
                         {
                             string userName = users[matchIndex].UserName;
                             
+                            // Check if user can authenticate with Fingerprint (per-user + global settings)
+                            User matchedUser = null;
+                            if (userLookupByUsername != null)
+                            {
+                                userLookupByUsername.TryGetValue(userName, out matchedUser);
+                            }
+                            
+                            if (matchedUser != null && !CanUserAuthenticateWith(matchedUser, "FINGERPRINT"))
+                            {
+                                Console.WriteLine($"❌ Fingerprint authentication disabled for user {userName}");
+                                SetStatusText($"❌ Fingerprint authentication is disabled for {userName}. Please use RFID.");
+                                
+                                // Log denied access
+                                try
+                                {
+                                    if (dbManager != null)
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: matchedUser.EmployeeId,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: currentScanLocation ?? "inside",
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: "Fingerprint authentication disabled for this user"
+                                        );
+                                    }
+                                }
+                                catch (Exception logEx)
+                                {
+                                    Console.WriteLine($"⚠️ Failed to log denied fingerprint access: {logEx.Message}");
+                                }
+                                
+                                // Reset flags and schedule next scan
+                                hasValidFingerPlacement = false;
+                                isFingerOnScanner = false;
+                                ScheduleNextGetBaseTemplate(1500);
+                                return;
+                            }
+                            
+                            // MATCH VALIDATION: Check if this match is suspicious
+                            // If we recently processed a different user and this match seems inconsistent,
+                            // require a second scan for verification to prevent false matches
+                            var timeSinceLastProcess = DateTime.Now - lastProcessedTime;
+                            if (lastProcessedUser != null && 
+                                lastProcessedUser != userName && 
+                                lastProcessedUser != "" &&
+                                timeSinceLastProcess.TotalMilliseconds < 3000) // Within 3 seconds
+                            {
+                                Console.WriteLine($"⚠️ WARNING: Match changed from {lastProcessedUser} to {userName} within {timeSinceLastProcess.TotalMilliseconds}ms - requiring verification");
+                                SetStatusText($"⚠️ Match verification needed. Please scan again to confirm: {userName}");
+                                ScheduleNextGetBaseTemplate(1000);
+                                return; // Don't process yet - suspicious match change
+                            }
+                            
                             // Set location based on which sensor detected the scan
                             // In dual-sensor mode, determine which sensor is active
                             // Default to "inside" for manual tab scans
@@ -4912,25 +7561,164 @@ These settings allow you to customize the attendance system behavior for differe
                                 SetStatusText($"Error processing scan: {ex.Message}");
                             }
                             
-                            ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
-                        }
-                        else
-                        {
-                            SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
-                            ScheduleNextGetBaseTemplate(1000);
-                        }
-                    }
-                    else
-                    {
-                        SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
-                        ScheduleNextGetBaseTemplate(1000);
-                    }
+                                                          ScheduleNextGetBaseTemplate(SCAN_INTERVAL_ACTIVE_MS);
+                                                    }
+                            else
+                            {
+                              // Allow door override for unknown fingerprints if enabled (independent of finger-on state)
+                              bool overrideOpened = false;
+                              if (deviceConfig?.AllowUnauthorizedFingerprints == true)
+                              {
+                                  var sinceLast = DateTime.Now - lastUnauthorizedDoorOpenTime;
+                                  if (sinceLast.TotalMilliseconds >= UNAUTHORIZED_DOOR_DEBOUNCE_MS)
+                                  {
+                                      overrideOpened = true;
+                                      lastUnauthorizedDoorOpenTime = DateTime.Now;
+                                      Console.WriteLine("🔓 Allowing door override for unknown fingerprint (attendance flow)");
+                                      SetStatusText("🔓 Door override requested for unknown fingerprint.");
+                                      _ = System.Threading.Tasks.Task.Run(async () => {
+                                          try { await RequestAnonymousLockControl(currentScanLocation ?? "inside", "Door override for unknown fingerprint"); } catch { }
+                                      });
+                                  }
+                                  else
+                                  {
+                                      Console.WriteLine("⏳ Door override debounced in attendance flow");
+                                  }
+                              }
+
+                              // Don't log unknown scans while finger is still on scanner (prevents spam)
+                              if (!isFingerOnScanner || overrideOpened)
+                              {
+                                  // Debounce unknown scan logging to prevent spam
+                                  var timeSinceLastUnknownLog = DateTime.Now - lastUnknownScanLogTime;
+                                  if (overrideOpened || timeSinceLastUnknownLog.TotalMilliseconds >= UNKNOWN_SCAN_DEBOUNCE_MS)
+                                  {
+                                      // Log unknown fingerprint scan to ACCESSLOGS table
+                                      try
+                                      {
+                                          if (dbManager != null)
+                                          {
+                                              dbManager.LogAccessAttempt(
+                                                  userId: null, // NULL for unknown user
+                                                  roomId: null, // Will use CurrentRoomId from DatabaseManager
+                                                  authMethod: "Fingerprint",
+                                                  location: currentScanLocation ?? "inside",
+                                                  accessType: "attendance_scan",
+                                                  result: overrideOpened ? "granted" : "denied",
+                                                  reason: overrideOpened ? "Door override enabled for unknown fingerprint" : $"Unknown fingerprint - no match found (matchIndex: {matchIndex}, users count: {users.Count})"
+                                              );
+                                              Console.WriteLine($"📝 Logged unknown fingerprint scan to ACCESSLOGS: {currentScanLocation ?? "inside"}");
+                                              lastUnknownScanLogTime = DateTime.Now;
+                                          }
+                                      }
+                                      catch (Exception logEx)
+                                      {
+                                          Console.WriteLine($"⚠️ Failed to log unknown fingerprint scan: {logEx.Message}");
+                                          // Continue even if logging fails
+                                      }
+                                  }
+                                  else
+                                  {
+                                      Console.WriteLine($"⏳ Unknown scan debounced - waiting {Math.Ceiling((UNKNOWN_SCAN_DEBOUNCE_MS - timeSinceLastUnknownLog.TotalMilliseconds) / 1000)}s before logging again");
+                                  }
+                              }
+                              else
+                              {
+                                  Console.WriteLine("⏸️ Skipping unknown scan log - finger still on scanner");
+                              }
+                              
+                              SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
+                              // Notify ESP32 to show 'No match' on OLED        
+                              _ = System.Threading.Tasks.Task.Run(async () => { 
+                                  try { await RequestNoMatchDisplay(); } catch { }  
+                              });
+                              ScheduleNextGetBaseTemplate(1000);
+                          }
+                      }
+                      else
+                      {
+                          // Allow door override for identification failure as well (attendance flow)
+                          bool overrideOpened2 = false;
+                          if (deviceConfig?.AllowUnauthorizedFingerprints == true)
+                          {
+                              var sinceLast = DateTime.Now - lastUnauthorizedDoorOpenTime;
+                              if (sinceLast.TotalMilliseconds >= UNAUTHORIZED_DOOR_DEBOUNCE_MS)
+                              {
+                                  overrideOpened2 = true;
+                                  lastUnauthorizedDoorOpenTime = DateTime.Now;
+                                  Console.WriteLine("🔓 Allowing door override for unknown fingerprint (identification failed)");
+                                  SetStatusText("🔓 Door override requested for unknown fingerprint.");
+                                  _ = System.Threading.Tasks.Task.Run(async () => {
+                                      try { await RequestAnonymousLockControl(currentScanLocation ?? "inside", "Door override for unknown fingerprint"); } catch { }
+                                  });
+                              }
+                              else
+                              {
+                                  Console.WriteLine("⏳ Door override debounced in attendance flow (identification failed)");
+                              }
+                          }
+
+                          // Don't log unknown scans while finger is still on scanner (prevents spam)
+                          if (!isFingerOnScanner || overrideOpened2)
+                          {
+                              // Debounce unknown scan logging to prevent spam
+                              var timeSinceLastUnknownLog = DateTime.Now - lastUnknownScanLogTime;
+                              if (overrideOpened2 || timeSinceLastUnknownLog.TotalMilliseconds >= UNKNOWN_SCAN_DEBOUNCE_MS)
+                              {
+                                  // Log unknown fingerprint scan to ACCESSLOGS table (identification failed)
+                                  try
+                                  {
+                                      if (dbManager != null)
+                                      {
+                                          dbManager.LogAccessAttempt(
+                                              userId: null, // NULL for unknown user
+                                              roomId: null, // Will use CurrentRoomId from DatabaseManager
+                                              authMethod: "Fingerprint",
+                                              location: currentScanLocation ?? "inside",
+                                              accessType: "attendance_scan",
+                                              result: overrideOpened2 ? "granted" : "denied",
+                                              reason: overrideOpened2 ? "Door override enabled for unknown fingerprint" : $"Unknown fingerprint - identification failed (result: {result})"
+                                          );
+                                          Console.WriteLine($"📝 Logged unknown fingerprint scan to ACCESSLOGS: {currentScanLocation ?? "inside"}");
+                                          lastUnknownScanLogTime = DateTime.Now;
+                                      }
+                                  }
+                                  catch (Exception logEx)
+                                  {
+                                      Console.WriteLine($"⚠️ Failed to log unknown fingerprint scan: {logEx.Message}");
+                                      // Continue even if logging fails
+                                  }
+                              }
+                              else
+                              {
+                                  Console.WriteLine($"⏳ Unknown scan debounced - waiting {Math.Ceiling((UNKNOWN_SCAN_DEBOUNCE_MS - timeSinceLastUnknownLog.TotalMilliseconds) / 1000)}s before logging again");
+                              }
+                          }
+                          else
+                          {
+                              Console.WriteLine("⏸️ Skipping unknown scan log - finger still on scanner");
+                          }
+                          
+                          SetStatusText("❌ Fingerprint not recognized. Please try again or enroll first.");
+                          // Clear any pending verification on unknown fingerprint
+                          pendingVerificationUser = null;
+                          pendingVerificationTime = DateTime.MinValue;
+                          // Notify ESP32 to show 'No match' on OLED
+                          _ = System.Threading.Tasks.Task.Run(async () => {     
+                              try { await RequestNoMatchDisplay(); } catch { }  
+                          });
+                          ScheduleNextGetBaseTemplate(1000);
+                      }
                 }
-                else
+                else if (success && !placementStillValid)
                 {
-                    // Handle template capture failure
-                    SetStatusText($"Template capture failed: {retCode}. Please try again.");
-                    ScheduleNextGetBaseTemplate(2000);
+                    // Template capture succeeded but no valid finger placement was detected
+                    // This prevents processing scans when OnPutOn wasn't called (false positives)
+                    Console.WriteLine("⚠️ Template capture succeeded but no valid finger placement detected - ignoring scan");
+                    hasValidFingerPlacement = false;
+                    isFingerOnScanner = false;
+                    SetStatusText("Please place your finger on the scanner.");
+                    ScheduleNextGetBaseTemplate(1000);
                 }
             }
             catch (System.AccessViolationException ex)
@@ -5045,7 +7833,7 @@ These settings allow you to customize the attendance system behavior for differe
                 {
                     // For milliseconds, just delay
                     countdownTimer.Interval = (int)(seconds * 1000);
-                    SetStatusText($"✅ First scan: {pendingUserName}. Please wait...");
+                    SetStatusText($"✅ First scan: {pendingUserName}. Please wait, then scan again...");
                     
                     countdownTimer.Tick += (s, e) =>
                     {
@@ -5116,6 +7904,17 @@ These settings allow you to customize the attendance system behavior for differe
                 if (isPausedForInstructorAction)
                 {
                     Console.WriteLine("⏸️ Scanner paused for instructor action - skipping schedule");
+                    return;
+                }
+                
+                // NEW: Don't schedule if finger is still on scanner (prevents repeated scans)
+                // EXCEPTION: Allow scanning during verification to detect second scan while finger is still on
+                bool isVerificationPending = pendingVerificationUser != null && 
+                                        (DateTime.Now - pendingVerificationTime).TotalMilliseconds < VERIFICATION_TIMEOUT_MS;
+                
+                if (isFingerOnScanner && !isVerificationPending)
+                {
+                    Console.WriteLine("⏸️ Finger still on scanner - skipping schedule to prevent repeated scans");
                     return;
                 }
                 
@@ -5195,7 +7994,6 @@ These settings allow you to customize the attendance system behavior for differe
                 Console.WriteLine($"ScheduleNextGetBaseTemplate error: {ex.Message}");
             }
         }
-        
         // POWER MANAGEMENT: Enter low-power idle mode
         private void EnterIdleMode()
         {
@@ -5214,7 +8012,6 @@ These settings allow you to customize the attendance system behavior for differe
                 Console.WriteLine($"EnterIdleMode error: {ex.Message}");
             }
         }
-        
         // POWER MANAGEMENT: Exit idle mode and return to active scanning
         private void ExitIdleMode()
         {
@@ -5409,6 +8206,8 @@ These settings allow you to customize the attendance system behavior for differe
                     string userGuid = user.EmployeeId;
                     string actionToRecord = action ?? DetermineAction(userName);
                     
+                    Console.WriteLine($"📝 RecordAttendance called: User={userName}, Action={actionToRecord}, GUID={userGuid ?? "NULL"}, sendToDatabase={sendToDatabase}");
+                    
                     // In dual-sensor mode, use currentScanLocation if no location specified
                     if (isDualSensorMode && string.IsNullOrEmpty(location))
                     {
@@ -5428,11 +8227,24 @@ These settings allow you to customize the attendance system behavior for differe
                     
                     if (sendToDatabase && !string.IsNullOrEmpty(userGuid) && dbManager != null)
                     {
+                        // Ensure CurrentRoomId is set in DatabaseManager before recording (needed for administrative schedule creation)
+                        if (deviceConfig != null && !string.IsNullOrEmpty(deviceConfig.RoomId))
+                        {
+                            if (string.IsNullOrEmpty(dbManager.CurrentRoomId))
+                            {
+                                dbManager.CurrentRoomId = deviceConfig.RoomId;
+                                Console.WriteLine($"📍 Set DatabaseManager.CurrentRoomId to {deviceConfig.RoomId} for attendance recording");
+                            }
+                        }
+                        
+                        Console.WriteLine($"📝 Attempting to record attendance to database: User={userName}, GUID={userGuid}, Action={actionToRecord}");
                         // Start database operation asynchronously without waiting
                         System.Threading.Tasks.Task.Run(() => {
                             try
                             {
+                                Console.WriteLine($"🔍 Calling TryRecordAttendanceByGuid: GUID={userGuid}, Action={actionToRecord}, Location={location}");
                                 var attempt = dbManager.TryRecordAttendanceByGuid(userGuid, actionToRecord, location);
+                                Console.WriteLine($"🔍 TryRecordAttendanceByGuid returned: Success={attempt?.Success}, Reason={attempt?.Reason ?? "N/A"}");
                                 
                                 // Update the record on UI thread with final result
                                 this.Invoke(new Action(() => {
@@ -5443,10 +8255,16 @@ These settings allow you to customize the attendance system behavior for differe
                                     
                                     if (!attempt.Success)
                                     {
-                                        Console.WriteLine($"ATTENDANCE DENIED - Full error: {attempt.Reason}");
+                                        Console.WriteLine($"❌ ATTENDANCE DENIED - Full error: {attempt.Reason}");
+                                        Console.WriteLine($"   User: {userName}, Action: {actionToRecord}, GUID: {userGuid}");
                                     }
                                     else
                                     {
+                                        Console.WriteLine($"✅ ATTENDANCE RECORDED SUCCESSFULLY:");
+                                        Console.WriteLine($"   User: {userName}, Action: {actionToRecord}, GUID: {userGuid}");
+                                        Console.WriteLine($"   ScheduleID: {attempt.ScheduleId ?? "NULL"}");
+                                        Console.WriteLine($"   Subject: {attempt.SubjectName ?? "N/A"}");
+                                        
                                         // If attendance successful, check if we need to control the lock
                                         System.Threading.Tasks.Task.Run(async () => {
                                             try
@@ -5463,7 +8281,8 @@ These settings allow you to customize the attendance system behavior for differe
                             }
                             catch (Exception ex)
                             {
-                                Console.WriteLine($"Database operation failed: {ex.Message}");
+                                Console.WriteLine($"❌ Database operation failed for {userName}: {ex.Message}");
+                                Console.WriteLine($"   Stack trace: {ex.StackTrace}");
                                 this.Invoke(new Action(() => {
                                     local.Status = $"Error: {ex.Message}";
                                     // Only add to records and display when we have the final result
@@ -5478,15 +8297,22 @@ These settings allow you to customize the attendance system behavior for differe
                     else
                     {
                         // No database operation or skip database, show final result immediately
+                        if (string.IsNullOrEmpty(userGuid))
+                        {
+                            Console.WriteLine($"⚠️ WARNING: RecordAttendance called for {userName} but userGuid is empty - cannot save to database");
+                        }
+                        if (dbManager == null)
+                        {
+                            Console.WriteLine($"⚠️ WARNING: RecordAttendance called for {userName} but dbManager is null - cannot save to database");
+                        }
                         local.Status = sendToDatabase ? "Success (No DB)" : "Already Signed In";
                         attendanceRecords.Add(local);
                         UpdateAttendanceDisplay(local);
                     }
-                    // Console.WriteLine($"Attendance recorded for {userName}: {local.Status}");
                 }
                 else
                 {
-                    Console.WriteLine($"User not found in database: {userName}");
+                    Console.WriteLine($"⚠️ WARNING: RecordAttendance called for {userName} but user not found in cache");
                     SetStatusText($"❌ User not found in database: {userName}");
                 }
             }
@@ -5598,6 +8424,119 @@ These settings allow you to customize the attendance system behavior for differe
             return false;
         }
 
+        private async Task<bool> PostLockPayloadAsync(string esp32Ip, object payload)
+        {
+            try
+            {
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                Console.WriteLine($"Sending to ESP32: {esp32Url}");
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+
+                    if (client.DefaultRequestHeaders.Contains("X-API-Key"))
+                    {
+                        client.DefaultRequestHeaders.Remove("X-API-Key");
+                    }
+                    client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
+
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var response = await client.PostAsync(esp32Url, content);
+
+                    Console.WriteLine($"ESP32 Response Status: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"ESP32 Response: {responseContent}");
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
+                        return true;
+                    }
+
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"❌ ESP32 request failed: {response.StatusCode}");
+                    Console.WriteLine($"Error: {errorContent}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending lock payload: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task RequestAnonymousLockControl(string location, string reason)
+        {
+            try
+            {
+                Console.WriteLine("=== ANONYMOUS LOCK CONTROL START ===");
+                Console.WriteLine($"Location: {location}");
+                Console.WriteLine($"Reason: {reason}");
+
+                string esp32Ip = await DiscoverESP32();
+
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network");
+                    if (!this.IsDisposed)
+                    {
+                        this.Invoke(new Action(() =>
+                        {
+                            SetStatusText("❌ Door override failed: no controller");
+                        }));
+                    }
+                    return;
+                }
+
+                var payload = new
+                {
+                    action = "open",
+                    // Use a privileged role to satisfy ESP32 policy checks
+                    user = "System Override",
+                    userType = "instructor",
+                    sessionActive = true,
+                    message = reason,
+                    location = location,
+                    overrideRequest = true
+                };
+
+                bool success = await PostLockPayloadAsync(esp32Ip, payload);
+
+                if (!this.IsDisposed)
+                {
+                    this.Invoke(new Action(() =>
+                    {
+                        if (success)
+                        {
+                            SetStatusText("🔓 Door override granted for unknown fingerprint.");
+                        }
+                        else
+                        {
+                            SetStatusText("❌ Door override failed.");
+                        }
+                    }));
+                }
+
+                Console.WriteLine("=== ANONYMOUS LOCK CONTROL END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Anonymous lock control error: {ex.Message}");
+                if (!this.IsDisposed)
+                {
+                    this.Invoke(new Action(() =>
+                    {
+                        SetStatusText($"❌ Door override error: {ex.Message}");
+                    }));
+                }
+            }
+        }
+
         // Request lock control for fingerprint scans - Auto-discover and send command to ESP32
         private async Task RequestLockControl(string userGuid, string action)
         {
@@ -5623,12 +8562,28 @@ These settings allow you to customize the attendance system behavior for differe
                 Console.WriteLine($"User: {user.FirstName} {user.LastName} - Type: {user.UserType}");
                 Console.WriteLine($"Current Session State: {currentSessionState}");
 
-                // Check if user should be allowed to open lock
-                if (!ShouldOpenLockForUser(user))
+                // Special handling for early arrivals and door overrides - allow door access even if session is not active
+                bool isEarlyArrival = !string.IsNullOrEmpty(action) && 
+                    (action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0);
+                bool isDoorOverride = !string.IsNullOrEmpty(action) && 
+                    (action.IndexOf("Door Override", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                // Check if user should be allowed to open lock (unless it's an early arrival or door override)
+                if (!isEarlyArrival && !isDoorOverride && !ShouldOpenLockForUser(user))
                 {
                     Console.WriteLine($"⚠️ User {user.FirstName} {user.LastName} ({user.UserType}) - access denied");
                     Console.WriteLine($"⚠️ Session State: {currentSessionState} - Not allowed for this user type");
                     return;
+                }
+
+                if (isEarlyArrival)
+                {
+                    Console.WriteLine($"✅ Early Arrival: Allowing door access for {user.FirstName} {user.LastName}");
+                }
+                
+                if (isDoorOverride)
+                {
+                    Console.WriteLine($"✅ Door Override: Allowing door access for {user.FirstName} {user.LastName} (AllowUnauthorizedFingerprints enabled)");
                 }
                 
                 Console.WriteLine($"✅ User {user.FirstName} {user.LastName} ({user.UserType}) - access granted");
@@ -5650,67 +8605,55 @@ These settings allow you to customize the attendance system behavior for differe
                     return;
                 }
 
-                string esp32Url = $"http://{esp32Ip}/api/lock-control";
-                Console.WriteLine($"Sending to ESP32: {esp32Url}");
-
                 // Create payload for ESP32
+                string displayMessage = null;
+                if (!string.IsNullOrEmpty(action) && action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    displayMessage = "Early Arrival recorded. Scan inside at start.";
+                }
+                
+                // For door overrides, we need to bypass ESP32's session check by setting sessionActive=true
+                bool effectiveSessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                             currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                if (isDoorOverride)
+                {
+                    effectiveSessionActive = true; // Override: allow access regardless of session state
+                }
+                
                 var payload = new
                 {
                     action = lockAction,
                     user = $"{user.FirstName} {user.LastName}",
                     userType = user.UserType?.ToLower(),
-                    sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
-                                   currentSessionState == AttendanceSessionState.ActiveForSignOut
+                    sessionActive = effectiveSessionActive,
+                    message = displayMessage,
+                    overrideRequest = isDoorOverride
                 };
 
-                var json = JsonSerializer.Serialize(payload);
-                Console.WriteLine($"Payload: {json}");
+                bool success = await PostLockPayloadAsync(esp32Ip, payload);
 
-                using (var client = new HttpClient())
+                if (success)
                 {
-                    client.Timeout = TimeSpan.FromSeconds(5);
-                    
-                    // Add API key to request header for security
-                    string apiKey = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Must match ESP32 API key
-                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
-                    Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
-                    
-                    var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    
-                    var response = await client.PostAsync(esp32Url, content);
-                    
-                    Console.WriteLine($"ESP32 Response Status: {response.StatusCode}");
-
-                    if (response.IsSuccessStatusCode)
+                    if (lockAction == "open")
                     {
-                        var responseContent = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"ESP32 Response: {responseContent}");
-                        
-                        if (lockAction == "open")
-                        {
-                            Console.WriteLine("🔓 Door unlocked for instructor");
-                            this.Invoke(new Action(() => {
-                                SetStatusText("🔓 Door unlocked");
-                            }));
-                        }
-                        else
-                        {
-                            Console.WriteLine("🔒 Door locked by instructor");
-                            this.Invoke(new Action(() => {
-                                SetStatusText("🔒 Door locked");
-                            }));
-                        }
+                        Console.WriteLine("🔓 Door unlocked for instructor");
+                        this.Invoke(new Action(() => {
+                            SetStatusText("🔓 Door unlocked");
+                        }));
                     }
                     else
                     {
-                        var errorContent = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"❌ ESP32 request failed: {response.StatusCode}");
-                        Console.WriteLine($"Error: {errorContent}");
-                        
+                        Console.WriteLine("🔒 Door locked by instructor");
                         this.Invoke(new Action(() => {
-                            SetStatusText($"❌ Lock control failed: {response.StatusCode}");
+                            SetStatusText("🔒 Door locked");
                         }));
                     }
+                }
+                else
+                {
+                    this.Invoke(new Action(() => {
+                        SetStatusText("❌ Lock control failed");
+                    }));
                 }
                 
                 Console.WriteLine("=== LOCK CONTROL REQUEST END ===");
@@ -5721,6 +8664,788 @@ These settings allow you to customize the attendance system behavior for differe
                 
                 this.Invoke(new Action(() => {
                     SetStatusText($"❌ Lock error: {ex.Message}");
+                }));
+            }
+        }
+
+        // Request lock control denial message for ESP32 OLED display
+        private async Task RequestLockControlDenial(string userGuid, string userName, string denialReason, string userType)
+        {
+            try
+            {
+                Console.WriteLine("=== LOCK CONTROL DENIAL REQUEST START ===");
+                Console.WriteLine($"User GUID: {userGuid}");
+                Console.WriteLine($"User Name: {userName}");
+                Console.WriteLine($"Denial Reason: {denialReason}");
+                Console.WriteLine($"User Type: {userType}");
+
+                // Auto-discover ESP32 on the network
+                string esp32Ip = await DiscoverESP32();
+                
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network - cannot display denial message");
+                    return;
+                }
+
+                // Create payload for ESP32 with denial information
+                var payload = new
+                {
+                    action = "denied",
+                    user = userName,
+                    userType = userType?.ToLower(),
+                    sessionActive = false,
+                    denialReason = denialReason
+                };
+
+                bool success = await PostLockPayloadAsync(esp32Ip, payload);
+
+                if (success)
+                {
+                    Console.WriteLine("✅ Denial message sent to ESP32 for display");
+                    lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
+                }
+                else
+                {
+                    Console.WriteLine("❌ Failed to send denial message to ESP32");
+                }
+                
+                Console.WriteLine("=== LOCK CONTROL DENIAL REQUEST END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending denial to ESP32: {ex.Message}");
+            }
+        }
+
+        // Display 'No match' on OLED for fingerprint path
+        private async Task RequestNoMatchDisplay()
+        {
+            try
+            {
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                var payload = new { action = "no_match" };
+                var json = JsonSerializer.Serialize(payload);
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await client.PostAsync(esp32Url, content);
+                    lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
+                }
+            }
+            catch { }
+        }
+
+        // Display 'No match' on OLED for RFID path
+        private async Task RequestRfidNoMatchDisplay(string rfidData)
+        {
+            try
+            {
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+
+                string esp32Url = $"http://{esp32Ip}/api/rfid-scan";
+                var payload = new { action = "no_match", rfid_data = rfidData };
+                var json = JsonSerializer.Serialize(payload);
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await client.PostAsync(esp32Url, content);
+                    lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
+                }
+            }
+            catch { }
+        }
+
+        // Request RFID lock control denial message for ESP32 OLED display
+        private async Task RequestRfidLockControlDenial(string userGuid, string userName, string denialReason, string userType, string rfidData)
+        {
+            try
+            {
+                Console.WriteLine("=== RFID LOCK CONTROL DENIAL REQUEST START ===");
+                Console.WriteLine($"User GUID: {userGuid}");
+                Console.WriteLine($"User Name: {userName}");
+                Console.WriteLine($"Denial Reason: {denialReason}");
+                Console.WriteLine($"User Type: {userType}");
+                Console.WriteLine($"RFID Data: {rfidData}");
+
+                // Auto-discover ESP32 on the network
+                string esp32Ip = await DiscoverESP32();
+                
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network - cannot display RFID denial message");
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}/api/rfid-scan";
+                Console.WriteLine($"Sending RFID denial to ESP32: {esp32Url}");
+
+                // Create payload for ESP32 RFID endpoint with denial information
+                var payload = new
+                {
+                    rfid_data = rfidData,
+                    user = userName,
+                    userType = userType?.ToLower(),
+                    sessionActive = false,
+                    denialReason = denialReason
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"RFID Denial Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    
+                    // Add API key to request header for security
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
+                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+                    
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    Console.WriteLine($"ESP32 RFID Denial Response Status: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"ESP32 RFID Denial Response: {responseContent}");
+                        Console.WriteLine($"✅ RFID denial message sent to ESP32 for display");
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"❌ ESP32 RFID denial request failed: {response.StatusCode}");
+                        Console.WriteLine($"Error: {errorContent}");
+                    }
+                }
+                
+                Console.WriteLine("=== RFID LOCK CONTROL DENIAL REQUEST END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending RFID denial to ESP32: {ex.Message}");
+            }
+        }
+        // Display informational message on OLED (fingerprint path)
+        private async Task RequestInfoDisplay(string userGuid, string userName, string message)
+        {
+            try
+            {
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("⚠️ ESP32 not found - cannot send info message to OLED");
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                // Add timestamp to payload to ensure ESP32 treats each message as unique and displays it every time
+                var payload = new { action = "info", user = userName, message = message, timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"), forceRefresh = true };
+                var json = JsonSerializer.Serialize(payload);
+                
+                Console.WriteLine($"📤 Sending info message to ESP32: {message}");
+                
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    if (response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"✅ Info message sent successfully to ESP32");
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
+                    }
+                    else
+                    {
+                        Console.WriteLine($"⚠️ ESP32 returned status: {response.StatusCode}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending info message to ESP32: {ex.Message}");
+            }
+        }
+        // Display informational message on OLED (RFID path)
+        private async Task RequestRfidInfoDisplay(string userGuid, string userName, string message, string rfidData)
+        {
+            try
+            {
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("⚠️ ESP32 not found - cannot send RFID info message to OLED");
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}/api/rfid-scan";
+                // Add timestamp to payload to ensure ESP32 treats each message as unique and displays it every time
+                var payload = new { action = "info", rfid_data = rfidData, user = userName, message = message, timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"), forceRefresh = true };
+                var json = JsonSerializer.Serialize(payload);
+                
+                Console.WriteLine($"📤 Sending RFID info message to ESP32: {message} (RFID: {rfidData})");
+                
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    client.DefaultRequestHeaders.Add("X-API-Key", "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567");
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    if (response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"✅ RFID info message sent successfully to ESP32");
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
+                    }
+                    else
+                    {
+                        Console.WriteLine($"⚠️ ESP32 returned status: {response.StatusCode}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending RFID info message to ESP32: {ex.Message}");
+            }
+        }
+
+        // Send session mode display to OLED (Sign In/Sign Out mode with subject and instructor)
+        // Displays for 10 seconds, then clears the display
+        private async Task RequestSessionModeDisplay(bool isRfid = false, string rfidData = null)
+        {
+            try
+            {
+                bool isSignInMode = currentSessionState == AttendanceSessionState.ActiveForStudents;
+                bool isSignOutMode = currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                
+                if (!isSignInMode && !isSignOutMode) return;
+                
+                string subjectName = currentSubjectName ?? "Unknown Subject";
+                string instructorName = currentInstructorName ?? "Unknown Instructor";
+                
+                // Fallback: Get instructor name from lookup
+                if ((instructorName == "Unknown Instructor" || string.IsNullOrEmpty(instructorName)) && 
+                    !string.IsNullOrEmpty(currentInstructorId) && userLookupByGuid != null)
+                {
+                    if (userLookupByGuid.TryGetValue(currentInstructorId, out User instructor))
+                    {
+                        instructorName = instructor.Username ?? $"{instructor.FirstName} {instructor.LastName}".Trim();
+                        if (!string.IsNullOrWhiteSpace(instructorName))
+                            currentInstructorName = instructorName;
+                    }
+                }
+                
+                // Format display lines (OLED 128x64, ~21 chars per line)
+                string line1 = "Currently in";
+                string line2 = isSignInMode ? "Sign In Mode" : "Sign Out Mode";
+                string line3 = $"Subject: {subjectName}";
+                string line4 = $"Instructor: {instructorName}";
+                
+                // Truncate if too long
+                if (line3.Length > 21) 
+                    line3 = "Subject: " + (subjectName.Length > 12 ? subjectName.Substring(0, 9) + "..." : subjectName);
+                if (line4.Length > 21) 
+                    line4 = "Instructor: " + (instructorName.Length > 9 ? instructorName.Substring(0, 6) + "..." : instructorName);
+                
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+                
+                string endpoint = isRfid ? "/api/rfid-scan" : "/api/lock-control";
+                string esp32Url = $"http://{esp32Ip}{endpoint}";
+                string modeText = isSignInMode ? "Sign In" : "Sign Out";
+                
+                // Send the message twice at 5-second intervals (10 seconds total)
+                for (int i = 0; i < 2; i++)
+                {
+                    try
+                    {
+                        var payload = new { action = "status", rfid_data = isRfid ? (rfidData ?? "") : "", line1, line2, line3, line4 };
+                        
+                        var json = JsonSerializer.Serialize(payload);
+                        using (var client = new HttpClient())
+                        {
+                            client.Timeout = TimeSpan.FromSeconds(5);
+                            client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
+                            var content = new StringContent(json, Encoding.UTF8, "application/json");
+                            await client.PostAsync(esp32Url, content);
+                        }
+                        lastOledMessageTime = DateTime.Now; // Track when OLED message was sent
+                        if (i < 1) await System.Threading.Tasks.Task.Delay(5000);
+                    }
+                    catch { }
+                }
+                
+                // Wait for 10 seconds total, then clear the display
+                await System.Threading.Tasks.Task.Delay(5000);
+                
+                // Clear the display by sending empty lines
+                try
+                {
+                    var clearPayload = new { action = "status", rfid_data = isRfid ? (rfidData ?? "") : "", line1 = "", line2 = "", line3 = "", line4 = "" };
+                    var clearJson = JsonSerializer.Serialize(clearPayload);
+                    using (var client = new HttpClient())
+                    {
+                        client.Timeout = TimeSpan.FromSeconds(5);
+                        client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
+                        var content = new StringContent(clearJson, Encoding.UTF8, "application/json");
+                        await client.PostAsync(esp32Url, content);
+                    }
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        // Handle OLED mode blinking when display is idle and session is active
+        private async Task HandleOledModeBlinking()
+        {
+            try
+            {
+                // Check if session is active (Sign In or Sign Out mode)
+                bool isSignInMode = currentSessionState == AttendanceSessionState.ActiveForStudents;
+                bool isSignOutMode = currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                
+                Console.WriteLine($"🔍 OLED Blink Check: isSignIn={isSignInMode}, isSignOut={isSignOutMode}, state={currentSessionState}");
+                
+                if (!isSignInMode && !isSignOutMode)
+                {
+                    // No active session, stop blinking
+                    if (oledModeBlinkTimer != null && oledModeBlinkTimer.Enabled)
+                    {
+                        oledModeBlinkTimer.Stop();
+                    }
+                    return;
+                }
+                
+                // Check if display has been idle long enough (other messages have finished)
+                var timeSinceLastMessage = DateTime.Now - lastOledMessageTime;
+                Console.WriteLine($"🔍 Time since last message: {timeSinceLastMessage.TotalMilliseconds}ms (threshold: {OLED_IDLE_THRESHOLD_MS}ms)");
+                
+                if (timeSinceLastMessage.TotalMilliseconds < OLED_IDLE_THRESHOLD_MS)
+                {
+                    // Display is still showing other messages, don't blink yet
+                    Console.WriteLine($"⏸️ OLED still busy, waiting... ({timeSinceLastMessage.TotalMilliseconds:F0}ms < {OLED_IDLE_THRESHOLD_MS}ms)");
+                    return;
+                }
+                
+                // Display is idle and session is active - implement 20-second cycle
+                string esp32Ip = await DiscoverESP32();
+                if (string.IsNullOrEmpty(esp32Ip)) return;
+                
+                string esp32Url = $"http://{esp32Ip}/api/lock-control";
+                string modeText = isSignInMode ? "Sign In Mode" : "Sign Out Mode";
+                
+                // Calculate time since last mode display
+                var timeSinceLastModeDisplay = DateTime.Now - lastModeDisplayTime;
+                Console.WriteLine($"🔍 Mode display timing: lastDisplay={lastModeDisplayTime}, elapsed={timeSinceLastModeDisplay.TotalMilliseconds}ms, visible={isBlinkingModeVisible}");
+                
+                // Determine if we should show or hide based on timing
+                bool shouldShowMode = false;
+                
+                if (lastModeDisplayTime == DateTime.MinValue)
+                {
+                    // Never shown, show it now
+                    shouldShowMode = true;
+                    Console.WriteLine("📺 First time showing mode");
+                }
+                else if (isBlinkingModeVisible && timeSinceLastModeDisplay.TotalMilliseconds < 10000)
+                {
+                    // Currently visible and within 10-second display window, keep visible
+                    Console.WriteLine($"⏳ Mode still visible, keeping it on ({timeSinceLastModeDisplay.TotalMilliseconds:F0}ms < 10000ms)");
+                    return;
+                }
+                else if (isBlinkingModeVisible && timeSinceLastModeDisplay.TotalMilliseconds >= 10000)
+                {
+                    // Visible for 10+ seconds, hide it now
+                    shouldShowMode = false;
+                    Console.WriteLine("🔚 Mode visible for 10s, hiding now");
+                }
+                else if (!isBlinkingModeVisible && timeSinceLastModeDisplay.TotalMilliseconds >= 20000)
+                {
+                    // Hidden and 20+ seconds have passed since first shown, show it again
+                    shouldShowMode = true;
+                    Console.WriteLine("🔄 20s elapsed, showing mode again");
+                }
+                else
+                {
+                    // Hidden but not yet 20 seconds since first shown, stay hidden
+                    Console.WriteLine($"⏳ Mode hidden, waiting for 20s ({timeSinceLastModeDisplay.TotalMilliseconds:F0}ms < 20000ms)");
+                    return;
+                }
+                
+                if (shouldShowMode)
+                {
+                    // Show mode text
+                    var modePayload = new { action = "status", line1 = "Currently in", line2 = modeText, line3 = "", line4 = "" };
+                    var modeJson = JsonSerializer.Serialize(modePayload);
+                    using (var client = new HttpClient())
+                    {
+                        client.Timeout = TimeSpan.FromSeconds(5);
+                        client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
+                        var content = new StringContent(modeJson, Encoding.UTF8, "application/json");
+                        await client.PostAsync(esp32Url, content);
+                    }
+                    isBlinkingModeVisible = true;
+                    lastModeDisplayTime = DateTime.Now;
+                    Console.WriteLine($"✅ OLED showing mode: {modeText}");
+                }
+                else
+                {
+                    // Hide (send empty lines)
+                    var blankPayload = new { action = "status", line1 = "", line2 = "", line3 = "", line4 = "" };
+                    var blankJson = JsonSerializer.Serialize(blankPayload);
+                    using (var client = new HttpClient())
+                    {
+                        client.Timeout = TimeSpan.FromSeconds(5);
+                        client.DefaultRequestHeaders.Add("X-API-Key", LOCK_CONTROLLER_API_KEY);
+                        var content = new StringContent(blankJson, Encoding.UTF8, "application/json");
+                        await client.PostAsync(esp32Url, content);
+                    }
+                    isBlinkingModeVisible = false;
+                    Console.WriteLine("✅ OLED mode hidden (blank)");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error in OLED mode blinking: {ex.Message}");
+            }
+        }
+        
+        // Start/stop OLED mode blinking based on session state
+        private void UpdateOledModeBlinkingState()
+        {
+            try
+            {
+                bool shouldBlink = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                  currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                
+                if (oledModeBlinkTimer != null)
+                {
+                    if (shouldBlink && !oledModeBlinkTimer.Enabled)
+                    {
+                        // Start blinking timer
+                        oledModeBlinkTimer.Start();
+                        Console.WriteLine("✅ OLED mode blinking started");
+                        // Reset blinking state
+                        isBlinkingModeVisible = false;
+                        lastModeDisplayTime = DateTime.MinValue;
+                        // Reset last message time to allow blinking to start after idle threshold
+                        lastOledMessageTime = DateTime.Now.AddMilliseconds(-OLED_IDLE_THRESHOLD_MS - 1000);
+                    }
+                    else if (!shouldBlink && oledModeBlinkTimer.Enabled)
+                    {
+                        // Stop blinking timer
+                        oledModeBlinkTimer.Stop();
+                        Console.WriteLine("✅ OLED mode blinking stopped");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error updating OLED mode blinking state: {ex.Message}");
+            }
+        }
+
+        private Task ShowModeRestrictionWarningAsync(bool isRfidOnlyMode, string rfidData = null)
+        {
+            return Task.Run(async () =>
+            {
+                try
+                {
+                    if (isRfidOnlyMode)
+                    {
+                        await RequestLockControlDenial(
+                            string.Empty,
+                            "RFID-Only Mode",
+                            "Please scan your RFID card to continue.",
+                            "system");
+                    }
+                    else
+                    {
+                        await RequestRfidLockControlDenial(
+                            string.Empty,
+                            "Fingerprint-Only Mode",
+                            "Please use the fingerprint scanner to continue.",
+                            "system",
+                            rfidData ?? string.Empty);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Warning: failed to display mode restriction warning: {ex.Message}");
+                }
+            });
+        }
+
+        // Record early arrival using direct database access for fingerprint
+        private async Task RecordEarlyArrivalFingerprint(string userName, string userGuid)
+        {
+            try
+            {
+                Console.WriteLine("=== EARLY ARRIVAL FINGERPRINT SCAN START ===");
+                Console.WriteLine($"Student: {userName}");
+                Console.WriteLine($"User GUID: {userGuid}");
+
+                if (dbManager == null)
+                {
+                    Console.WriteLine("❌ Database manager not available");
+                    SetStatusText("❌ System error - database not available");
+                    return;
+                }
+
+                // Call database manager to record early arrival
+                var result = dbManager.TryRecordAttendanceByGuid(userGuid, "Early Arrival (Fingerprint)", "outside");
+
+                if (result.Success)
+                {
+                    Console.WriteLine($"✅ Early arrival recorded for {result.SubjectName}");
+                    
+                    this.Invoke(new Action(() => {
+                        SetStatusText($"⏰ Early arrival: {userName} for {result.SubjectName}. Scan inside when class starts.");
+                        
+                        // Create early arrival record
+                        var earlyArrivalRecord = new Database.Models.AttendanceRecord
+                        {
+                            UserId = 0,
+                            Username = userName,
+                            Timestamp = DateTime.Now,
+                            Action = "Early Arrival",
+                            Status = $"Awaiting Confirmation - {result.SubjectName}"
+                        };
+                        attendanceRecords.Add(earlyArrivalRecord);
+                        UpdateAttendanceDisplay(earlyArrivalRecord);
+                    }));
+
+                    // Show final success message on OLED (will display for 5 seconds)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestInfoDisplay(userGuid, userName, "Early Arrival Recorded!"); } catch { }
+                    });
+
+                    // Trigger door access for early arrivals
+                    await RequestLockControl(userGuid, "Student Early Arrival (Fingerprint)");
+                }
+                else
+                {
+                    Console.WriteLine($"❌ Early arrival denied: {result.Reason}");
+                    
+                    // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                    {
+                        try
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: userGuid,
+                                roomId: null,
+                                authMethod: "Fingerprint",
+                                location: "outside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Early arrival denied: {result.Reason ?? "Validation failed"}"
+                            );
+                            Console.WriteLine($"📝 Logged denied early arrival attempt to ACCESSLOGS for {userName}");
+                        }
+                        catch (Exception logEx)
+                        {
+                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                        }
+                    }
+                    
+                    this.Invoke(new Action(() => {
+                        string statusMessage;
+                        string recordStatus;
+                        
+                        if (result.Reason.Contains("No class starting"))
+                        {
+                            statusMessage = $"❌ Too early. {result.Reason}";
+                            recordStatus = "Too Early";
+                        }
+                        else if (result.Reason.Contains("Not enrolled"))
+                        {
+                            statusMessage = $"❌ Not enrolled. {result.Reason}";
+                            recordStatus = "Not Enrolled";
+                        }
+                        else if (result.Reason.Contains("Already recorded"))
+                        {
+                            statusMessage = $"❌ Already scanned. {result.Reason}";
+                            recordStatus = "Duplicate";
+                        }
+                        else
+                        {
+                            statusMessage = $"❌ {result.Reason}";
+                            recordStatus = "Error";
+                        }
+                        
+                        SetStatusText(statusMessage);
+                        
+                        // Create denial record
+                        var denialRecord = new Database.Models.AttendanceRecord
+                        {
+                            UserId = 0,
+                            Username = userName,
+                            Timestamp = DateTime.Now,
+                            Action = "Early Arrival Denied",
+                            Status = recordStatus
+                        };
+                        attendanceRecords.Add(denialRecord);
+                        UpdateAttendanceDisplay(denialRecord);
+                    }));
+                    
+                    // Send denial message to ESP32 for OLED display
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try
+                        {
+                            await RequestLockControlDenial(userGuid, userName, result.Reason ?? "Early arrival denied", "student");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not send early arrival denial to ESP32: {ex.Message}");
+                        }
+                    });
+                }
+                
+                Console.WriteLine("=== EARLY ARRIVAL FINGERPRINT SCAN END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error recording early arrival: {ex.Message}");
+                this.Invoke(new Action(() => {
+                    SetStatusText($"❌ Early arrival error: {ex.Message}");
+                    
+                    // Create error record
+                    var errorRecord = new Database.Models.AttendanceRecord
+                    {
+                        UserId = 0,
+                        Username = userName,
+                        Timestamp = DateTime.Now,
+                        Action = "Early Arrival Error",
+                        Status = ex.Message
+                    };
+                    attendanceRecords.Add(errorRecord);
+                    UpdateAttendanceDisplay(errorRecord);
+                }));
+            }
+        }
+
+        // Record early arrival using direct database access
+        private async Task RecordEarlyArrivalRfid(string userName, string userGuid, string rfidTag)
+        {
+            try
+            {
+                Console.WriteLine("=== EARLY ARRIVAL RFID SCAN START ===");
+                Console.WriteLine($"Student: {userName}");
+                Console.WriteLine($"User GUID: {userGuid}");
+                Console.WriteLine($"RFID Tag: {rfidTag}");
+
+                if (dbManager == null)
+                {
+                    Console.WriteLine("❌ Database manager not available");
+                    SetRfidStatusText("❌ System error - database not available");
+                    return;
+                }
+
+                // Call database manager to record early arrival
+                var result = dbManager.TryRecordAttendanceByGuid(userGuid, "Early Arrival (RFID)", "outside");
+
+                if (result.Success)
+                {
+                    Console.WriteLine($"✅ Early arrival recorded for {result.SubjectName}");
+                    
+                    this.Invoke(new Action(() => {
+                        SetRfidStatusText($"⏰ Early arrival: {userName} for {result.SubjectName}. Scan inside when class starts.");
+                        AddRfidAttendanceRecord(userName, "Early Arrival", $"Awaiting Confirmation - {result.SubjectName}");
+                    }));
+
+                    // Show final success message on OLED (will display for 5 seconds)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestRfidInfoDisplay(userGuid, userName, "Early Arrival Recorded!", rfidTag); } catch { }
+                    });
+
+                    // Trigger door access for early arrivals
+                    await RequestRfidLockControl(userGuid, "Student Early Arrival (RFID)", rfidTag);
+                }
+                else
+                {
+                    Console.WriteLine($"❌ Early arrival denied: {result.Reason}");
+                    
+                    // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                    {
+                        try
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: userGuid,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: "outside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Early arrival denied: {result.Reason ?? "Validation failed"}"
+                            );
+                            Console.WriteLine($"📝 Logged denied early arrival attempt to ACCESSLOGS for {userName}");
+                        }
+                        catch (Exception logEx)
+                        {
+                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                        }
+                    }
+                    
+                    this.Invoke(new Action(() => {
+                        if (result.Reason.Contains("No class starting"))
+                        {
+                            SetRfidStatusText($"❌ Too early. {result.Reason}");
+                            AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Too Early");
+                        }
+                        else if (result.Reason.Contains("Not enrolled"))
+                        {
+                            SetRfidStatusText($"❌ Not enrolled. {result.Reason}");
+                            AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Not Enrolled");
+                        }
+                        else if (result.Reason.Contains("Already recorded"))
+                        {
+                            SetRfidStatusText($"❌ Already scanned. {result.Reason}");
+                            AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Duplicate");
+                        }
+                        else
+                        {
+                            SetRfidStatusText($"❌ {result.Reason}");
+                            AddRfidAttendanceRecord(userName, "Early Arrival Denied", "Error");
+                        }
+                    }));
+                    
+                    // Send denial message to ESP32 for OLED display (RFID)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try
+                        {
+                            await RequestRfidLockControlDenial(userGuid, userName, result.Reason ?? "Early arrival denied", "student", rfidTag);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not send RFID early arrival denial to ESP32: {ex.Message}");
+                        }
+                    });
+                }
+                
+                Console.WriteLine("=== EARLY ARRIVAL RFID SCAN END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error recording early arrival: {ex.Message}");
+                this.Invoke(new Action(() => {
+                    SetRfidStatusText($"❌ Early arrival error: {ex.Message}");
+                    AddRfidAttendanceRecord(userName, "Early Arrival Error", ex.Message);
                 }));
             }
         }
@@ -5751,12 +9476,21 @@ These settings allow you to customize the attendance system behavior for differe
                 Console.WriteLine($"User: {user.FirstName} {user.LastName} - Type: {user.UserType}");
                 Console.WriteLine($"Current Session State: {currentSessionState}");
 
-                // Check if user should be allowed to open lock
-                if (!ShouldOpenLockForUser(user))
+                // Special handling for door overrides - allow door access even if session is not active
+                bool isDoorOverride = !string.IsNullOrEmpty(action) && 
+                    (action.IndexOf("Door Override", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                // Check if user should be allowed to open lock (unless it's a door override)
+                if (!isDoorOverride && !ShouldOpenLockForUser(user))
                 {
                     Console.WriteLine($"⚠️ User {user.FirstName} {user.LastName} ({user.UserType}) - access denied");
                     Console.WriteLine($"⚠️ Session State: {currentSessionState} - Not allowed for this user type");
                     return;
+                }
+                
+                if (isDoorOverride)
+                {
+                    Console.WriteLine($"✅ Door Override (RFID): Allowing door access for {user.FirstName} {user.LastName} (AllowUnauthorizedFingerprints enabled)");
                 }
                 
                 Console.WriteLine($"✅ User {user.FirstName} {user.LastName} ({user.UserType}) - access granted");
@@ -5781,13 +9515,28 @@ These settings allow you to customize the attendance system behavior for differe
                 Console.WriteLine($"Sending RFID scan to ESP32: {esp32Url}");
 
                 // Create payload for ESP32 RFID endpoint
+                string displayMessage = null;
+                if (!string.IsNullOrEmpty(action) && action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    displayMessage = "Early Arrival recorded. Scan inside at start.";
+                }
+                
+                // For door overrides, we need to bypass ESP32's session check by setting sessionActive=true
+                bool effectiveSessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                             currentSessionState == AttendanceSessionState.ActiveForSignOut;
+                if (isDoorOverride)
+                {
+                    effectiveSessionActive = true; // Override: allow access regardless of session state
+                }
+                
                 var payload = new
                 {
                     rfid_data = rfidData,
                     user = $"{user.FirstName} {user.LastName}",
                     userType = user.UserType?.ToLower(),
-                    sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
-                                   currentSessionState == AttendanceSessionState.ActiveForSignOut
+                    sessionActive = effectiveSessionActive,
+                    message = displayMessage,
+                    overrideRequest = isDoorOverride
                 };
 
                 var json = JsonSerializer.Serialize(payload);
@@ -5798,7 +9547,7 @@ These settings allow you to customize the attendance system behavior for differe
                     client.Timeout = TimeSpan.FromSeconds(5);
                     
                     // Add API key to request header for security
-                    string apiKey = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Must match ESP32 API key
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
                     client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
                     Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
                     
@@ -5839,6 +9588,85 @@ These settings allow you to customize the attendance system behavior for differe
                 this.Invoke(new Action(() => {
                     SetRfidStatusText($"❌ RFID lock error: {ex.Message}");
                 }));
+            }
+        }
+
+        // Send intermediate status update to ESP32 when waiting for second scan
+        private async Task SendIntermediateStatusToESP32(
+            User user, 
+            string firstScanType, 
+            string requiredScan,
+            string endpoint)
+        {
+            try
+            {
+                Console.WriteLine($"=== SENDING INTERMEDIATE STATUS TO ESP32 ===");
+                Console.WriteLine($"User: {user.FirstName} {user.LastName}");
+                Console.WriteLine($"First Scan: {firstScanType}");
+                Console.WriteLine($"Required: {requiredScan}");
+                Console.WriteLine($"Endpoint: {endpoint}");
+
+                // Auto-discover ESP32 on the network
+                string esp32Ip = await DiscoverESP32();
+                
+                if (string.IsNullOrEmpty(esp32Ip))
+                {
+                    Console.WriteLine("❌ No ESP32 device found on network for intermediate status");
+                    return;
+                }
+
+                string esp32Url = $"http://{esp32Ip}{endpoint}";
+                Console.WriteLine($"Sending intermediate status to ESP32: {esp32Url}");
+
+                // Create payload for intermediate status
+                var payload = new
+                {
+                    user = $"{user.FirstName} {user.LastName}",
+                    userType = user.UserType?.ToLower(),
+                    sessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
+                                   currentSessionState == AttendanceSessionState.ActiveForSignOut,
+                    awaitingSecondScan = true,
+                    firstScanType = firstScanType,
+                    requiredScan = requiredScan
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"Intermediate Status Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    
+                    // Add API key to request header for security
+                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
+                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+                    Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
+                    
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    
+                    var response = await client.PostAsync(esp32Url, content);
+                    
+                    Console.WriteLine($"ESP32 Intermediate Status Response: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"ESP32 Intermediate Response: {responseContent}");
+                        Console.WriteLine("✅ Intermediate status sent successfully");
+                    }
+                    else
+                    {
+                        var errorContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"❌ ESP32 intermediate status request failed: {response.StatusCode}");
+                        Console.WriteLine($"Error: {errorContent}");
+                    }
+                }
+                
+                Console.WriteLine("=== INTERMEDIATE STATUS REQUEST END ===");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending intermediate status: {ex.Message}");
             }
         }
 
@@ -5919,7 +9747,7 @@ These settings allow you to customize the attendance system behavior for differe
             {
 
                 // Scan common IP ranges (fast scan of likely IPs)
-                var likelyIPs = new List<int> { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 20, 50, 100, 101, 102, 200, 254 };
+                var likelyIPs = new List<int> { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 50, 60, 61, 62, 63, 64, 65, 100, 101, 102, 200, 254 };
                 
                 Utils.Logger.Debug($"Scanning IPs: {string.Join(", ", likelyIPs.Select(ip => $"{networkPrefix}.{ip}"))}");
 
@@ -6114,7 +9942,6 @@ These settings allow you to customize the attendance system behavior for differe
             }
             catch { }
         }
-
         // Separate event handlers for enrollment
         private void OnEnrollmentPutOn(FTR_PROGRESS progress)
         {
@@ -6143,7 +9970,6 @@ These settings allow you to customize the attendance system behavior for differe
             }
             catch { }
         }
-
         private void OnEnrollmentUpdateScreenImage(Bitmap bitmap)
         {
             if (pictureFingerprint != null && bitmap != null)
@@ -6173,13 +9999,51 @@ These settings allow you to customize the attendance system behavior for differe
             // Filter out false positive detections
             if (!IsValidFingerDetection())
                 return;
-                
-            SetStatusText("Attendance: Finger detected. Processing...");
+            
+            // QUALITY CHECK: Track valid finger placement
+            // Accept OnPutOn as valid finger detection (SDK filters low-quality detections internally)
+            hasValidFingerPlacement = true;
+            lastValidPutOnTime = DateTime.Now;
+            isFingerOnScanner = true;
+            Console.WriteLine("👆 Finger detected on scanner - waiting for stabilization");
+            
+            // Wait for finger to stabilize before processing (improves accuracy)
+            System.Threading.Tasks.Task.Delay(200).ContinueWith(_ =>
+            {
+                if (isFingerOnScanner && hasValidFingerPlacement && m_AttendanceOperation != null && !m_bExit)
+                {
+                    SetStatusText("Attendance: Finger detected. Processing...");
+                }
+            });
         }
 
         private void OnAttendanceTakeOff(FTR_PROGRESS progress)
         {
-            SetStatusText("Attendance: Finger removed. Please scan again.");
+            // Check if verification is pending - if so, ignore takeoff events
+            // This allows the finger to stay "detected" during verification
+            bool isVerificationPending = pendingVerificationUser != null && 
+                                        (DateTime.Now - pendingVerificationTime).TotalMilliseconds < VERIFICATION_TIMEOUT_MS;
+            
+            if (isVerificationPending)
+            {
+                Console.WriteLine("⏳ Verification pending - ignoring takeoff event to allow continuous scanning");
+                return; // Ignore takeoff during verification
+            }
+            
+            // Only process if we had a valid finger placement first
+            // This prevents false positives from repeated OnTakeOff events
+            if (hasValidFingerPlacement && isFingerOnScanner)
+            {
+                // Add a small delay before allowing next scan to prevent immediate re-scanning
+                System.Threading.Tasks.Task.Delay(300).ContinueWith(_ =>
+                {
+                    isFingerOnScanner = false;
+                    hasValidFingerPlacement = false; // Reset valid placement flag
+                    Console.WriteLine("👆 Finger removed from scanner - ready for next scan");
+                });
+                SetStatusText("Attendance: Finger removed. Please scan again.");
+            }
+            // If no valid placement, silently ignore OnTakeOff (it's a false positive)
         }
 
         private void OnAttendanceUpdateScreenImage(Bitmap bitmap)
@@ -6299,9 +10163,9 @@ These settings allow you to customize the attendance system behavior for differe
                         m_AttendanceOperation = new FutronicIdentification();
                         m_AttendanceOperation.FakeDetection = false;
                         m_AttendanceOperation.FFDControl = false;
-                        m_AttendanceOperation.FastMode = true;
-                        // INCREASED: Higher FARN for stricter matching to prevent false positives
-                        m_AttendanceOperation.FARN = 150; // Increased from 100 to 150
+                        m_AttendanceOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
+                        // FARN for matching accuracy - increased to 200 for stricter matching
+                        m_AttendanceOperation.FARN = 200; // Increased from 150 to 200 for stricter matching
                         m_AttendanceOperation.Version = VersionCompatible.ftr_version_compatible;
                         
                         // Register events
@@ -6414,44 +10278,8 @@ These settings allow you to customize the attendance system behavior for differe
 
         private List<UserRecord> LoadUsers()
         {
-            var users = new List<UserRecord>();
-            
-            // Check if cloudUsers is initialized
-            if (cloudUsers == null)
-            {
-                SetStatusText("Users not loaded from database yet. Please wait...");
-                return users;
-            }
-            
-            // Convert cloud users to UserRecord format for compatibility
-            foreach (var cloudUser in cloudUsers)
-            {
-                try
-                {
-                    // Only add users with valid templates to prevent identification errors
-                    if (cloudUser?.FingerprintTemplate != null && cloudUser.FingerprintTemplate.Length > 0 && !string.IsNullOrEmpty(cloudUser.Username))
-                    {
-                        var userRecord = new UserRecord
-                        {
-                            UserName = cloudUser.Username,
-                            Template = cloudUser.FingerprintTemplate
-                        };
-                        users.Add(userRecord);
-                    }
-                    else
-                    {
-                        // Skip users with invalid templates (reduced logging)
-                        // Console.WriteLine($"Skipping user '{cloudUser.Username}' - invalid or empty fingerprint template");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // Skip invalid users and log the error
-                    Console.WriteLine($"Error loading user: {ex.Message}");
-                }
-            }
-
-            return users;
+            // For identification we must load every fingerprint template (including multiples per user)
+            return LoadUserRecordsForIdentification();
         }
 
 
@@ -6560,19 +10388,6 @@ These settings allow you to customize the attendance system behavior for differe
                     }
                 }
             }
-
-            // Also update device room combo
-            if (cmbDeviceRoom != null && availableRooms != null)
-            {
-                cmbDeviceRoom.Items.Clear();
-                cmbDeviceRoom.DisplayMember = "DisplayName";
-                cmbDeviceRoom.ValueMember = "RoomId";
-                
-                foreach (var room in availableRooms)
-                {
-                    cmbDeviceRoom.Items.Add(room);
-                }
-            }
         }
 
         private void UpdateCurrentRoomDisplay()
@@ -6609,58 +10424,6 @@ These settings allow you to customize the attendance system behavior for differe
             }
         }
 
-        private void RefreshDeviceList()
-        {
-            try
-            {
-                var devices = dbManager?.GetAllDevices() ?? new List<Database.Models.Device>();
-                
-                if (this.InvokeRequired)
-                {
-                    this.Invoke(new Action(() => UpdateDeviceListView(devices)));
-                }
-                else
-                {
-                    UpdateDeviceListView(devices);
-                }
-            }
-            catch (Exception ex)
-            {
-                SetStatusText($"Failed to refresh device list: {ex.Message}");
-            }
-        }
-
-        private void UpdateDeviceListView(List<Database.Models.Device> devices)
-        {
-            if (deviceListView == null) return;
-
-            deviceListView.Items.Clear();
-
-            foreach (var device in devices)
-            {
-                var item = new ListViewItem(device.DeviceName);
-                item.SubItems.Add(device.DeviceType);
-                item.SubItems.Add(device.Room?.DisplayName ?? "Not Set");
-                item.SubItems.Add(device.Room?.Building ?? "Unknown");
-                item.SubItems.Add(device.IpAddress ?? "Unknown");
-                item.SubItems.Add(device.Status);
-                item.SubItems.Add(device.LastSeen?.ToString("MM/dd HH:mm") ?? "Never");
-
-                // Highlight current device
-                if (device.DeviceId == dbManager?.CurrentDeviceId)
-                {
-                    item.BackColor = Color.LightGreen;
-                    item.Font = new Font(item.Font, FontStyle.Bold);
-                }
-                else if (device.Status != "Active")
-                {
-                    item.BackColor = Color.LightGray;
-                }
-
-                deviceListView.Items.Add(item);
-            }
-        }
-
         private void TabControl_SelectedIndexChanged(object sender, EventArgs e)
         {
             try
@@ -6668,25 +10431,6 @@ These settings allow you to customize the attendance system behavior for differe
                 if (tabControl.SelectedTab == enrollmentTab)
                 {
                     RefreshUserList();
-                }
-                else if (tabControl.SelectedTab == deviceManagementTab)
-                {
-                    RefreshDeviceList();
-                }
-                else if (tabControl.SelectedTab == fingerprintUsersTab)
-                {
-                    if (!fingerprintUsersAccessGranted)
-                    {
-                        var ok = PromptForAdminPassword();
-                        if (!ok)
-                        {
-                            MessageBox.Show("Access denied.", "Authentication", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            tabControl.SelectedTab = enrollmentTab;
-                            return;
-                        }
-                        fingerprintUsersAccessGranted = true;
-                    }
-                    LoadFingerprintUsers();
                 }
             }
             catch { }
@@ -6977,7 +10721,6 @@ These settings allow you to customize the attendance system behavior for differe
                 return SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule.ModuleName), 0);
             }
         }
-
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
             if (nCode >= 0)
@@ -6998,7 +10741,6 @@ These settings allow you to customize the attendance system behavior for differe
             
             return CallNextHookEx(_hookID, nCode, wParam, lParam);
         }
-
         private void ProcessRfidKeyInput(int vkCode)
         {
             try
@@ -7098,8 +10840,8 @@ These settings allow you to customize the attendance system behavior for differe
                 {
                     var trimmed = rfidBuffer.Trim();
                     
-                    // RFID should be exactly 10 digits
-                    if (trimmed.Length == 10 && trimmed.All(char.IsDigit))
+                    // RFID should be numeric; most readers send 10 digits, but allow 8-12 to be safe
+                    if (trimmed.All(char.IsDigit) && trimmed.Length >= 8 && trimmed.Length <= 12)
                     {
                         // Valid RFID format - process it
                         ProcessRfidScan(trimmed);
@@ -7131,6 +10873,22 @@ These settings allow you to customize the attendance system behavior for differe
         {
             try
             {
+                // RFID-only/Fingerprint-only gating
+                if (deviceConfig?.AllowFingerprintOnly == true)
+                {
+                    SetRfidStatusText("Fingerprint-only mode: please use the fingerprint scanner.");
+                    Console.WriteLine($"⚠️ RFID scan blocked - Fingerprint-only mode active. RFID: {rfidData}. Sending OLED denial warning...");
+                    _ = ShowModeRestrictionWarningAsync(false, rfidData);
+                    // Reset RFID capture state to allow subsequent scans
+                    rfidBuffer = "";
+                    rfidCapturing = false;
+                    lastRfidInput = DateTime.MinValue;
+                    if (rfidInputTimer != null)
+                    {
+                        rfidInputTimer.Stop();
+                    }
+                    return;
+                }
                 // Update currentScanLocation based on current device configuration
                 // This ensures RFID scans use the correct location even after reconfiguration
                 if (isDualSensorMode && deviceConfig != null)
@@ -7182,16 +10940,91 @@ These settings allow you to customize the attendance system behavior for differe
                     Console.WriteLine($"   Check if this RFID is registered: SELECT * FROM USERS WHERE RFIDTAG = '{rfidData}'");
                     SetRfidStatusText($"❌ RFID {rfidData} not registered in database. Please register this card first.");
                     AddRfidAttendanceRecord("System", $"RFID {rfidData} Not Registered", "Error");
+                    
+                    // Log unknown RFID scan to ACCESSLOGS table
+                    try
+                    {
+                        if (dbManager != null)
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: null, // NULL for unknown user
+                                roomId: null, // Will use CurrentRoomId from DatabaseManager
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Unknown RFID card: {rfidData}"
+                            );
+                            Console.WriteLine($"📝 Logged unknown RFID scan to ACCESSLOGS: {rfidData}");
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"⚠️ Failed to log unknown RFID scan: {logEx.Message}");
+                        // Continue even if logging fails
+                    }
+                    
+                    // Notify ESP32 to show 'No match' on OLED (RFID path)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
+                    });
                     return;
                 }
                 
                 Console.WriteLine($"✅ RFID found: {userInfo.Username} ({userInfo.UserType})");
                 
+                // Check if user can authenticate with RFID (per-user + global settings)
+                User fullUserObj = null;
+                if (userLookupByGuid != null)
+                {
+                    userLookupByGuid.TryGetValue(userInfo.EmployeeId, out fullUserObj);
+                }
+                
+                if (fullUserObj != null && !CanUserAuthenticateWith(fullUserObj, "RFID"))
+                {
+                    Console.WriteLine($"❌ RFID authentication disabled for user {userInfo.Username}");
+                    SetRfidStatusText($"❌ RFID authentication is disabled for {userInfo.Username}. Please use fingerprint.");
+                    AddRfidAttendanceRecord(userInfo.Username, "RFID Authentication Disabled", "Denied");
+                    
+                    // Log denied access
+                    try
+                    {
+                        if (dbManager != null)
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: userInfo.EmployeeId,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: "RFID authentication disabled for this user"
+                            );
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"⚠️ Failed to log denied RFID access: {logEx.Message}");
+                    }
+                    
+                    return;
+                }
+                
                 string userType = userInfo.UserType?.ToLower();
+                
+                if (deviceConfig?.AllowUnauthorizedFingerprints == true)
+                {
+                    GrantDoorOverrideForKnownUser(userInfo.Username, userInfo.EmployeeId, currentScanLocation ?? "inside", isRfid: true, rfidData: rfidData);
+                    lastRfidInput = DateTime.MinValue;
+                    return;
+                }
                 
                 // Route based on user type and session state (same logic as fingerprint system)
                 if (userType == "instructor")
                 {
+                    // Note: Security check for session ownership is now handled within each session state
+                    // to allow door access for instructors with no scheduled class while preventing session control interference
+                    
                     // Instructor actions based on unified session state
                     switch (currentSessionState)
                     {
@@ -7221,78 +11054,124 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Fingerprint was scanned first, now verifying with RFID
                                 if (userInfo.Username == pendingCrossVerificationUser && userInfo.EmployeeId == pendingCrossVerificationGuid)
                                 {
-                                    // Verified! Reset state and proceed with session start
                                     Console.WriteLine($"✅ INSTRUCTOR VERIFIED: {userInfo.Username} (Fingerprint + RFID match)");
                                     SetRfidStatusText($"✅ Verified: {userInfo.Username}. Starting session...");
                                     
-                                    awaitingCrossTypeVerification = false;
-                                    firstScanType = "";
-                                    pendingCrossVerificationUser = "";
-                                    pendingCrossVerificationGuid = "";
-                                    crossVerificationStartTime = DateTime.MinValue;
-                                    
-                                    // Now proceed with session start INLINE (don't call bypass method)
-                                    SetRfidStatusText($"Verifying instructor schedule for {userInfo.Username}...");
-                                    
-                                    if (dbManager != null)
+                                    // Check if instructor has scheduled class, if not and door access is enabled, grant door access only
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    if (scheduleValidation == null || !scheduleValidation.IsValid || string.IsNullOrEmpty(scheduleValidation.ScheduleId))
                                     {
-                                        var validationResult = dbManager.TryRecordAttendanceByGuid(userInfo.EmployeeId, "Instructor Schedule Check", null);
-                                        
-                                        if (!validationResult.Success)
+                                        // No scheduled class - check if door access is allowed
+                                        if (deviceConfig?.AllowInstructorDoorAccess == true)
                                         {
-                                            SetRfidStatusText($"❌ {userInfo.Username}: {validationResult.Reason}. Cannot start RFID attendance session.");
-                                            AddRfidAttendanceRecord(userInfo.Username, "Session Start Denied", validationResult.Reason);
+                                            Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - No scheduled class, door access granted");
+                                            SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted (no scheduled class).");
+                                            AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                            
+                                            // Log successful door access to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "success",
+                                                        reason: "Instructor door access granted (no scheduled class)"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                                }
+                                            }
+                                            
+                                            // Also record attendance so it appears in web logs (ATTENDANCERECORDS)
+                                            // Use "RFID Door Access" to indicate RFID authentication method
+                                            RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                            
+                                            // Trigger door access
+                                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                                try
+                                                {
+                                                    await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access", rfidData);
+                                                }
+                                                catch (Exception lockEx)
+                                                {
+                                                    Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                                }
+                                            });
+                                            
+                                            // Reset verification state
+                                            awaitingCrossTypeVerification = false;
+                                            pendingCrossVerificationUser = "";
+                                            pendingCrossVerificationGuid = "";
+                                            firstScanType = "";
+                                            crossVerificationStartTime = DateTime.MinValue;
+                                            
                                             return;
                                         }
-                                        
-                                        currentInstructorId = userInfo.EmployeeId;
-                                        currentScheduleId = validationResult.ScheduleId ?? "manual_session";
-                                        currentSessionState = AttendanceSessionState.ActiveForStudents;
-                                        
-                                        signedInStudentGuids.Clear();
-                                        signedOutStudentGuids.Clear();
-                                        
-                                        awaitingCrossTypeVerification = false;
-                                        pendingCrossVerificationUser = "";
-                                        pendingCrossVerificationGuid = "";
-                                        firstScanType = "";
-                                        crossVerificationStartTime = DateTime.MinValue;
-                                        
-                                        UpdateSessionStateDisplay();
-                                        SetRfidStatusText($"✅ Instructor {userInfo.Username} signed in. Session started for {validationResult.SubjectName}. Students can now scan (fingerprint or RFID).");
-                                        AddRfidAttendanceRecord(userInfo.Username, "Session Started", $"Active - {validationResult.SubjectName}");
-                                        
-                                        _ = System.Threading.Tasks.Task.Run(async () => {
-                                            try
+                                        else
+                                        {
+                                            // Door access not enabled - deny
+                                            SetRfidStatusText($"❌ {userInfo.Username}: No scheduled class. Door access not enabled.");
+                                            Console.WriteLine($"❌ INSTRUCTOR {userInfo.Username} DENIED: No scheduled class and door access not enabled");
+                                            AddRfidAttendanceRecord(userInfo.Username, "Access Denied", "No scheduled class");
+                                            
+                                            // Log denied access attempt to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
                                             {
-                                                RecordAttendance(userInfo.Username, "Instructor Sign-In (Session Start)");
-                                                await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Sign-In (Session Start)", rfidData);
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "denied",
+                                                        reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                                }
                                             }
-                                            catch (Exception ex)
+                                            
+                                            // Send denial message to ESP32 for OLED display
+                                            _ = System.Threading.Tasks.Task.Run(async () =>
                                             {
-                                                Console.WriteLine($"Warning: Could not record instructor sign-in: {ex.Message}");
-                                            }
-                                        });
+                                                try
+                                                {
+                                                    await RequestLockControlDenial(userInfo.EmployeeId, userInfo.Username, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                                }
+                                            });
+                                            
+                                            // Reset verification state
+                                            awaitingCrossTypeVerification = false;
+                                            pendingCrossVerificationUser = "";
+                                            pendingCrossVerificationGuid = "";
+                                            firstScanType = "";
+                                            crossVerificationStartTime = DateTime.MinValue;
+                                            
+                                            return;
+                                        }
                                     }
-                                    else
+                                    
+                                    // Has scheduled class - proceed with session start
+                                    if (!CompleteInstructorSessionStart(userInfo.Username, userInfo.EmployeeId, true, rfidData))
                                     {
-                                        SetRfidStatusText($"⚠️ Warning: Cannot verify schedule. Database not available.");
-                                        currentInstructorId = userInfo.EmployeeId;
-                                        currentScheduleId = "manual_session";
-                                        currentSessionState = AttendanceSessionState.ActiveForStudents;
-                                        
-                                        signedInStudentGuids.Clear();
-                                        signedOutStudentGuids.Clear();
-                                        
-                                        awaitingCrossTypeVerification = false;
-                                        pendingCrossVerificationUser = "";
-                                        pendingCrossVerificationGuid = "";
-                                        firstScanType = "";
-                                        crossVerificationStartTime = DateTime.MinValue;
-                                        
-                                        UpdateSessionStateDisplay();
-                                        SetRfidStatusText($"✅ Instructor {userInfo.Username} signed in (unverified). Students can now scan (fingerprint or RFID).");
-                                        AddRfidAttendanceRecord(userInfo.Username, "Session Started", "Active (Unverified)");
+                                        return;
                                     }
                                 }
                                 else
@@ -7311,22 +11190,242 @@ These settings allow you to customize the attendance system behavior for differe
                             }
                             else if (awaitingCrossTypeVerification && firstScanType == "RFID")
                             {
-                                // Already waiting for fingerprint from previous RFID scan
-                                Console.WriteLine($"⏳ Already waiting for fingerprint verification. Please scan fingerprint.");
-                                SetRfidStatusText($"⏳ Waiting for fingerprint verification. Please scan fingerprint to start session.");
+                                if (IsDualAuthRequired)
+                                {
+                                    Console.WriteLine($"⏳ Already waiting for fingerprint verification. Please scan fingerprint.");
+                                    SetRfidStatusText($"⏳ Waiting for fingerprint verification. Please scan fingerprint to start session.");
+                                }
+                                else
+                                {
+                                    // RFID-only mode - check schedule first
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    if (scheduleValidation == null || !scheduleValidation.IsValid || string.IsNullOrEmpty(scheduleValidation.ScheduleId))
+                                    {
+                                        // No scheduled class - check if door access is allowed
+                                        if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                        {
+                                            Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - No scheduled class, door access granted");
+                                            SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted (no scheduled class).");
+                                            AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                            
+                                            // Log successful door access to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "success",
+                                                        reason: "Instructor door access granted (no scheduled class)"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                                }
+                                            }
+                                            
+                                            // Trigger door access
+                                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                                try
+                                                {
+                                                    await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access", rfidData);
+                                                }
+                                                catch (Exception lockEx)
+                                                {
+                                                    Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                                }
+                                            });
+                                            
+                                            return;
+                                        }
+                                        else
+                                        {
+                                            // Door access not enabled - deny
+                                            SetRfidStatusText($"❌ {userInfo.Username}: No scheduled class. Door access not enabled.");
+                                            Console.WriteLine($"❌ INSTRUCTOR {userInfo.Username} DENIED: No scheduled class and door access not enabled");
+                                            AddRfidAttendanceRecord(userInfo.Username, "Access Denied", "No scheduled class");
+                                            
+                                            // Log denied access attempt to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "denied",
+                                                        reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                                }
+                                            }
+                                            
+                                            // Send denial message to ESP32 for OLED display
+                                            _ = System.Threading.Tasks.Task.Run(async () =>
+                                            {
+                                                try
+                                                {
+                                                    await RequestLockControlDenial(userInfo.EmployeeId, userInfo.Username, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                                }
+                                            });
+                                            
+                                            return;
+                                        }
+                                    }
+                                    
+                                    // Has scheduled class - proceed with session start
+                                    Console.WriteLine($"✅ RFID-only mode active - completing instructor session start for {userInfo.Username}");
+                                    if (!CompleteInstructorSessionStart(userInfo.Username, userInfo.EmployeeId, true, rfidData))
+                                    {
+                                        return;
+                                    }
+                                }
                             }
                             else
                             {
-                                // Start dual-auth: RFID first, wait for fingerprint
-                                Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint");
-                                SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to start session.");
-                                
-                                awaitingCrossTypeVerification = true;
-                                firstScanType = "RFID";
-                                pendingCrossVerificationUser = userInfo.Username;
-                                pendingCrossVerificationGuid = userInfo.EmployeeId;
-                                crossVerificationStartTime = DateTime.Now;
-                                AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                if (IsDualAuthRequired)
+                                {
+                                    // Start dual-auth: RFID first, wait for fingerprint
+                                    Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint");
+                                    SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to start session.");
+                                    
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
+                                }
+                                else
+                                {
+                                    // RFID-only mode - check schedule first
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    if (scheduleValidation == null || !scheduleValidation.IsValid || string.IsNullOrEmpty(scheduleValidation.ScheduleId))
+                                    {
+                                        // No scheduled class - check if door access is allowed
+                                        if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                        {
+                                            Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - No scheduled class, door access granted");
+                                            SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted (no scheduled class).");
+                                            AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                            
+                                            // Log successful door access to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "success",
+                                                        reason: "Instructor door access granted (no scheduled class)"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged successful instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                                }
+                                            }
+                                            
+                                            // Also record attendance so it appears in web logs (ATTENDANCERECORDS)
+                                            // Use "RFID Door Access" to indicate RFID authentication method
+                                            RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                            
+                                            // Trigger door access
+                                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                                try
+                                                {
+                                                    await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access", rfidData);
+                                                }
+                                                catch (Exception lockEx)
+                                                {
+                                                    Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                                }
+                                            });
+                                            
+                                            return;
+                                        }
+                                        else
+                                        {
+                                            // Door access not enabled - deny
+                                            SetRfidStatusText($"❌ {userInfo.Username}: No scheduled class. Door access not enabled.");
+                                            Console.WriteLine($"❌ INSTRUCTOR {userInfo.Username} DENIED: No scheduled class and door access not enabled");
+                                            AddRfidAttendanceRecord(userInfo.Username, "Access Denied", "No scheduled class");
+                                            
+                                            // Log denied access attempt to ACCESSLOGS
+                                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                            {
+                                                try
+                                                {
+                                                    dbManager.LogAccessAttempt(
+                                                        userId: userInfo.EmployeeId,
+                                                        roomId: null,
+                                                        authMethod: "RFID",
+                                                        location: currentScanLocation ?? "inside",
+                                                        accessType: "attendance_scan",
+                                                        result: "denied",
+                                                        reason: "Instructor door access denied: No scheduled class and door access not enabled"
+                                                    );
+                                                    Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                                }
+                                                catch (Exception logEx)
+                                                {
+                                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                                }
+                                            }
+                                            
+                                            // Send denial message to ESP32 for OLED display
+                                            _ = System.Threading.Tasks.Task.Run(async () =>
+                                            {
+                                                try
+                                                {
+                                                    await RequestLockControlDenial(userInfo.EmployeeId, userInfo.Username, "Instructor door access denied: No scheduled class and door access not enabled", "instructor");
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                                }
+                                            });
+                                            
+                                            return;
+                                        }
+                                    }
+                                    
+                                    // Has scheduled class - proceed with session start
+                                    Console.WriteLine($"✅ RFID-only mode active - completing instructor session start for {userInfo.Username}");
+                                    if (!CompleteInstructorSessionStart(userInfo.Username, userInfo.EmployeeId, true, rfidData))
+                                    {
+                                        return;
+                                    }
+                                }
                             }
                             break;
                             
@@ -7348,6 +11447,174 @@ These settings allow you to customize the attendance system behavior for differe
                                     // Don't return - treat this as a new first scan
                                 }
                             }
+                            else if (!IsDualAuthRequired)
+                            {
+                                // SECURITY CHECK: If not session owner, check if door access is allowed
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                {
+                                    // Different instructor - check if they have scheduled class
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                    
+                                    if (hasScheduledClass)
+                                    {
+                                        // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log this security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                                Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                    {
+                                        // No scheduled class but door access enabled - allow door access only
+                                        Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID-only mode): {userInfo.Username} - Door access granted (no schedule, different session active)");
+                                        SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Session remains active for students.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                        
+                                        // Log door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class, different session active, RFID-only mode)"
+                                                );
+                                                Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Record attendance for door access
+                                        RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                        
+                                        // Trigger door access without changing session state
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (No Schedule)", rfidData);
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        // No scheduled class and door access not enabled - deny
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} attempted to open sign-out for session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can open sign-out.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to open sign-out for session owned by different instructor. No scheduled class and door access not enabled. (Session Owner: {sessionOwnerName})"
+                                                );
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                }
+                                
+                                Console.WriteLine($"✅ RFID-only mode active - opening sign-out for {userInfo.Username}");
+
+                                awaitingCrossTypeVerification = false;
+                                firstScanType = "";
+                                pendingCrossVerificationUser = "";
+                                pendingCrossVerificationGuid = "";
+                                crossVerificationStartTime = DateTime.MinValue;
+
+                                currentSessionState = AttendanceSessionState.ActiveForSignOut;
+                                UpdateSessionStateDisplay();
+                                SetRfidStatusText($"✅ Instructor {userInfo.Username} opened sign-out. Students can now sign out.");
+                                AddRfidAttendanceRecord(userInfo.Username, "Sign-Out Opened", "Active");
+                                return;
+                            }
                             
                             // Check if completing fingerprint-first verification for sign-out
                             if (awaitingCrossTypeVerification && firstScanType == "FINGERPRINT")
@@ -7355,6 +11622,62 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Fingerprint was scanned first, now verifying with RFID
                                 if (userInfo.Username == pendingCrossVerificationUser && userInfo.EmployeeId == pendingCrossVerificationGuid)
                                 {
+                                    // SECURITY CHECK: Only session owner can open sign-out
+                                    if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                    {
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} attempted to open sign-out for session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can open sign-out.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Reset verification state
+                                        awaitingCrossTypeVerification = false;
+                                        firstScanType = "";
+                                        pendingCrossVerificationUser = "";
+                                        pendingCrossVerificationGuid = "";
+                                        crossVerificationStartTime = DateTime.MinValue;
+                                        
+                                        // Log security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to open sign-out for session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    
                                     // Verified! Reset state and proceed with sign-out
                                     Console.WriteLine($"✅ INSTRUCTOR VERIFIED FOR SIGN-OUT: {userInfo.Username} (Fingerprint + RFID match)");
                                     SetRfidStatusText($"✅ Verified: {userInfo.Username}. Opening sign-out...");
@@ -7391,16 +11714,239 @@ These settings allow you to customize the attendance system behavior for differe
                             }
                             else
                             {
-                                // Start dual-auth: RFID first, wait for fingerprint
-                                Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint to open sign-out");
-                                SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to open sign-out.");
+                                // SECURITY CHECK: If not session owner, check if door access is allowed
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                {
+                                    // Different instructor - check if they have scheduled class
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                    
+                                    if (hasScheduledClass)
+                                    {
+                                        // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log this security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                                Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                    {
+                                        // No scheduled class but door access enabled - allow door access only
+                                        Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - Door access granted (no schedule, different session active)");
+                                        SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Session remains active for students.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                        
+                                        // Log door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class, different session active)"
+                                                );
+                                                Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Record attendance for door access
+                                        RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                        
+                                        // Trigger door access without changing session state
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (No Schedule)", rfidData);
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        // No scheduled class and door access not enabled - deny
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log denied access
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled."
+                                                );
+                                                Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                }
                                 
-                                awaitingCrossTypeVerification = true;
-                                firstScanType = "RFID";
-                                pendingCrossVerificationUser = userInfo.Username;
-                                pendingCrossVerificationGuid = userInfo.EmployeeId;
-                                crossVerificationStartTime = DateTime.Now;
-                                AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                // Session owner or no active session - proceed with normal flow
+                                // NEW LOGIC: During active session, single scan grants door access without changing state
+                                if (IsDualAuthRequired)
+                                {
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - Door access granted, session remains active");
+                                    SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Session remains active for students.");
+                                    AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (Session Active)");
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userInfo.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "RFID",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted during active session"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without changing session state
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (Session Active)", rfidData);
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    // Start waiting for second scan to open sign-out
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
+                                }
+                                else
+                                {
+                                    // RFID-only mode: This shouldn't happen in ActiveForStudents state with single auth
+                                    // but keeping original logic as fallback
+                                    Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint to open sign-out");
+                                    SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to open sign-out.");
+                                    
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
+                                }
                             }
                             break;
                             
@@ -7423,6 +11969,217 @@ These settings allow you to customize the attendance system behavior for differe
                                     // Don't return - treat this as a new first scan
                                 }
                             }
+                            else if (!IsDualAuthRequired)
+                            {
+                                // RFID-only mode
+                                // SECURITY CHECK: If not session owner, check if door access is allowed
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                {
+                                    // Different instructor - check if they have scheduled class
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                    
+                                    if (hasScheduledClass)
+                                    {
+                                        // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log this security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                                Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                    {
+                                        // No scheduled class but door access enabled - allow door access only
+                                        Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID-only mode, sign-out state): {userInfo.Username} - Door access granted (no schedule, different session active)");
+                                        SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Sign-out session remains active.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                        
+                                        // Log door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class, different session active, RFID-only mode, sign-out state)"
+                                                );
+                                                Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Record attendance for door access
+                                        RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                        
+                                        // Trigger door access without ending session
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (No Schedule)", rfidData);
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        // No scheduled class and door access not enabled - deny
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} attempted to end session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can end the session.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to end session owned by different instructor. No scheduled class and door access not enabled. (Session Owner: {sessionOwnerName})"
+                                                );
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                }
+                                
+                                // Session owner - proceed with ending session
+                                Console.WriteLine($"✅ RFID-only mode active - ending session for {userInfo.Username}");
+
+                                awaitingCrossTypeVerification = false;
+                                firstScanType = "";
+                                pendingCrossVerificationUser = "";
+                                pendingCrossVerificationGuid = "";
+                                crossVerificationStartTime = DateTime.MinValue;
+
+                                if (signedInStudentGuids.Count > 0)
+                                {
+                                    var studentNames = new List<string>();
+                                    foreach (var studentGuid in signedInStudentGuids)
+                                    {
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(studentGuid, out var student))
+                                        {
+                                            studentNames.Add(student.Username);
+                                        }
+                                    }
+
+                                    var studentList = string.Join(", ", studentNames);
+                                    SetRfidStatusText($"⚠️ Warning: {signedInStudentGuids.Count} students still signed in: {studentList}. Closing session anyway...");
+                                    AddRfidAttendanceRecord("System", "Session Close Warning", $"{signedInStudentGuids.Count} students still signed in: {studentList}");
+
+                                    await System.Threading.Tasks.Task.Delay(3000);
+                                }
+
+                                currentSessionState = AttendanceSessionState.Inactive;
+                                currentInstructorId = null;
+                                currentScheduleId = null;
+                                currentSubjectName = null;
+                                currentInstructorName = null;
+
+                                signedInStudentGuids.Clear();
+                                signedOutStudentGuids.Clear();
+
+                                UpdateSessionStateDisplay();
+                                UpdateOledModeBlinkingState(); // Stop OLED mode blinking
+                                SetRfidStatusText($"✅ Instructor {userInfo.Username} closed RFID session.");
+                                AddRfidAttendanceRecord(userInfo.Username, "Session Closed", "Inactive");
+
+                                _ = System.Threading.Tasks.Task.Run(async () =>
+                                {
+                                    try
+                                    {
+                                        RecordAttendance(userInfo.Username, "Instructor Sign-Out (Session End)");
+                                        await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Sign-Out (Session End)", rfidData);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"Warning: Could not record instructor sign-out: {ex.Message}");
+                                    }
+                                });
+
+                                return;
+                            }
                             
                             // Check if completing fingerprint-first verification for session-end
                             if (awaitingCrossTypeVerification && firstScanType == "FINGERPRINT")
@@ -7430,6 +12187,62 @@ These settings allow you to customize the attendance system behavior for differe
                                 // Fingerprint was scanned first, now verifying with RFID
                                 if (userInfo.Username == pendingCrossVerificationUser && userInfo.EmployeeId == pendingCrossVerificationGuid)
                                 {
+                                    // SECURITY CHECK: Only session owner can end session
+                                    if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                    {
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} attempted to end session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Only the session owner ({sessionOwnerName}) can end the session.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Reset verification state
+                                        awaitingCrossTypeVerification = false;
+                                        firstScanType = "";
+                                        pendingCrossVerificationUser = "";
+                                        pendingCrossVerificationGuid = "";
+                                        crossVerificationStartTime = DateTime.MinValue;
+                                        
+                                        // Log security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to end session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    
                                     // Verified! Reset state and proceed with session-end
                                     Console.WriteLine($"✅ INSTRUCTOR VERIFIED FOR SESSION-END: {userInfo.Username} (Fingerprint + RFID match)");
                                     SetRfidStatusText($"✅ Verified: {userInfo.Username}. Ending session...");
@@ -7464,6 +12277,8 @@ These settings allow you to customize the attendance system behavior for differe
                                     currentSessionState = AttendanceSessionState.Inactive;
                                     currentInstructorId = null;
                                     currentScheduleId = null;
+                                    currentSubjectName = null;
+                                    currentInstructorName = null;
                                     
                                     signedInStudentGuids.Clear();
                                     signedOutStudentGuids.Clear();
@@ -7475,6 +12290,7 @@ These settings allow you to customize the attendance system behavior for differe
                                     crossVerificationStartTime = DateTime.MinValue;
                                     
                                     UpdateSessionStateDisplay();
+                                    UpdateOledModeBlinkingState(); // Stop OLED mode blinking
                                     SetRfidStatusText($"✅ Instructor {userInfo.Username} closed RFID session.");
                                     AddRfidAttendanceRecord(userInfo.Username, "Session Closed", "Inactive");
                                     
@@ -7510,16 +12326,239 @@ These settings allow you to customize the attendance system behavior for differe
                             }
                             else
                             {
-                                // Start dual-auth: RFID first, wait for fingerprint
-                                Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint to end session");
-                                SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to end session.");
+                                // SECURITY CHECK: If not session owner, check if door access is allowed
+                                if (!string.IsNullOrEmpty(currentInstructorId) && userInfo.EmployeeId != currentInstructorId)
+                                {
+                                    // Different instructor - check if they have scheduled class
+                                    var scheduleValidation = dbManager?.ValidateScheduleForCurrentTime(userInfo.EmployeeId);
+                                    bool hasScheduledClass = scheduleValidation != null && scheduleValidation.IsValid && !string.IsNullOrEmpty(scheduleValidation.ScheduleId);
+                                    
+                                    if (hasScheduledClass)
+                                    {
+                                        // Has scheduled class but different instructor owns session - deny (interference prevention)
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (has scheduled class) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Only the session owner can perform actions.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log this security event
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor (Session Owner: {sessionOwnerName})"
+                                                );
+                                                Console.WriteLine($"📝 Logged unauthorized instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else if (deviceConfig?.AllowInstructorDoorAccess == true)
+                                    {
+                                        // No scheduled class but door access enabled - allow door access only
+                                        Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - Door access granted (no schedule, different session active)");
+                                        SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Sign-out session remains active.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (No Schedule)");
+                                        
+                                        // Log door access to ACCESSLOGS
+                                        if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "success",
+                                                    reason: "Instructor door access granted (no scheduled class, different session active)"
+                                                );
+                                                Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Record attendance for door access
+                                        RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                        
+                                        // Trigger door access without ending session
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (No Schedule)", rfidData);
+                                            }
+                                            catch (Exception lockEx)
+                                            {
+                                                Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        // No scheduled class and door access not enabled - deny
+                                        string sessionOwnerName = userInfo.Username;
+                                        if (userLookupByGuid != null && userLookupByGuid.TryGetValue(currentInstructorId, out var sessionOwner))
+                                        {
+                                            sessionOwnerName = sessionOwner.Username;
+                                        }
+                                        
+                                        Console.WriteLine($"⚠️ SECURITY: Instructor {userInfo.Username} (no schedule) attempted to access session owned by {sessionOwnerName}");
+                                        SetRfidStatusText($"⚠️ Session is active for {sessionOwnerName}. Door access not enabled.");
+                                        AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Session owned by {sessionOwnerName}");
+                                        
+                                        // Log denied access
+                                        if (dbManager != null)
+                                        {
+                                            try
+                                            {
+                                                dbManager.LogAccessAttempt(
+                                                    userId: userInfo.EmployeeId,
+                                                    roomId: null,
+                                                    authMethod: "RFID",
+                                                    location: currentScanLocation ?? "inside",
+                                                    accessType: "attendance_scan",
+                                                    result: "denied",
+                                                    reason: $"Attempted to access session owned by different instructor. No scheduled class and door access not enabled."
+                                                );
+                                                Console.WriteLine($"📝 Logged denied instructor access attempt to ACCESSLOGS for {userInfo.Username}");
+                                            }
+                                            catch (Exception logEx)
+                                            {
+                                                Console.WriteLine($"⚠️ Failed to log security event: {logEx.Message}");
+                                            }
+                                        }
+                                        
+                                        // Notify ESP32 of denial
+                                        _ = System.Threading.Tasks.Task.Run(async () => {
+                                            try
+                                            {
+                                                await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, $"Session owned by {sessionOwnerName}", "instructor", rfidData);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"Warning: Could not send denial to ESP32: {ex.Message}");
+                                            }
+                                        });
+                                        
+                                        return;
+                                    }
+                                }
                                 
-                                awaitingCrossTypeVerification = true;
-                                firstScanType = "RFID";
-                                pendingCrossVerificationUser = userInfo.Username;
-                                pendingCrossVerificationGuid = userInfo.EmployeeId;
-                                crossVerificationStartTime = DateTime.Now;
-                                AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                // Session owner or no active session - proceed with normal flow
+                                // NEW LOGIC: During active sign-out session, single scan grants door access without ending session
+                                if (IsDualAuthRequired)
+                                {
+                                    Console.WriteLine($"🚪 INSTRUCTOR DOOR ACCESS (RFID): {userInfo.Username} - Door access granted, session remains active");
+                                    SetRfidStatusText($"🚪 Instructor {userInfo.Username} - Door access granted. Sign-out session remains active.");
+                                    AddRfidAttendanceRecord(userInfo.Username, "Door Access", "Instructor Door Access (Sign-Out Active)");
+                                    
+                                    // Log door access to ACCESSLOGS
+                                    if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                                    {
+                                        try
+                                        {
+                                            dbManager.LogAccessAttempt(
+                                                userId: userInfo.EmployeeId,
+                                                roomId: null,
+                                                authMethod: "RFID",
+                                                location: currentScanLocation ?? "inside",
+                                                accessType: "attendance_scan",
+                                                result: "success",
+                                                reason: "Instructor door access granted during sign-out session"
+                                            );
+                                            Console.WriteLine($"📝 Logged instructor door access to ACCESSLOGS for {userInfo.Username}");
+                                        }
+                                        catch (Exception logEx)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to log door access: {logEx.Message}");
+                                        }
+                                    }
+                                    
+                                    // Record attendance for door access
+                                    RecordAttendance(userInfo.Username, "RFID Door Access", true, currentScanLocation);
+                                    
+                                    // Trigger door access without ending session
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try
+                                        {
+                                            await RequestRfidLockControl(userInfo.EmployeeId, "Instructor Door Access (Sign-Out Active)", rfidData);
+                                        }
+                                        catch (Exception lockEx)
+                                        {
+                                            Console.WriteLine($"Lock control failed: {lockEx.Message}");
+                                        }
+                                    });
+                                    
+                                    // Start waiting for second scan to end session
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
+                                }
+                                else
+                                {
+                                    // RFID-only mode: This shouldn't happen in ActiveForSignOut state with single auth
+                                    // but keeping original logic as fallback
+                                    Console.WriteLine($"🔍 INSTRUCTOR RFID: {userInfo.Username} - Waiting for fingerprint to end session");
+                                    SetRfidStatusText($"Instructor RFID: {userInfo.Username}. Please scan fingerprint to end session.");
+                                    
+                                    awaitingCrossTypeVerification = true;
+                                    firstScanType = "RFID";
+                                    pendingCrossVerificationUser = userInfo.Username;
+                                    pendingCrossVerificationGuid = userInfo.EmployeeId;
+                                    crossVerificationStartTime = DateTime.Now;
+                                    AddRfidAttendanceRecord(userInfo.Username, "Waiting for Fingerprint", "RFID First");
+                                    
+                                    // Send intermediate status to ESP32
+                                    User user;
+                                    if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userInfo.EmployeeId, out user))
+                                    {
+                                        _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                                    }
+                                }
                             }
                             break;
                             
@@ -7610,17 +12649,164 @@ These settings allow you to customize the attendance system behavior for differe
                     }
                     else
                     {
-                        Console.WriteLine($"❌ No active session found");
-                        Console.WriteLine($"   State: {currentSessionState}");
-                        Console.WriteLine("   Instructor must start a session first!");
-                        SetRfidStatusText($"❌ No active session. Instructor must start attendance session first.");
-                        AddRfidAttendanceRecord(userInfo.Username, "Session Not Active", currentSessionState.ToString());
+                        // Check if this is an outside sensor scan - try early arrival
+                        if (isDualSensorMode && currentScanLocation == "outside")
+                        {
+                            if (IsRfidOnlyMode && !awaitingEarlyArrivalVerification)
+                            {
+                                awaitingEarlyArrivalVerification = true;
+                                earlyFirstScanType = "FINGERPRINT";
+                                earlyPendingUser = userInfo.Username;
+                                earlyPendingGuid = userInfo.EmployeeId;
+                                earlyVerificationStartTime = DateTime.Now;
+                            }
+
+                            Console.WriteLine($"⏰ No active session - handling early arrival (dual-auth) for {userInfo.Username}");
+                            Console.WriteLine($"   Current early arrival state: awaiting={awaitingEarlyArrivalVerification}, firstType={earlyFirstScanType}, pendingUser={earlyPendingUser}");
+
+                            // Timeout check
+                            if (awaitingEarlyArrivalVerification)
+                            {
+                                var elapsed = DateTime.Now - earlyVerificationStartTime;
+                                if (elapsed.TotalSeconds > CROSS_VERIFICATION_TIMEOUT_SECONDS)
+                                {
+                                    Console.WriteLine($"⏱️ EARLY ARRIVAL VERIFICATION TIMEOUT: {earlyPendingUser} took too long");
+                                    SetRfidStatusText($"⏱️ Verification timeout for {earlyPendingUser}. Starting over...");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+                                }
+                            }
+
+                            if (awaitingEarlyArrivalVerification && earlyFirstScanType == "FINGERPRINT")
+                            {
+                                // Fingerprint was scanned first, now verifying with RFID
+                                Console.WriteLine($"   Checking verification: RFID user={userInfo.Username}, GUID={userInfo.EmployeeId}");
+                                Console.WriteLine($"   Against pending: user={earlyPendingUser}, GUID={earlyPendingGuid}");
+                                if (userInfo.Username == earlyPendingUser && userInfo.EmployeeId == earlyPendingGuid)
+                                {
+                                    Console.WriteLine($"✅ EARLY ARRIVAL VERIFIED: {userInfo.Username} (Fingerprint + RFID)");
+                                    SetRfidStatusText($"✅ Verified: {userInfo.Username}. Recording early arrival...");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+
+                                    _ = System.Threading.Tasks.Task.Run(async () => {
+                                        try { await RecordEarlyArrivalRfid(userInfo.Username, userInfo.EmployeeId, rfidData); } catch (Exception ex) { Console.WriteLine($"Early arrival record failed: {ex.Message}"); }
+                                    });
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"❌ EARLY ARRIVAL VERIFICATION FAILED: Fingerprint={earlyPendingUser}, RFID={userInfo.Username}");
+                                    SetRfidStatusText($"❌ Verification failed! Fingerprint: {earlyPendingUser}, RFID: {userInfo.Username}. Please try again.");
+                                    awaitingEarlyArrivalVerification = false;
+                                    earlyFirstScanType = "";
+                                    earlyPendingUser = "";
+                                    earlyPendingGuid = "";
+                                }
+                            }
+                            else if (awaitingEarlyArrivalVerification && earlyFirstScanType == "RFID")
+                            {
+                                // Already waiting for fingerprint - ignore this RFID scan
+                                Console.WriteLine($"⏳ Early arrival: Waiting for fingerprint for {earlyPendingUser}. Ignoring duplicate RFID scan.");
+                                SetRfidStatusText($"Waiting for fingerprint scan. Please scan your fingerprint to complete early arrival.");
+                                
+                                // Remind user on OLED to scan fingerprint
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try { await RequestRfidInfoDisplay(userInfo.EmployeeId, userInfo.Username, "Waiting for fingerprint...", rfidData); } catch { }
+                                });
+                                
+                                return;
+                            }
+                            else if (!awaitingEarlyArrivalVerification)
+                            {
+                                // Start early-arrival verification with RFID first
+                                awaitingEarlyArrivalVerification = true;
+                                earlyFirstScanType = "RFID";
+                                earlyPendingUser = userInfo.Username;
+                                earlyPendingGuid = userInfo.EmployeeId;
+                                earlyVerificationStartTime = DateTime.Now;
+                                Console.WriteLine($"🧭 EARLY ARRIVAL: RFID captured for {userInfo.Username}. Awaiting fingerprint...");
+                                SetRfidStatusText($"RFID OK. Please scan fingerprint to complete early arrival.");
+
+                                // Show first scan acceptance on OLED
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try { await RequestRfidInfoDisplay(userInfo.EmployeeId, userInfo.Username, "RFID OK. Scan fingerprint now.", rfidData); } catch { }
+                                });
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine($"❌ No active session found");
+                            Console.WriteLine($"   State: {currentSessionState}");
+                            Console.WriteLine("   Instructor must start a session first!");
+                            SetRfidStatusText($"❌ No active session. Instructor must start attendance session first.");
+                            AddRfidAttendanceRecord(userInfo.Username, "Session Not Active", currentSessionState.ToString());
+                            
+                            // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                            if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                            {
+                                try
+                                {
+                                    dbManager.LogAccessAttempt(
+                                        userId: userInfo.EmployeeId,
+                                        roomId: null,
+                                        authMethod: "RFID",
+                                        location: currentScanLocation ?? "inside",
+                                        accessType: "attendance_scan",
+                                        result: "denied",
+                                        reason: "No active session. Instructor must start the session first."
+                                    );
+                                    Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userInfo.Username}");
+                                }
+                                catch (Exception logEx)
+                                {
+                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                }
+                            }
+                            
+                            // Send denial message to ESP32 for OLED display (RFID)
+                            _ = System.Threading.Tasks.Task.Run(async () => {
+                                try
+                                {
+                                    await RequestRfidLockControlDenial(userInfo.EmployeeId, userInfo.Username, "No active session. Instructor must start the session first.", "student", rfidData);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Warning: Could not send RFID denial to ESP32: {ex.Message}");
+                                }
+                            });
+                        }
                     }
                 }
                 else
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} belongs to {userInfo.Username} ({userType}). Only instructors, students, custodians, and deans can use attendance system.");
                     AddRfidAttendanceRecord(userInfo.Username, "Access Denied", $"Invalid Role ({userType})");
+                    
+                    // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                    if (dbManager != null && !string.IsNullOrEmpty(userInfo.EmployeeId))
+                    {
+                        try
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: userInfo.EmployeeId,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Invalid role ({userType}). Only instructors, students, custodians, and deans can use attendance system."
+                            );
+                            Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userInfo.Username}");
+                        }
+                        catch (Exception logEx)
+                        {
+                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                        }
+                    }
                 }
             }
             catch (Exception ex)
@@ -7628,7 +12814,6 @@ These settings allow you to customize the attendance system behavior for differe
                 SetRfidStatusText($"Error processing RFID scan: {ex.Message}");
             }
         }
-
         private void HandleRfidStudentSignIn(string rfidData)
         {
             try
@@ -7641,6 +12826,33 @@ These settings allow you to customize the attendance system behavior for differe
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
                     AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    
+                    // Log unknown RFID scan to ACCESSLOGS table
+                    try
+                    {
+                        if (dbManager != null)
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: null,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Unknown RFID card: {rfidData}"
+                            );
+                            Console.WriteLine($"📝 Logged unknown RFID scan to ACCESSLOGS: {rfidData}");
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"⚠️ Failed to log unknown RFID scan: {logEx.Message}");
+                    }
+                    
+                    // Notify ESP32 to show 'No match' on OLED (RFID path)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
+                    });
                     return;
                 }
                 
@@ -7653,12 +12865,69 @@ These settings allow you to customize the attendance system behavior for differe
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} belongs to {userName} ({userType}). Only students can sign in during active session.");
                     AddRfidAttendanceRecord(userName, "Access Denied", $"Not Student ({userType})");
+                    
+                    // Log denied access attempt to ACCESSLOGS for attendance logs visibility
+                    if (dbManager != null && !string.IsNullOrEmpty(userGuid))
+                    {
+                        try
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: userGuid,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Access denied. Only students can sign in during active session. User type: {userType}"
+                            );
+                            Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                        }
+                        catch (Exception logEx)
+                        {
+                            Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                        }
+                    }
+                    
+                    // Send denial message to ESP32 for OLED display (RFID)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try
+                        {
+                            await RequestRfidLockControlDenial(userGuid, userName, $"Access denied. Only students can sign in during active session.", userType, rfidData);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: Could not send RFID denial to ESP32: {ex.Message}");
+                        }
+                    });
                     return;
                 }
                 
                 // Check if student is scanning at outside sensor - door access only, no attendance
                 if (isDualSensorMode && currentScanLocation == "outside")
                 {
+                    // Check if session is active for students (same logic as fingerprint)
+                    if (currentSessionState != AttendanceSessionState.ActiveForStudents &&
+                        currentSessionState != AttendanceSessionState.ActiveForSignOut &&
+                        currentSessionState != AttendanceSessionState.WaitingForInstructorSignOut)
+                    {
+                        Console.WriteLine($"❌ No active session - denying door access for student {userName} (RFID)");
+                        SetRfidStatusText($"❌ No active session. Door access denied for {userName}.");
+                        AddRfidAttendanceRecord(userName, "Door Access Denied", "No Active Session");
+                        
+                        // Send denial message to ESP32 for OLED display (RFID)
+                        _ = System.Threading.Tasks.Task.Run(async () => {
+                            try
+                            {
+                                await RequestRfidLockControlDenial(userGuid, userName, "No active session. Instructor must start the session first.", "student", rfidData);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Warning: Could not send RFID denial to ESP32: {ex.Message}");
+                            }
+                        });
+                        return;
+                    }
+                    
                     // Outside sensor - door access only, no attendance
                     Console.WriteLine($"🚪 OUTSIDE SENSOR (RFID): {userName} - Door access only (no attendance)");
                     SetRfidStatusText($"🚪 Door access granted: {userName}. Attendance not recorded (outside sensor).");
@@ -7679,6 +12948,15 @@ These settings allow you to customize the attendance system behavior for differe
                     return;
                 }
                 
+                if (IsRfidOnlyMode && !awaitingCrossTypeVerification)
+                {
+                    awaitingCrossTypeVerification = true;
+                    firstScanType = "FINGERPRINT";
+                    pendingCrossVerificationUser = userName;
+                    pendingCrossVerificationGuid = userGuid;
+                    crossVerificationStartTime = DateTime.Now;
+                }
+
                 // Check for cross-type verification timeout first
                 if (awaitingCrossTypeVerification)
                 {
@@ -7737,6 +13015,16 @@ These settings allow you to customize the attendance system behavior for differe
                             try
                             {
                                 ProcessVerifiedStudentSignIn(userName, userGuid);
+                                
+                                // Show session mode display after scan
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await System.Threading.Tasks.Task.Delay(6000); // Wait for scan result to display
+                                        await RequestSessionModeDisplay(isRfid: true, rfidData: rfidData);
+                                    }
+                                    catch { }
+                                });
                             }
                             catch (Exception ex)
                             {
@@ -7802,6 +13090,13 @@ These settings allow you to customize the attendance system behavior for differe
                 pendingCrossVerificationGuid = userGuid;
                 crossVerificationStartTime = DateTime.Now;
                 AddRfidAttendanceRecord(userName, "Waiting for Fingerprint", "First Scan");
+                
+                // Send intermediate status to ESP32
+                User user;
+                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out user))
+                {
+                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(user, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                }
             }
             catch (Exception ex)
             {
@@ -7822,6 +13117,33 @@ These settings allow you to customize the attendance system behavior for differe
                 {
                     SetRfidStatusText($"❌ RFID {rfidData} not found in database.");
                     AddRfidAttendanceRecord("System", "RFID Not Found", "Error");
+                    
+                    // Log unknown RFID scan to ACCESSLOGS table
+                    try
+                    {
+                        if (dbManager != null)
+                        {
+                            dbManager.LogAccessAttempt(
+                                userId: null,
+                                roomId: null,
+                                authMethod: "RFID",
+                                location: currentScanLocation ?? "inside",
+                                accessType: "attendance_scan",
+                                result: "denied",
+                                reason: $"Unknown RFID card: {rfidData}"
+                            );
+                            Console.WriteLine($"📝 Logged unknown RFID scan to ACCESSLOGS: {rfidData}");
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"⚠️ Failed to log unknown RFID scan: {logEx.Message}");
+                    }
+                    
+                    // Notify ESP32 to show 'No match' on OLED (RFID path)
+                    _ = System.Threading.Tasks.Task.Run(async () => {
+                        try { await RequestRfidNoMatchDisplay(rfidData); } catch { }
+                    });
                     return;
                 }
                 
@@ -7881,6 +13203,15 @@ These settings allow you to customize the attendance system behavior for differe
                     return;
                 }
                 
+                if (IsRfidOnlyMode && !awaitingCrossTypeVerification)
+                {
+                    awaitingCrossTypeVerification = true;
+                    firstScanType = "FINGERPRINT";
+                    pendingCrossVerificationUser = userName;
+                    pendingCrossVerificationGuid = userGuid;
+                    crossVerificationStartTime = DateTime.Now;
+                }
+
                 // CRITICAL: Check for verification timeout first
                 if (awaitingCrossTypeVerification)
                 {
@@ -7916,11 +13247,89 @@ These settings allow you to customize the attendance system behavior for differe
                         firstScanType = "";
                         crossVerificationStartTime = DateTime.MinValue;
                         
-                        // Process verified sign-out
+                        // CRITICAL FIX: Validate student enrollment before processing sign-out
+                        // Get user info for validation
+                        User user = null;
+                        if (userLookupByUsername != null)
+                        {
+                            userLookupByUsername.TryGetValue(userName, out user);
+                        }
+                        
+                        if (user != null && !string.IsNullOrEmpty(user.EmployeeId) && dbManager != null)
+                        {
+                            // Validate enrollment using the same method as sign-in
+                            var validationAttempt = dbManager.TryRecordAttendanceByGuid(user.EmployeeId, "Student Sign-In", null);
+                            
+                            if (validationAttempt == null || !validationAttempt.Success)
+                            {
+                                // Student is not enrolled - deny sign-out
+                                var reason = validationAttempt?.Reason ?? "Student is not enrolled in any class scheduled at this time";
+                                SetRfidStatusText($"❌ Student {userName}: {reason}");
+                                Console.WriteLine($"❌ STUDENT {userName} SIGN-OUT DENIED: {reason}");
+                                
+                                // Reset verification state
+                                awaitingCrossTypeVerification = false;
+                                pendingCrossVerificationUser = "";
+                                pendingCrossVerificationGuid = "";
+                                firstScanType = "";
+                                crossVerificationStartTime = DateTime.MinValue;
+                                
+                                // Log denied access attempt to ACCESSLOGS
+                                try
+                                {
+                                    dbManager.LogAccessAttempt(
+                                        userId: user.EmployeeId,
+                                        roomId: null,
+                                        authMethod: "RFID",
+                                        location: currentScanLocation ?? "inside",
+                                        accessType: "attendance_scan",
+                                        result: "denied",
+                                        reason: reason
+                                    );
+                                    Console.WriteLine($"📝 Logged denied access attempt to ACCESSLOGS for {userName}");
+                                }
+                                catch (Exception logEx)
+                                {
+                                    Console.WriteLine($"⚠️ Failed to log denied access attempt: {logEx.Message}");
+                                }
+                                
+                                // Create denial record
+                                int userIdInt = user.Id;
+                                var denialRecord = new Database.Models.AttendanceRecord
+                                {
+                                    UserId = userIdInt,
+                                    Username = userName,
+                                    Timestamp = DateTime.Now,
+                                    Action = "Student Sign-Out (RFID)",
+                                    Status = $"Denied: {reason}"
+                                };
+                                attendanceRecords.Add(denialRecord);
+                                UpdateAttendanceDisplay(denialRecord);
+                                AddRfidAttendanceRecord(userName, "Sign-Out Denied", reason);
+                                
+                                // Send denial message to ESP32 for OLED display
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await RequestRfidLockControlDenial(userGuid, userName, reason, "student", rfidData);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"Warning: Could not send RFID denial to ESP32: {ex.Message}");
+                                    }
+                                });
+                                
+                                return;
+                            }
+                        }
+                        
+                        // Process verified sign-out (only if validation passed)
                         System.Threading.Tasks.Task.Run(() => {
                             try
                             {
+                                Console.WriteLine($"🔍 CALLING TryRecordAttendanceByGuid for sign-out: User={userName}, GUID={userGuid}");
                                 var attempt = dbManager?.TryRecordAttendanceByGuid(userGuid, "Student Sign-Out (RFID)", null);
+                                Console.WriteLine($"🔍 TryRecordAttendanceByGuid result: Success={attempt?.Success}, Reason={attempt?.Reason}");
                                 this.Invoke(new Action(() => {
                                     if (attempt != null && attempt.Success)
                                     {
@@ -7992,6 +13401,16 @@ These settings allow you to customize the attendance system behavior for differe
                                         UpdateAttendanceDisplay(local);
                                     }
                                 }));
+                                
+                                // Show session mode display after scan (both success and denied)
+                                _ = System.Threading.Tasks.Task.Run(async () => {
+                                    try
+                                    {
+                                        await System.Threading.Tasks.Task.Delay(6000); // Wait for scan result to display
+                                        await RequestSessionModeDisplay(isRfid: true, rfidData: rfidData);
+                                    }
+                                    catch { }
+                                });
                             }
                             catch (Exception ex)
                             {
@@ -8039,6 +13458,13 @@ These settings allow you to customize the attendance system behavior for differe
                 pendingCrossVerificationGuid = userGuid;
                 crossVerificationStartTime = DateTime.Now;
                 AddRfidAttendanceRecord(userName, "Waiting for Fingerprint", "First Scan");
+                
+                // Send intermediate status to ESP32
+                User userForStatus;
+                if (userLookupByGuid != null && userLookupByGuid.TryGetValue(userGuid, out userForStatus))
+                {
+                    _ = Task.Run(async () => await SendIntermediateStatusToESP32(userForStatus, "RFID", "FINGERPRINT", "/api/rfid-scan"));
+                }
             }
             catch (Exception ex)
             {
@@ -8303,7 +13729,6 @@ These settings allow you to customize the attendance system behavior for differe
             
             Console.WriteLine("✅ Dual Sensor Tab initialized");
         }
-
         private void InitializeDeviceConfigTab()
         {
             // Create device config tab
@@ -8421,57 +13846,166 @@ These settings allow you to customize the attendance system behavior for differe
             btnReconfigure.Click += BtnReconfigure_Click;
             actionPanel.Controls.Add(btnReconfigure);
             
-            var btnChangeRoom = new Button
-            {
-                Text = "🏫 Change Room",
-                Location = new Point(205, 40),
-                Size = new Size(150, 35),
-                BackColor = Color.FromArgb(108, 117, 125),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                Cursor = Cursors.Hand
-            };
-            btnChangeRoom.FlatAppearance.BorderSize = 0;
-            btnChangeRoom.Click += (s, e) =>
-            {
-                var result = MessageBox.Show(
-                    "Changing the room will restart the configuration.\n\nContinue?",
-                    "Change Room",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question);
-                
-                if (result == DialogResult.Yes)
-                {
-                    DeviceConfigManager.Instance.DeleteConfiguration();
-                    Application.Restart();
-                }
-            };
-            actionPanel.Controls.Add(btnChangeRoom);
-            
-            // Fix Room Assignment button
-            var btnFixRoomAssignment = new Button
-            {
-                Text = "🔧 Fix Room Assignment",
-                Location = new Point(365, 40),
-                Size = new Size(180, 35),
-                BackColor = Color.FromArgb(220, 53, 69),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                Cursor = Cursors.Hand
-            };
-            btnFixRoomAssignment.FlatAppearance.BorderSize = 0;
-            btnFixRoomAssignment.Click += BtnFixRoomAssignment_Click;
-            actionPanel.Controls.Add(btnFixRoomAssignment);
+            // Removed Change Room and Fix Room buttons as requested
             
             mainPanel.Controls.Add(actionPanel);
+
+            // Events configuration section
+            var eventsPanel = new Panel
+            {
+                Location = new Point(30, actionPanel.Location.Y + actionPanel.Height + 20),
+                Size = new Size(800, 180),
+                BackColor = Color.White,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            };
+
+            eventsPanel.Paint += (s, e) =>
+            {
+                ControlPaint.DrawBorder(e.Graphics, eventsPanel.ClientRectangle,
+                    Color.FromArgb(13, 110, 253), ButtonBorderStyle.Solid);
+            };
+
+            var lblEventsTitle = new Label
+            {
+                Text = "🎛️ Events Configuration",
+                Location = new Point(15, 10),
+                Size = new Size(400, 25),
+                Font = new Font("Segoe UI", 11, FontStyle.Bold),
+                ForeColor = Color.FromArgb(33, 37, 41)
+            };
+            eventsPanel.Controls.Add(lblEventsTitle);
+
+            var lblEventsDescription = new Label
+            {
+                Text = "Control how the door reacts to unmatched fingerprints.",
+                Location = new Point(15, 40),
+                Size = new Size(750, 20),
+                Font = new Font("Segoe UI", 9),
+                ForeColor = Color.FromArgb(73, 80, 87)
+            };
+            eventsPanel.Controls.Add(lblEventsDescription);
+
+            chkAllowUnauthorizedFingerprints = new CheckBox
+            {
+                Text = "Allow unauthorized fingerprints to open doors",
+                Location = new Point(20, 70),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(220, 53, 69),
+                Checked = deviceConfig?.AllowUnauthorizedFingerprints ?? false
+            };
+            chkAllowUnauthorizedFingerprints.CheckedChanged += ChkAllowUnauthorizedFingerprints_CheckedChanged;
+            eventsPanel.Controls.Add(chkAllowUnauthorizedFingerprints);
+
+            var lblUnauthorizedHint = new Label
+            {
+                Text = "Warning: when enabled, any detected fingerprint will unlock the door.",
+                Location = new Point(40, 95),
+                Size = new Size(720, 20),
+                Font = new Font("Segoe UI", 8, FontStyle.Italic),
+                ForeColor = Color.FromArgb(220, 53, 69)
+            };
+            eventsPanel.Controls.Add(lblUnauthorizedHint);
+
+            // NEW: Fingerprint-Only and RFID-Only toggles
+            chkFingerprintOnly = new CheckBox
+            {
+                Text = "Allow Fingerprint Only",
+                Location = new Point(20, 120),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 10),
+                Checked = deviceConfig?.AllowFingerprintOnly ?? false
+            };
+            chkFingerprintOnly.CheckedChanged += (s, e) =>
+            {
+                try
+                {
+                    if (deviceConfig == null) return;
+                    deviceConfig.AllowFingerprintOnly = chkFingerprintOnly.Checked;
+                    if (chkFingerprintOnly.Checked)
+                    {
+                        deviceConfig.AllowRfidOnly = false;
+                        try { chkRfidOnly.Checked = false; } catch { }
+                    }
+                    DeviceConfigManager.Instance.SaveConfiguration(deviceConfig);
+                    SetStatusText(chkFingerprintOnly.Checked
+                        ? "🔧 Fingerprint-Only mode enabled (RFID not required)."
+                        : "🔧 Fingerprint-Only mode disabled.");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to update Fingerprint-Only setting:\n{ex.Message}",
+                        "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+            eventsPanel.Controls.Add(chkFingerprintOnly);
+
+            chkRfidOnly = new CheckBox
+            {
+                Text = "Allow RFID Only",
+                Location = new Point(220, 120),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 10),
+                Checked = deviceConfig?.AllowRfidOnly ?? false
+            };
+            chkRfidOnly.CheckedChanged += (s, e) =>
+            {
+                try
+                {
+                    if (deviceConfig == null) return;
+                    deviceConfig.AllowRfidOnly = chkRfidOnly.Checked;
+                    if (chkRfidOnly.Checked)
+                    {
+                        deviceConfig.AllowFingerprintOnly = false;
+                        try { chkFingerprintOnly.Checked = false; } catch { }
+                    }
+                    DeviceConfigManager.Instance.SaveConfiguration(deviceConfig);
+                    SetStatusText(chkRfidOnly.Checked
+                        ? "🔧 RFID-Only mode enabled (fingerprint not required)."
+                        : "🔧 RFID-Only mode disabled.");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to update RFID-Only setting:\n{ex.Message}",
+                        "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+            eventsPanel.Controls.Add(chkRfidOnly);
+
+            chkAllowInstructorDoorAccess = new CheckBox
+            {
+                Text = "Allow Instructors Door Access with no Scheduled time",
+                Location = new Point(20, 150),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 10),
+                Checked = deviceConfig?.AllowInstructorDoorAccess ?? false
+            };
+            chkAllowInstructorDoorAccess.CheckedChanged += (s, e) =>
+            {
+                try
+                {
+                    if (deviceConfig == null) return;
+                    deviceConfig.AllowInstructorDoorAccess = chkAllowInstructorDoorAccess.Checked;
+                    DeviceConfigManager.Instance.SaveConfiguration(deviceConfig);
+                    SetStatusText(chkAllowInstructorDoorAccess.Checked
+                        ? "🔧 Instructor door access (no schedule) enabled."
+                        : "🔧 Instructor door access (no schedule) disabled.");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to update Instructor Door Access setting:\n{ex.Message}",
+                        "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+            eventsPanel.Controls.Add(chkAllowInstructorDoorAccess);
+
+            mainPanel.Controls.Add(eventsPanel);
             
             // Help section
             var helpPanel = new Panel
             {
-                Location = new Point(30, actionPanel.Bottom + 20),
-                Size = new Size(800, 120),
+                Location = new Point(30, eventsPanel.Location.Y + eventsPanel.Height + 20),
+                Size = new Size(800, 180),
                 BackColor = Color.FromArgb(230, 244, 255),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
@@ -8497,9 +14031,9 @@ These settings allow you to customize the attendance system behavior for differe
                 Text = "• Click 'Reconfigure Sensors' to reassign fingerprint devices\n" +
                        "• Sensors can be set to 'None' if you only need one scanner\n" +
                        "• Changes take effect immediately without restarting the application\n" +
-                       "• Use 'Change Room' if you need to select a different room",
+                       "• If you have only one physical device, enable Test Mode to simulate dual sensors",
                 Location = new Point(15, 40),
-                Size = new Size(760, 70),
+                Size = new Size(760, 130),
                 Font = new Font("Segoe UI", 9),
                 ForeColor = Color.FromArgb(52, 58, 64)
             };
@@ -8700,8 +14234,8 @@ These settings allow you to customize the attendance system behavior for differe
                 System.Threading.Thread.Sleep(500);
                 Application.DoEvents();
                 
-                // Show configuration dialog
-                var dialog = new StartupConfigDialog(dbManager);
+                // Show configuration dialog with current configuration preselected
+                var dialog = new StartupConfigDialog(dbManager, deviceConfig);
                 var result = dialog.ShowDialog();
                 
                 if (result == DialogResult.OK && dialog.SelectedConfiguration != null)
@@ -8823,6 +14357,44 @@ These settings allow you to customize the attendance system behavior for differe
                         break;
                     }
                 }
+            }
+        }
+
+        private void ChkAllowUnauthorizedFingerprints_CheckedChanged(object sender, EventArgs e)
+        {
+            if (chkAllowUnauthorizedFingerprints == null)
+            {
+                return;
+            }
+
+            bool allow = chkAllowUnauthorizedFingerprints.Checked;
+
+            try
+            {
+                if (deviceConfig == null)
+                {
+                    deviceConfig = DeviceConfigManager.Instance.GetCurrentConfiguration() ?? new DeviceConfiguration();
+                }
+
+                deviceConfig.AllowUnauthorizedFingerprints = allow;
+                DeviceConfigManager.Instance.SaveConfiguration(deviceConfig);
+
+                var statusMessage = allow
+                    ? "⚠️ Unauthorized fingerprints will now unlock the door."
+                    : "✅ Only registered users can unlock the door.";
+                SetStatusText(statusMessage);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"Failed to update unauthorized fingerprint setting:\n{ex.Message}",
+                    "Configuration Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+
+                chkAllowUnauthorizedFingerprints.CheckedChanged -= ChkAllowUnauthorizedFingerprints_CheckedChanged;
+                chkAllowUnauthorizedFingerprints.Checked = !allow;
+                chkAllowUnauthorizedFingerprints.CheckedChanged += ChkAllowUnauthorizedFingerprints_CheckedChanged;
             }
         }
 
@@ -8964,7 +14536,6 @@ These settings allow you to customize the attendance system behavior for differe
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
         private void StartInsideSensorOperation()
         {
             if (!m_InsideSensorEnabled) return;
@@ -8979,23 +14550,40 @@ These settings allow you to customize the attendance system behavior for differe
                     m_InsideSensorOperation = new FutronicIdentification();
                     m_InsideSensorOperation.FakeDetection = false;
                     m_InsideSensorOperation.FFDControl = false;
-                    m_InsideSensorOperation.FastMode = true;
-                    // INCREASED: Higher FARN for stricter matching to prevent false positives
-                    m_InsideSensorOperation.FARN = 150; // Increased from 100 to 150
+                    m_InsideSensorOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
+                    // FARN for matching accuracy - increased to 200 for stricter matching
+                    m_InsideSensorOperation.FARN = 200; // Increased from 150 to 200 for stricter matching
                     m_InsideSensorOperation.Version = VersionCompatible.ftr_version_compatible;
                     
                     // Note: Futronic SDK device selection is handled internally
                     // The first available device will be used for inside sensor
                     Console.WriteLine($"Inside sensor configured (device index: {deviceConfig?.InsideSensor?.SensorIndex ?? 0})");
                     
-                    // Wire up events
-                    m_InsideSensorOperation.OnPutOn += (progress) =>
-                    {
-                        this.Invoke(new Action(() =>
-                        {
-                            dualSensorPanel?.UpdateInsideStatus("Scanning...");
-                        }));
-                    };
+                                          // Wire up events
+                      m_InsideSensorOperation.OnPutOn += (progress) =>
+                      {
+                                                     // Track valid finger placement on inside sensor
+                           isFingerOnInsideSensor = true;
+                           Console.WriteLine("👆 Finger detected on inside sensor - preventing repeated scans");
+                           this.Invoke(new Action(() =>
+                           {
+                               dualSensorPanel?.UpdateInsideStatus("Scanning...");
+                           }));
+                      };
+                      
+                      m_InsideSensorOperation.OnTakeOff += (progress) =>
+                      {
+                          // Only mark as removed if we actually had a finger on
+                          // Add delay to prevent false positives
+                          if (isFingerOnInsideSensor)
+                          {
+                              System.Threading.Tasks.Task.Delay(300).ContinueWith(_ =>
+                              {
+                                  isFingerOnInsideSensor = false;
+                                  Console.WriteLine("👆 Finger removed from inside sensor - ready for next scan");
+                              });
+                          }
+                      };
                     
                     m_InsideSensorOperation.UpdateScreenImage += (bitmap) =>
                     {
@@ -9018,18 +14606,25 @@ These settings allow you to customize the attendance system behavior for differe
                         dualSensorPanel?.UpdateInsideStatus("Active");
                     }));
                     
-                    // Start continuous identification
-                    while (!m_bExit && m_InsideSensorEnabled)
-                    {
-                        int matchIndex = -1;
-                        try
-                        {
-                            // Check if operation is still valid
-                            if (m_InsideSensorOperation == null)
-                            {
-                                Console.WriteLine("❌ Inside sensor operation is null, stopping...");
-                                break;
-                            }
+                                          // Start continuous identification
+                      while (!m_bExit && m_InsideSensorEnabled)
+                      {
+                          // Skip scan if finger is still on scanner (prevents repeated scans)
+                          if (isFingerOnInsideSensor)
+                          {
+                              System.Threading.Thread.Sleep(200); // Short sleep while finger is on
+                              continue;
+                          }
+                          
+                          int matchIndex = -1;
+                          try
+                          {
+                              // Check if operation is still valid
+                              if (m_InsideSensorOperation == null)
+                              {
+                                  Console.WriteLine("❌ Inside sensor operation is null, stopping...");
+                                  break;
+                              }
                             
                             // Convert UserRecord list to FtrIdentifyRecord array
                             var records = new FtrIdentifyRecord[m_IdentificationUsers.Count];
@@ -9041,15 +14636,23 @@ These settings allow you to customize the attendance system behavior for differe
                             var result = m_InsideSensorOperation.Identification(records, ref matchIndex);
                             if (result == FutronicSdkBase.RETCODE_OK)
                             {
+                                // Reset finger-on flag after successful identification
+                                isFingerOnInsideSensor = false;
+                                
                                 this.Invoke(new Action(() =>
                                 {
                                     HandleSensorScan(true, matchIndex, "inside");
                                 }));
                             }
-                            else
+                            else if (!isFingerOnInsideSensor)
                             {
-                                // Log non-OK results but don't spam
+                                // Only log non-OK results if finger is not detected
+                                // This prevents spam when no finger is present
                                 Console.WriteLine($"Inside sensor result: {result}");
+                                this.Invoke(new Action(() =>
+                                {
+                                    HandleSensorScan(false, matchIndex, "inside");
+                                }));
                             }
                         }
                         catch (InvalidOperationException ex)
@@ -9094,23 +14697,40 @@ These settings allow you to customize the attendance system behavior for differe
                     m_OutsideSensorOperation = new FutronicIdentification();
                     m_OutsideSensorOperation.FakeDetection = false;
                     m_OutsideSensorOperation.FFDControl = false;
-                    m_OutsideSensorOperation.FastMode = true;
-                    // INCREASED: Higher FARN for stricter matching to prevent false positives
-                    m_OutsideSensorOperation.FARN = 150; // Increased from 100 to 150
+                    m_OutsideSensorOperation.FastMode = false; // DISABLED: Prioritize accuracy over speed
+                    // FARN for matching accuracy - increased to 200 for stricter matching
+                    m_OutsideSensorOperation.FARN = 200; // Increased from 150 to 200 for stricter matching
                     m_OutsideSensorOperation.Version = VersionCompatible.ftr_version_compatible;
                     
                     // Note: Futronic SDK device selection is handled internally  
                     // When multiple devices are present, SDK manages device access
                     Console.WriteLine($"Outside sensor configured (device index: {deviceConfig?.OutsideSensor?.SensorIndex ?? 1})");
                     
-                    // Wire up events
-                    m_OutsideSensorOperation.OnPutOn += (progress) =>
-                    {
-                        this.Invoke(new Action(() =>
-                        {
-                            dualSensorPanel?.UpdateOutsideStatus("Scanning...");
-                        }));
-                    };
+                                          // Wire up events
+                      m_OutsideSensorOperation.OnPutOn += (progress) =>
+                      {
+                                                     // Track valid finger placement on outside sensor
+                           isFingerOnOutsideSensor = true;
+                           Console.WriteLine("👆 Finger detected on outside sensor - preventing repeated scans");
+                           this.Invoke(new Action(() =>
+                           {
+                               dualSensorPanel?.UpdateOutsideStatus("Scanning...");
+                           }));
+                      };
+                      
+                      m_OutsideSensorOperation.OnTakeOff += (progress) =>
+                      {
+                          // Only mark as removed if we actually had a finger on
+                          // Add delay to prevent false positives
+                          if (isFingerOnOutsideSensor)
+                          {
+                              System.Threading.Tasks.Task.Delay(300).ContinueWith(_ =>
+                              {
+                                  isFingerOnOutsideSensor = false;
+                                  Console.WriteLine("👆 Finger removed from outside sensor - ready for next scan");
+                              });
+                          }
+                      };
                     
                     m_OutsideSensorOperation.UpdateScreenImage += (bitmap) =>
                     {
@@ -9133,18 +14753,25 @@ These settings allow you to customize the attendance system behavior for differe
                         dualSensorPanel?.UpdateOutsideStatus("Active");
                     }));
                     
-                    // Start continuous identification
-                    while (!m_bExit && m_OutsideSensorEnabled)
-                    {
-                        int matchIndex = -1;
-                        try
-                        {
-                            // Check if operation is still valid
-                            if (m_OutsideSensorOperation == null)
-                            {
-                                Console.WriteLine("❌ Outside sensor operation is null, stopping...");
-                                break;
-                            }
+                                          // Start continuous identification
+                      while (!m_bExit && m_OutsideSensorEnabled)
+                      {
+                          // Skip scan if finger is still on scanner (prevents repeated scans)
+                          if (isFingerOnOutsideSensor)
+                          {
+                              System.Threading.Thread.Sleep(200); // Short sleep while finger is on
+                              continue;
+                          }
+                          
+                          int matchIndex = -1;
+                          try
+                          {
+                              // Check if operation is still valid
+                              if (m_OutsideSensorOperation == null)
+                              {
+                                  Console.WriteLine("❌ Outside sensor operation is null, stopping...");
+                                  break;
+                              }
                             
                             // Convert UserRecord list to FtrIdentifyRecord array
                             var records = new FtrIdentifyRecord[m_IdentificationUsers.Count];
@@ -9153,19 +14780,26 @@ These settings allow you to customize the attendance system behavior for differe
                                 records[i] = m_IdentificationUsers[i].GetRecord();
                             }
                             
-                            var result = m_OutsideSensorOperation.Identification(records, ref matchIndex);
-                            if (result == FutronicSdkBase.RETCODE_OK)
-                            {
-                                this.Invoke(new Action(() =>
-                                {
-                                    HandleSensorScan(true, matchIndex, "outside");
-                                }));
-                            }
-                            else
-                            {
-                                // Log non-OK results but don't spam
-                                Console.WriteLine($"Outside sensor result: {result}");
-                            }
+                                                          var result = m_OutsideSensorOperation.Identification(records, ref matchIndex);
+                              if (result == FutronicSdkBase.RETCODE_OK)
+                              {
+                                  // Reset finger-on flag after successful identification
+                                  isFingerOnOutsideSensor = false;
+                                  
+                                  this.Invoke(new Action(() =>
+                                  {
+                                      HandleSensorScan(true, matchIndex, "outside");
+                                  }));
+                              }
+                              else if (!isFingerOnOutsideSensor) // Only handle no-match if finger is not still on
+                              {
+                                  // Log non-OK results but don't spam
+                                  Console.WriteLine($"Outside sensor result: {result}");
+                                  this.Invoke(new Action(() =>
+                                  {
+                                      HandleSensorScan(false, matchIndex, "outside");
+                                  }));
+                              }
                         }
                         catch (InvalidOperationException ex)
                         {
@@ -9265,6 +14899,28 @@ These settings allow you to customize the attendance system behavior for differe
                     {
                         var matchedUser = users[matchIndex];
                         string userName = matchedUser.UserName ?? "Unknown User";
+                        
+                        // Debouncing: Prevent processing the same scan multiple times
+                        var timeSinceLastProcess = DateTime.Now - lastProcessedTime;
+                        if (userName == lastProcessedUser && timeSinceLastProcess.TotalMilliseconds < DEBOUNCE_INTERVAL_MS)
+                        {
+                            Console.WriteLine($"⏳ Debouncing {userName} scan - skipping duplicate processing");
+                            return; // Skip duplicate processing
+                        }
+                        
+                        // Update debouncing variables for successful match
+                        lastProcessedUser = userName;
+                        lastProcessedTime = DateTime.Now;
+                        
+                        // Reset finger-on flag after successful match
+                        if (location == "inside")
+                        {
+                            isFingerOnInsideSensor = false;
+                        }
+                        else if (location == "outside")
+                        {
+                            isFingerOnOutsideSensor = false;
+                        }
 
                         // ENHANCED DEBUGGING: Track detailed match information
                         Console.WriteLine($"🔍 FINGERPRINT MATCH DEBUG:");
@@ -9319,6 +14975,39 @@ These settings allow you to customize the attendance system behavior for differe
                         // Get the user GUID from database (reusing the dbUser from above)
                         var finalDbUser = dbManager.LoadAllUsers().FirstOrDefault(u =>
                             u.Username.Equals(userName, StringComparison.OrdinalIgnoreCase));
+                        
+                        if (finalDbUser != null)
+                        {
+                            // Check if user can authenticate with Fingerprint (per-user + global settings)
+                            if (!CanUserAuthenticateWith(finalDbUser, "FINGERPRINT"))
+                            {
+                                Console.WriteLine($"❌ Fingerprint authentication disabled for user {userName}");
+                                SetStatusText($"❌ Fingerprint authentication is disabled for {userName}. Please use RFID.");
+                                
+                                // Log denied access
+                                try
+                                {
+                                    if (dbManager != null)
+                                    {
+                                        dbManager.LogAccessAttempt(
+                                            userId: finalDbUser.EmployeeId,
+                                            roomId: null,
+                                            authMethod: "Fingerprint",
+                                            location: location,
+                                            accessType: "attendance_scan",
+                                            result: "denied",
+                                            reason: "Fingerprint authentication disabled for this user"
+                                        );
+                                    }
+                                }
+                                catch (Exception logEx)
+                                {
+                                    Console.WriteLine($"⚠️ Failed to log denied fingerprint access: {logEx.Message}");
+                                }
+                                
+                                return;
+                            }
+                        }
                         
                         if (finalDbUser != null)
                         {
@@ -9442,20 +15131,118 @@ These settings allow you to customize the attendance system behavior for differe
                     {
                         Console.WriteLine($"   ⚠️ Match index is negative - possible poor fingerprint quality");
                     }
-                    else if (matchIndex >= users.Count)
+                                          else if (matchIndex >= users.Count)
+                      {
+                          Console.WriteLine($"   ⚠️ Match index ({matchIndex}) >= users count ({users.Count}) - SDK returned invalid index");
+                      }
+                      
+                    // Reset valid placement on failure
+                    hasValidFingerPlacement = false;
+                      
+                    // Don't log unknown scans while finger is still on scanner (prevents spam)
+                    // Check the appropriate sensor based on location
+                    bool fingerOnThisSensor = (location == "inside") ? isFingerOnInsideSensor : 
+                                             (location == "outside") ? isFingerOnOutsideSensor : 
+                                             isFingerOnScanner;
+
+                    bool unauthorizedDoorOpened = false;
+                    string panelStatusMessage = "No match found";
+                    bool panelStatusSuccess = false;
+
+                    // Evaluate override independently of finger-on state (debounced)
+                    bool allowUnauthorizedOverride = deviceConfig?.AllowUnauthorizedFingerprints == true;
+                    if (allowUnauthorizedOverride)
                     {
-                        Console.WriteLine($"   ⚠️ Match index ({matchIndex}) >= users count ({users.Count}) - SDK returned invalid index");
+                        var timeSinceLastOverride = DateTime.Now - lastUnauthorizedDoorOpenTime;
+                        if (timeSinceLastOverride.TotalMilliseconds >= UNAUTHORIZED_DOOR_DEBOUNCE_MS)
+                        {
+                            unauthorizedDoorOpened = true;
+                            panelStatusSuccess = true;
+                            panelStatusMessage = "Door override granted";
+                            lastUnauthorizedDoorOpenTime = DateTime.Now;
+
+                            Console.WriteLine("🔓 Allowing door override for unknown fingerprint (setting enabled)");
+                            SetStatusText("🔓 Door override requested for unknown fingerprint.");
+
+                            System.Threading.Tasks.Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await RequestAnonymousLockControl(location ?? "inside", "Door override for unknown fingerprint");
+                                }
+                                catch (Exception lockEx)
+                                {
+                                    Console.WriteLine($"❌ Door override request failed: {lockEx.Message}");
+                                }
+                            });
+                        }
+                        else
+                        {
+                            var remainingMs = UNAUTHORIZED_DOOR_DEBOUNCE_MS - (int)timeSinceLastOverride.TotalMilliseconds;
+                            Console.WriteLine($"⏳ Door override debounced - waiting {Math.Max(0, remainingMs / 1000)}s before next override.");
+                        }
                     }
-                    
+
+                    // Logging is still tied to unknown-scan debounce and finger state to reduce noise
+                    var timeSinceLastUnknownLog = DateTime.Now - lastUnknownScanLogTime;
+                    bool shouldLog = unauthorizedDoorOpened || (!fingerOnThisSensor && timeSinceLastUnknownLog.TotalMilliseconds >= UNKNOWN_SCAN_DEBOUNCE_MS);
+
+                    if (shouldLog)
+                    {
+                        try
+                        {
+                            if (dbManager != null)
+                            {
+                                string logResult = unauthorizedDoorOpened ? "granted" : "denied";
+                                string logReason = unauthorizedDoorOpened
+                                    ? $"Door override enabled for unknown fingerprint (location: {location ?? "inside"})"
+                                    : $"Unknown fingerprint - no match found (matchIndex: {matchIndex}, success: {success})";
+
+                                dbManager.LogAccessAttempt(
+                                    userId: null,
+                                    roomId: null,
+                                    authMethod: "Fingerprint",
+                                    location: location ?? "inside",
+                                    accessType: "attendance_scan",
+                                    result: logResult,
+                                    reason: logReason
+                                );
+                                Console.WriteLine($"📝 Logged unknown fingerprint scan to ACCESSLOGS: {location} sensor ({logResult})");
+                                lastUnknownScanLogTime = DateTime.Now;
+                            }
+                        }
+                        catch (Exception logEx)
+                        {
+                            Console.WriteLine($"⚠️ Failed to log unknown fingerprint scan: {logEx.Message}");
+                        }
+                    }
+                    else if (!unauthorizedDoorOpened && !fingerOnThisSensor)
+                    {
+                        Console.WriteLine($"⏳ Unknown scan debounced - waiting {Math.Ceiling((UNKNOWN_SCAN_DEBOUNCE_MS - timeSinceLastUnknownLog.TotalMilliseconds) / 1000)}s before logging again");
+                    }
+
                     if (location == "inside")
                     {
-                        dualSensorPanel?.UpdateInsideLastScan("Unknown", "No match found", false);
+                        dualSensorPanel?.UpdateInsideLastScan("Unknown", panelStatusMessage, panelStatusSuccess);
                         dualSensorPanel?.UpdateInsideStatus("Active");
                     }
                     else
                     {
-                        dualSensorPanel?.UpdateOutsideLastScan("Unknown", "No match found", false);
+                        dualSensorPanel?.UpdateOutsideLastScan("Unknown", panelStatusMessage, panelStatusSuccess);
                         dualSensorPanel?.UpdateOutsideStatus("Active");
+                    }
+
+                    if (unauthorizedDoorOpened)
+                    {
+                        dualSensorPanel?.AddActivityItem(new ActivityItem
+                        {
+                            Timestamp = DateTime.Now,
+                            UserName = "Unknown Fingerprint",
+                            Action = "Door Override",
+                            Location = location ?? "inside",
+                            Success = true,
+                            StatusMessage = panelStatusMessage
+                        });
                     }
                 }
             }
@@ -9463,6 +15250,104 @@ These settings allow you to customize the attendance system behavior for differe
             {
                 Console.WriteLine($"❌ Error handling sensor scan: {ex.Message}");
             }
+        }
+
+        private void GrantDoorOverrideForKnownUser(string userName, string userGuid, string location, bool isRfid = false, string rfidData = null)
+        {
+            string normalizedLocation = string.IsNullOrWhiteSpace(location) ? "inside" : location;
+            string statusMessage = $"🔓 Door override granted: {userName}";
+
+            if (isRfid)
+            {
+                SetRfidStatusText(statusMessage);
+                AddRfidAttendanceRecord(userName, "Door Override", "Override Enabled");
+            }
+            else
+            {
+                SetStatusText(statusMessage);
+            }
+
+            var overrideRecord = new Database.Models.AttendanceRecord
+            {
+                UserId = 0,
+                Username = userName,
+                Timestamp = DateTime.Now,
+                Action = "Door Override",
+                Status = "Override Enabled"
+            };
+
+            attendanceRecords.Add(overrideRecord);
+            UpdateAttendanceDisplay(overrideRecord);
+
+            if (normalizedLocation.Equals("inside", StringComparison.OrdinalIgnoreCase))
+            {
+                dualSensorPanel?.UpdateInsideLastScan(userName, "Door override granted", true);
+                dualSensorPanel?.UpdateInsideStatus("Active");
+            }
+            else
+            {
+                dualSensorPanel?.UpdateOutsideLastScan(userName, "Door override granted", true);
+                dualSensorPanel?.UpdateOutsideStatus("Active");
+            }
+
+            try
+            {
+                dbManager?.LogAccessAttempt(
+                    userId: string.IsNullOrEmpty(userGuid) ? null : userGuid,
+                    roomId: null,
+                    authMethod: isRfid ? "RFID" : "Fingerprint",
+                    location: normalizedLocation,
+                    accessType: "door_override",
+                    result: "granted",
+                    reason: "AllowUnauthorizedFingerprints override enabled");
+            }
+            catch (Exception logEx)
+            {
+                Console.WriteLine($"⚠️ Failed to log door override access attempt: {logEx.Message}");
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    if (isRfid)
+                    {
+                        if (!string.IsNullOrEmpty(userGuid))
+                        {
+                            await RequestRfidLockControl(userGuid, "Door Override", rfidData ?? "");
+                        }
+                        else
+                        {
+                            await RequestAnonymousLockControl(normalizedLocation, "Door override (RFID) - no user GUID");
+                        }
+                    }
+                    else
+                    {
+                        if (!string.IsNullOrEmpty(userGuid))
+                        {
+                            await RequestLockControl(userGuid, "Door Override");
+                        }
+                        else
+                        {
+                            await RequestAnonymousLockControl(normalizedLocation, "Door override (Fingerprint) - no user GUID");
+                        }
+                    }
+                }
+                catch (Exception lockEx)
+                {
+                    Console.WriteLine($"❌ Door override request failed: {lockEx.Message}");
+                }
+            });
+
+            dualSensorPanel?.AddActivityItem(new ActivityItem
+            {
+                Timestamp = DateTime.Now,
+                UserName = userName,
+                Action = "Door Override",
+                Location = normalizedLocation,
+                Success = true,
+                StatusMessage = "Override Enabled"
+            });
         }
 
         private void TestSensorScan(string location)
@@ -9499,25 +15384,25 @@ These settings allow you to customize the attendance system behavior for differe
         {
             try
             {
-                var users = dbManager.LoadAllUsers();
+                // Use new method that loads ALL fingerprints (not just one per user)
+                var fingerprints = dbManager.LoadAllFingerprintsForIdentification();
                 var userRecords = new List<UserRecord>();
 
-                Utils.Logger.Debug($"Loading users for identification from database...");
-                Utils.Logger.Debug($"Total users loaded: {users.Count}");
+                Utils.Logger.Debug($"Loading fingerprints for identification from database...");
+                Utils.Logger.Debug($"Total fingerprints loaded: {fingerprints.Count}");
 
-                foreach (var user in users)
+                foreach (var fp in fingerprints)
                 {
-                    // Enhanced template validation
-                    if (user.FingerprintTemplate != null &&
-                        user.FingerprintTemplate.Length > 0 &&
-                        IsValidFingerprintTemplate(user.FingerprintTemplate))
+                    if (fp.Template != null &&
+                        fp.Template.Length > 0 &&
+                        IsValidFingerprintTemplate(fp.Template))
                     {
-                        Utils.Logger.Debug($"Valid template for user: {user.Username} ({user.UserType}) - Template size: {user.FingerprintTemplate.Length} bytes");
+                        Utils.Logger.Debug($"Valid template for user: {fp.Username} ({fp.UserType}) - Template size: {fp.Template.Length} bytes - AuthID: {fp.AuthId}");
 
                         userRecords.Add(new UserRecord
                         {
-                            UserName = user.Username,
-                            Template = user.FingerprintTemplate
+                            UserName = fp.Username,
+                            Template = fp.Template
                         });
                     }
                     else
@@ -9526,7 +15411,7 @@ These settings allow you to customize the attendance system behavior for differe
                     }
                 }
 
-                Utils.Logger.Info($"Loaded {userRecords.Count} user records for identification");
+                Utils.Logger.Info($"Loaded {userRecords.Count} fingerprint records for identification");
                 Utils.Logger.Debug($"Instructors: {userRecords.Count(u => u.UserName.Contains("aurora") || u.UserName.Contains("AURORA"))}");
                 Utils.Logger.Debug($"Students: {userRecords.Count - userRecords.Count(u => u.UserName.Contains("aurora") || u.UserName.Contains("AURORA"))}");
 
@@ -9534,7 +15419,7 @@ These settings allow you to customize the attendance system behavior for differe
             }
             catch (Exception ex)
             {
-                Utils.Logger.Error($"Error loading users for identification: {ex.Message}");
+                Utils.Logger.Error($"Error loading fingerprints for identification: {ex.Message}");
                 return new List<UserRecord>();
             }
         }
@@ -9581,9 +15466,104 @@ These settings allow you to customize the attendance system behavior for differe
                 }
             }
 
+            // QUALITY SCORE GATING: Calculate entropy to measure template uniqueness
+            int qualityScore = CalculateTemplateQualityScore(template);
+            Console.WriteLine($"📊 Template quality score: {qualityScore}/100");
+            
+            // Minimum quality threshold for enrollment (60% = reasonable quality)
+            const int MIN_QUALITY_SCORE = 60;
+            if (qualityScore < MIN_QUALITY_SCORE)
+            {
+                Console.WriteLine($"⚠️ Template quality too low: {qualityScore}% (minimum: {MIN_QUALITY_SCORE}%)");
+                Console.WriteLine("   This may indicate: dry finger, partial placement, or smudged sensor");
+                return false;
+            }
+
             return true;
         }
 
+        /// <summary>
+        /// Calculate template quality score based on entropy (data uniqueness).
+        /// Higher entropy = more unique features captured = better quality.
+        /// Returns score from 0-100.
+        /// </summary>
+        private int CalculateTemplateQualityScore(byte[] template)
+        {
+            if (template == null || template.Length == 0)
+                return 0;
+
+            // Build histogram of byte values (0-255)
+            int[] histogram = new int[256];
+            foreach (byte b in template)
+            {
+                histogram[b]++;
+            }
+
+            // Calculate Shannon entropy
+            double entropy = 0.0;
+            int totalBytes = template.Length;
+            
+            for (int i = 0; i < 256; i++)
+            {
+                if (histogram[i] > 0)
+                {
+                    double probability = (double)histogram[i] / totalBytes;
+                    entropy -= probability * Math.Log(probability, 2);
+                }
+            }
+
+            // Maximum possible entropy for 8-bit data is 8 bits
+            // Normalize to 0-100 scale (good fingerprint templates typically have entropy 5-7)
+            // Score = (entropy / 8) * 100, but we adjust the scale for fingerprint data
+            // Fingerprint templates with entropy < 4 are usually poor quality
+            // Fingerprint templates with entropy > 6 are usually good quality
+            
+            double normalizedScore;
+            if (entropy < 3.0)
+            {
+                // Very low entropy - poor quality
+                normalizedScore = entropy * 10; // 0-30
+            }
+            else if (entropy < 5.0)
+            {
+                // Low-medium entropy - acceptable but not great
+                normalizedScore = 30 + (entropy - 3.0) * 15; // 30-60
+            }
+            else if (entropy < 7.0)
+            {
+                // Good entropy - good quality
+                normalizedScore = 60 + (entropy - 5.0) * 15; // 60-90
+            }
+            else
+            {
+                // High entropy - excellent quality
+                normalizedScore = 90 + (entropy - 7.0) * 10; // 90-100
+            }
+
+            // Clamp to 0-100
+            int score = (int)Math.Max(0, Math.Min(100, normalizedScore));
+            
+            // Additional check: variance in byte distribution
+            // Good templates should have varied data, not just high entropy from noise
+            double mean = template.Average(b => (double)b);
+            double variance = template.Average(b => Math.Pow(b - mean, 2));
+            double stdDev = Math.Sqrt(variance);
+            
+            // If standard deviation is too low (< 30) or too high (> 100), penalize slightly
+            // Good fingerprint templates typically have stdDev between 40-80
+            if (stdDev < 30)
+            {
+                score = (int)(score * 0.85); // 15% penalty for low variance
+                Console.WriteLine($"   Low variance detected (stdDev={stdDev:F1}), quality adjusted");
+            }
+            else if (stdDev > 100)
+            {
+                score = (int)(score * 0.90); // 10% penalty for very high variance (possible noise)
+                Console.WriteLine($"   High variance detected (stdDev={stdDev:F1}), quality adjusted");
+            }
+
+            return Math.Max(0, Math.Min(100, score));
+        }
         // ==================== END DUAL SENSOR MODE METHODS ====================
     }
 

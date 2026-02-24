@@ -1,18 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const path = require('path');
 const fs = require('fs');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const backupService = require('../services/backupService');
 
 // Get backup statistics
-router.get('/stats', authenticateToken, async (req, res) => {
+router.get('/stats', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    // Check if user is admin
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
-
     const stats = await backupService.getBackupStats();
     res.json(stats);
   } catch (error) {
@@ -22,13 +16,8 @@ router.get('/stats', authenticateToken, async (req, res) => {
 });
 
 // Create backup
-router.post('/create', authenticateToken, async (req, res) => {
+router.post('/create', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    // Check if user is admin
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
-
     const {
       includeDatabase = true,
       dbFormat = 'both',
@@ -65,13 +54,8 @@ router.post('/create', authenticateToken, async (req, res) => {
 });
 
 // Download backup file
-router.get('/download/:filename', authenticateToken, async (req, res) => {
+router.get('/download/:filename', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    // Check if user is admin
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
-
     const { filename } = req.params;
     
     // Validate filename to prevent directory traversal
@@ -99,13 +83,8 @@ router.get('/download/:filename', authenticateToken, async (req, res) => {
 });
 
 // List available backups
-router.get('/list', authenticateToken, async (req, res) => {
+router.get('/list', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    // Check if user is admin
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
-
     const backups = await backupService.listBackups();
     res.json({ backups });
   } catch (error) {

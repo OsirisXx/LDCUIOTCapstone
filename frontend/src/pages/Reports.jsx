@@ -19,7 +19,13 @@ import toast from 'react-hot-toast';
 import axios from 'axios';
 
 // Set up axios defaults
-axios.defaults.baseURL = 'http://localhost:5000';
+axios.defaults.baseURL = 'http://172.72.100.126:5000';
+
+const shouldHideAdminAccess = (subjectCode, subjectName) => {
+  const normalizedCode = subjectCode?.toString().trim().toUpperCase();
+  const normalizedName = subjectName?.toString().trim().toLowerCase();
+  return normalizedCode === 'ADMIN-ACCESS' || (normalizedName && normalizedName.includes('administrative door access'));
+};
 
 function Reports() {
   const [reports, setReports] = useState([]);
@@ -48,7 +54,11 @@ function Reports() {
   const [showGroupDetails, setShowGroupDetails] = useState(false);
   const [showClearDialog, setShowClearDialog] = useState(false);
   const [clearing, setClearing] = useState(false);
-  const [expandedCards, setExpandedCards] = useState(new Set());
+  // const [expandedCards, setExpandedCards] = useState(new Set());
+  const [sessionRoster, setSessionRoster] = useState([]);
+  const [rosterLoading, setRosterLoading] = useState(false);
+  const [rosterLoadFailed, setRosterLoadFailed] = useState(false);
+  const [rosterLoadErrorReason, setRosterLoadErrorReason] = useState(null);
 
   useEffect(() => {
     fetchInitialData();
@@ -90,15 +100,315 @@ function Reports() {
     }
   };
 
-  const fetchReports = async () => {
+  // Helper function to normalize date to YYYY-MM-DD format
+  const normalizeDate = (dateValue) => {
+    if (!dateValue) return '';
+    // If it's already in YYYY-MM-DD format, return as is
+    if (typeof dateValue === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
+      return dateValue;
+    }
+    // If it's an ISO string, extract just the date part
+    if (typeof dateValue === 'string' && dateValue.includes('T')) {
+      return dateValue.split('T')[0];
+    }
+    // Otherwise, try to parse and format
+    const date = new Date(dateValue);
+    return date.toISOString().split('T')[0];
+  };
+
+  // Helper function to format date from YYYY-MM-DD string without timezone issues
+  const formatDateString = (dateString) => {
+    if (!dateString) return '';
+    // Parse YYYY-MM-DD as local date to avoid timezone conversion issues
+    const [year, month, day] = dateString.split('-').map(Number);
+    const date = new Date(year, month - 1, day); // month is 0-indexed
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric'
+    });
+  };
+
+  // Helper function to normalize time to HH:MM:SS format
+  const normalizeTime = (timeValue) => {
+    if (!timeValue) return '';
+    
+    // Convert to string and trim whitespace
+    const timeStr = String(timeValue).trim();
+    
+    // If it's already in HH:MM:SS format, return as is
+    if (/^\d{2}:\d{2}:\d{2}$/.test(timeStr)) {
+      return timeStr;
+    }
+    
+    // Extract HH:MM:SS from various formats
+    // Handles: HH:MM:SS, HH:MM:SS.microseconds, HH:MM, HH:MM:SS:extra, etc.
+    const match = timeStr.match(/^(\d{2}):(\d{2})(?::(\d{2}))?(?:\.|:|\s|$)/);
+    if (match) {
+      const hours = match[1].padStart(2, '0');
+      const minutes = match[2].padStart(2, '0');
+      const seconds = (match[3] || '00').padStart(2, '0');
+      return `${hours}:${minutes}:${seconds}`;
+    }
+    
+    // If it's a Date object, extract time part
+    if (timeValue instanceof Date) {
+      const hours = String(timeValue.getHours()).padStart(2, '0');
+      const minutes = String(timeValue.getMinutes()).padStart(2, '0');
+      const seconds = String(timeValue.getSeconds()).padStart(2, '0');
+      return `${hours}:${minutes}:${seconds}`;
+    }
+    
+    console.warn('Could not normalize time:', timeValue);
+    return timeStr;
+  };
+
+  const groupReports = useCallback((reports) => {
+    if (groupBy === 'subject') {
+      // Create hierarchical structure: Subject -> Sessions
+      const hierarchicalGrouped = {};
+      
+      reports.forEach(report => {
+        // Use ATTENDANCE_DATE from database, or extract date from SCANDATETIME
+        // Handle DATE field which might be a Date object or string
+        let dateValue = report.ATTENDANCE_DATE;
+        if (!dateValue && report.SCANDATETIME) {
+          // If SCANDATETIME is a string like "2025-11-04 21:55:00", extract just the date part
+          if (typeof report.SCANDATETIME === 'string') {
+            dateValue = report.SCANDATETIME.split(' ')[0] || report.SCANDATETIME.split('T')[0];
+          } else {
+            // If it's a Date object, format it as YYYY-MM-DD in local timezone
+            const date = new Date(report.SCANDATETIME);
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            dateValue = `${year}-${month}-${day}`;
+          }
+        }
+        const attendanceDate = normalizeDate(dateValue);
+        // Get day of week from the normalized date to avoid timezone issues
+        let dayOfWeek = report.DAYOFWEEK;
+        if (!dayOfWeek && attendanceDate) {
+          const [year, month, day] = attendanceDate.split('-').map(Number);
+          const date = new Date(year, month - 1, day);
+          dayOfWeek = date.toLocaleDateString('en-US', { weekday: 'long' });
+        }
+        
+        // Debug log for date issues
+        if (attendanceDate && attendanceDate.includes('2025-11-03')) {
+          console.log('⚠️ Date issue detected:', {
+            attendanceDate,
+            ATTENDANCE_DATE: report.ATTENDANCE_DATE,
+            SCANDATETIME: report.SCANDATETIME,
+            dayOfWeek,
+            DAYOFWEEK: report.DAYOFWEEK
+          });
+        }
+        const roomNumber = report.ROOMNUMBER || 'Unknown Room';
+        const startTime = normalizeTime(report.STARTTIME);
+        
+        // Debug log for time issues
+        if (startTime && startTime.includes(':')) {
+          const parts = startTime.split(':');
+          if (parts.length > 3) {
+            console.warn('⚠️ Time normalization issue:', {
+              original: report.STARTTIME,
+              normalized: startTime,
+              parts
+            });
+          }
+        }
+        
+        // Subject key
+        const subjectKey = `${report.SUBJECTCODE}-${report.SUBJECTNAME}`;
+        // Session key within subject - use normalized date and time
+        const sessionKey = `${attendanceDate}-${roomNumber}-${startTime}`;
+        
+        // Initialize subject if not exists
+        if (!hierarchicalGrouped[subjectKey]) {
+          hierarchicalGrouped[subjectKey] = {
+            title: `${report.SUBJECTCODE} - ${report.SUBJECTNAME}`,
+            subtitle: `${report.ACADEMICYEAR || 'Unknown Year'} • ${report.SEMESTER || 'Unknown Semester'}`,
+            sessions: {},
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            },
+            // Internal sets for unique counting at subject level
+            __sets: {
+              totalUsers: new Set(),
+              presentUsers: new Set(),
+              lateUsers: new Set(),
+              absentUsers: new Set()
+            }
+          };
+        }
+        
+        // Initialize session if not exists
+        if (!hierarchicalGrouped[subjectKey].sessions[sessionKey]) {
+          const sessionTitle = `${dayOfWeek || 'Unknown Day'}, ${formatDateString(attendanceDate)}`;
+          const sessionSubtitle = `Room ${roomNumber || 'Unknown Room'} • ${formatTime(report.STARTTIME) || 'Unknown Time'} - ${formatTime(report.ENDTIME) || 'Unknown Time'}`;
+          
+          
+          hierarchicalGrouped[subjectKey].sessions[sessionKey] = {
+            title: sessionTitle,
+            subtitle: sessionSubtitle,
+            reports: [],
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            },
+            // Internal sets for unique counting at session level
+            __sets: {
+              totalUsers: new Set(),
+              presentUsers: new Set(),
+              lateUsers: new Set(),
+              absentUsers: new Set()
+            }
+          };
+        }
+        
+        // Add report to session
+        hierarchicalGrouped[subjectKey].sessions[sessionKey].reports.push(report);
+        const displayStatus = report.DISPLAY_STATUS || report.STATUS;
+        // Use STUDENTID only for counting to exclude instructors
+        const userId = report.STUDENTID;
+
+        // Update session unique sets
+        if (userId) {
+          const sessionSets = hierarchicalGrouped[subjectKey].sessions[sessionKey].__sets;
+          sessionSets.totalUsers.add(userId);
+          if (displayStatus === 'Present' || displayStatus === 'Early') sessionSets.presentUsers.add(userId);
+          else if (displayStatus === 'Late') sessionSets.lateUsers.add(userId);
+          else if (displayStatus === 'Absent') sessionSets.absentUsers.add(userId);
+        }
+
+        // Update subject unique sets
+        if (userId) {
+          const subjectSets = hierarchicalGrouped[subjectKey].__sets;
+          subjectSets.totalUsers.add(userId);
+          if (displayStatus === 'Present' || displayStatus === 'Early') subjectSets.presentUsers.add(userId);
+          else if (displayStatus === 'Late') subjectSets.lateUsers.add(userId);
+          else if (displayStatus === 'Absent') subjectSets.absentUsers.add(userId);
+        }
+      });
+      
+      // Finalize counts from sets
+      Object.values(hierarchicalGrouped).forEach(subject => {
+        // Subject-level totals
+        subject.stats.total = subject.__sets.totalUsers.size;
+        subject.stats.present = subject.__sets.presentUsers.size;
+        subject.stats.late = subject.__sets.lateUsers.size;
+        subject.stats.absent = subject.__sets.absentUsers.size;
+        
+        // Sessions under this subject
+        Object.values(subject.sessions).forEach(session => {
+          session.stats.total = session.__sets.totalUsers.size;
+          session.stats.present = session.__sets.presentUsers.size;
+          session.stats.late = session.__sets.lateUsers.size;
+          session.stats.absent = session.__sets.absentUsers.size;
+        });
+      });
+
+      setGroupedReports(hierarchicalGrouped);
+    } else {
+      // Original flat grouping for other modes
+      const grouped = {};
+      
+      reports.forEach(report => {
+        let key;
+        let title;
+        let subtitle;
+        
+        switch (groupBy) {
+          case 'date':
+            const date = new Date(report.SCANDATETIME).toISOString().split('T')[0];
+            key = date;
+            title = new Date(date).toLocaleDateString('en-US', { 
+              weekday: 'long', 
+              year: 'numeric', 
+              month: 'long', 
+              day: 'numeric' 
+            });
+            subtitle = `${reports.filter(r => new Date(r.SCANDATETIME).toISOString().split('T')[0] === date).length} records`;
+            break;
+          case 'session':
+            // Enhanced session grouping with day and room
+            // Use ATTENDANCE_DATE from database, or extract date from SCANDATETIME
+            let sessionDateValue = report.ATTENDANCE_DATE;
+            if (!sessionDateValue && report.SCANDATETIME) {
+              if (typeof report.SCANDATETIME === 'string') {
+                sessionDateValue = report.SCANDATETIME.split(' ')[0] || report.SCANDATETIME.split('T')[0];
+              } else {
+                const date = new Date(report.SCANDATETIME);
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                sessionDateValue = `${year}-${month}-${day}`;
+              }
+            }
+            const sessionDate = normalizeDate(sessionDateValue);
+            // Get day of week from the normalized date to avoid timezone issues
+            let sessionDay = report.DAYOFWEEK;
+            if (!sessionDay && sessionDate) {
+              const [year, month, day] = sessionDate.split('-').map(Number);
+              const date = new Date(year, month - 1, day);
+              sessionDay = date.toLocaleDateString('en-US', { weekday: 'long' });
+            }
+            const sessionRoom = report.ROOMNUMBER || 'Unknown Room';
+            const sessionStartTime = normalizeTime(report.STARTTIME);
+            key = `${report.SUBJECTCODE}-${sessionDate}-${sessionRoom}-${sessionStartTime}`;
+            title = `${report.SUBJECTCODE} - ${sessionDay}`;
+            subtitle = `${formatDateString(sessionDate)} • Room ${sessionRoom} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`;
+            break;
+          default:
+            key = 'all';
+            title = 'All Reports';
+            subtitle = `${reports.length} records`;
+        }
+        
+        if (!grouped[key]) {
+          grouped[key] = {
+            title,
+            subtitle,
+            reports: [],
+            stats: {
+              total: 0,
+              present: 0,
+              late: 0,
+              absent: 0
+            }
+          };
+        }
+        
+        grouped[key].reports.push(report);
+        grouped[key].stats.total++;
+        const displayStatus = report.DISPLAY_STATUS || report.STATUS;
+        if (displayStatus === 'Present' || displayStatus === 'Early') grouped[key].stats.present++;
+        else if (displayStatus === 'Late') grouped[key].stats.late++;
+        else if (displayStatus === 'Absent') grouped[key].stats.absent++;
+      });
+      
+      setGroupedReports(grouped);
+    }
+  }, [groupBy]);
+
+  const fetchReports = useCallback(async () => {
     try {
       setLoading(true);
       const token = localStorage.getItem('token');
       const headers = { Authorization: `Bearer ${token}` };
 
-      // For now, use the basic endpoint without complex filtering
-      const response = await axios.get(`/api/logs/attendance`, { headers });
-      let reports = response.data.logs || [];
+      // Use the new reports endpoint with enhanced data
+      console.log('🔍 Calling /api/reports/attendance endpoint');
+      const response = await axios.get(`/api/reports/attendance`, { headers });
+      console.log('📊 Reports response:', response.data);
+      let reports = response.data.data || [];
+
+      reports = reports.filter(report => !shouldHideAdminAccess(report.SUBJECTCODE, report.SUBJECTNAME));
       
       // Apply client-side filtering for now
       if (filters.search) {
@@ -137,10 +447,11 @@ function Reports() {
       
       // Calculate statistics
       const stats = {
-        totalStudents: new Set(reports.map(r => r.USERID || r.STUDENTID)).size,
-        presentCount: reports.filter(r => r.STATUS === 'Present').length,
-        lateCount: reports.filter(r => r.STATUS === 'Late').length,
-        absentCount: reports.filter(r => r.STATUS === 'Absent').length
+        // Count only students (identified by STUDENTID)
+        totalStudents: new Set(reports.map(r => r.STUDENTID).filter(Boolean)).size,
+        presentCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Present' || (r.DISPLAY_STATUS || r.STATUS) === 'Early').length,
+        lateCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Late').length,
+        absentCount: reports.filter(r => (r.DISPLAY_STATUS || r.STATUS) === 'Absent').length
       };
       setStatistics(stats);
 
@@ -156,134 +467,7 @@ function Reports() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const groupReports = useCallback((reports) => {
-    if (groupBy === 'subject') {
-      // Create hierarchical structure: Subject -> Sessions
-      const hierarchicalGrouped = {};
-      
-      reports.forEach(report => {
-        const attendanceDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toISOString().split('T')[0];
-        const dayOfWeek = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
-        const roomNumber = report.ROOMNUMBER || 'Unknown Room';
-        
-        // Subject key
-        const subjectKey = `${report.SUBJECTCODE}-${report.SUBJECTNAME}`;
-        // Session key within subject
-        const sessionKey = `${attendanceDate}-${roomNumber}-${report.STARTTIME}`;
-        
-        // Initialize subject if not exists
-        if (!hierarchicalGrouped[subjectKey]) {
-          hierarchicalGrouped[subjectKey] = {
-            title: `${report.SUBJECTCODE} - ${report.SUBJECTNAME}`,
-            subtitle: `${report.ACADEMICYEAR} • ${report.SEMESTER}`,
-            sessions: {},
-            stats: {
-              total: 0,
-              present: 0,
-              late: 0,
-              absent: 0
-            }
-          };
-        }
-        
-        // Initialize session if not exists
-        if (!hierarchicalGrouped[subjectKey].sessions[sessionKey]) {
-          hierarchicalGrouped[subjectKey].sessions[sessionKey] = {
-            title: `${dayOfWeek}, ${new Date(attendanceDate).toLocaleDateString('en-US', { 
-              month: 'short', 
-              day: 'numeric' 
-            })}`,
-            subtitle: `Room ${roomNumber} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`,
-            reports: [],
-            stats: {
-              total: 0,
-              present: 0,
-              late: 0,
-              absent: 0
-            }
-          };
-        }
-        
-        // Add report to session
-        hierarchicalGrouped[subjectKey].sessions[sessionKey].reports.push(report);
-        hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.total++;
-        if (report.STATUS === 'Present') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.present++;
-        else if (report.STATUS === 'Late') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.late++;
-        else if (report.STATUS === 'Absent') hierarchicalGrouped[subjectKey].sessions[sessionKey].stats.absent++;
-        
-        // Update subject totals
-        hierarchicalGrouped[subjectKey].stats.total++;
-        if (report.STATUS === 'Present') hierarchicalGrouped[subjectKey].stats.present++;
-        else if (report.STATUS === 'Late') hierarchicalGrouped[subjectKey].stats.late++;
-        else if (report.STATUS === 'Absent') hierarchicalGrouped[subjectKey].stats.absent++;
-      });
-      
-      setGroupedReports(hierarchicalGrouped);
-    } else {
-      // Original flat grouping for other modes
-      const grouped = {};
-      
-      reports.forEach(report => {
-        let key;
-        let title;
-        let subtitle;
-        
-        switch (groupBy) {
-          case 'date':
-            const date = new Date(report.SCANDATETIME).toISOString().split('T')[0];
-            key = date;
-            title = new Date(date).toLocaleDateString('en-US', { 
-              weekday: 'long', 
-              year: 'numeric', 
-              month: 'long', 
-              day: 'numeric' 
-            });
-            subtitle = `${reports.filter(r => new Date(r.SCANDATETIME).toISOString().split('T')[0] === date).length} records`;
-            break;
-          case 'session':
-            // Enhanced session grouping with day and room
-            const sessionDate = report.ATTENDANCE_DATE || new Date(report.SCANDATETIME).toISOString().split('T')[0];
-            const sessionDay = report.DAYOFWEEK || new Date(report.SCANDATETIME).toLocaleDateString('en-US', { weekday: 'long' });
-            const sessionRoom = report.ROOMNUMBER || 'Unknown Room';
-            key = `${report.SUBJECTCODE}-${sessionDate}-${sessionRoom}-${report.STARTTIME}`;
-            title = `${report.SUBJECTCODE} - ${sessionDay}`;
-            subtitle = `${new Date(sessionDate).toLocaleDateString('en-US', { 
-              month: 'short', 
-              day: 'numeric' 
-            })} • Room ${sessionRoom} • ${formatTime(report.STARTTIME)} - ${formatTime(report.ENDTIME)}`;
-            break;
-          default:
-            key = 'all';
-            title = 'All Reports';
-            subtitle = `${reports.length} records`;
-        }
-        
-        if (!grouped[key]) {
-          grouped[key] = {
-            title,
-            subtitle,
-            reports: [],
-            stats: {
-              total: 0,
-              present: 0,
-              late: 0,
-              absent: 0
-            }
-          };
-        }
-        
-        grouped[key].reports.push(report);
-        grouped[key].stats.total++;
-        if (report.STATUS === 'Present') grouped[key].stats.present++;
-        else if (report.STATUS === 'Late') grouped[key].stats.late++;
-        else if (report.STATUS === 'Absent') grouped[key].stats.absent++;
-      });
-      
-      setGroupedReports(grouped);
-    }
-  }, [groupBy]);
+  }, [filters, groupReports]);
 
   useEffect(() => {
     if (reports.length > 0) {
@@ -298,26 +482,131 @@ function Reports() {
     }));
   };
 
-  const toggleCardExpansion = (cardKey) => {
-    setExpandedCards(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(cardKey)) {
-        newSet.delete(cardKey);
-      } else {
-        newSet.add(cardKey);
+  // const toggleCardExpansion = (cardKey) => {
+  //   setExpandedCards(prev => {
+  //     const newSet = new Set(prev);
+  //     if (newSet.has(cardKey)) {
+  //       newSet.delete(cardKey);
+  //     } else {
+  //       newSet.add(cardKey);
+  //     }
+  //     return newSet;
+  //   });
+  // };
+
+  const fetchSessionRoster = async (sessionKey) => {
+    try {
+      setRosterLoading(true);
+      setRosterLoadFailed(false);
+      setRosterLoadErrorReason(null);
+      const token = localStorage.getItem('token');
+      const headers = { Authorization: `Bearer ${token}` };
+
+      // Validate session key - don't fetch if it contains "Unknown Room" or is missing time
+      // The backend expects format: YYYY-MM-DD-ROOM-STARTTIME where ROOM matches [A-Z]+-\d+ and STARTTIME is HH:MM:SS
+      // Check for obvious invalid patterns
+      if (!sessionKey || 
+          sessionKey.includes('Unknown Room') || 
+          sessionKey.endsWith('-') ||
+          !sessionKey.match(/\d{2}:\d{2}:\d{2}$/)) {
+        console.warn('⚠️ Invalid session key format, skipping roster fetch:', sessionKey);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason('Invalid session information (missing room or time)');
+        setRosterLoading(false);
+        return;
       }
-      return newSet;
-    });
+
+      // URL encode the session key to handle special characters
+      const encodedSessionKey = encodeURIComponent(sessionKey);
+      
+      const response = await axios.get(`/api/logs/attendance/session-roster/${encodedSessionKey}`, { headers });
+      
+      if (response.data.success) {
+        setSessionRoster(response.data.roster);
+        setRosterLoadFailed(false);
+        setRosterLoadErrorReason(null);
+        // Store instructor information in selectedGroup
+        if (response.data.session?.instructor) {
+          setSelectedGroup(prev => ({
+            ...prev,
+            instructor: response.data.session.instructor,
+            instructorStatus: response.data.session.instructorStatus,
+            instructorScanTime: response.data.session.instructorScanTime
+          }));
+        }
+      } else {
+        console.error('Failed to load roster:', response.data.message);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason(response.data.message || 'Failed to load roster');
+      }
+    } catch (error) {
+      console.error('Error fetching session roster:', error);
+      if (error.response?.status === 401) {
+        toast.error('Session expired. Please login again.');
+        localStorage.removeItem('token');
+        window.location.href = '/login';
+      } else if (error.response?.status === 404) {
+        // 404 is expected when schedule doesn't exist - show info message but don't block UI
+        console.warn('⚠️ Schedule not found for session (this may be expected):', sessionKey);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason('Schedule not found for this session. The schedule may have been deleted or never existed.');
+        // Don't show error toast for 404s - they're often expected (e.g., schedule was deleted)
+      } else if (error.response?.status === 400) {
+        // 400 means bad request format - we should have caught this earlier, but handle it anyway
+        console.warn('⚠️ Invalid session key format:', sessionKey);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason('Invalid session key format');
+        // Don't show error toast - validation should have caught this
+      } else {
+        // Other errors (500, network errors, etc.) - show error toast
+        console.error('Failed to load class roster:', error.response?.data?.message || error.message);
+        setSessionRoster([]);
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason(error.response?.data?.message || 'Failed to load roster');
+        toast.error('Failed to load class roster');
+      }
+    } finally {
+      setRosterLoading(false);
+    }
   };
 
   const viewGroupDetails = (groupKey, groupData) => {
     setSelectedGroup({ key: groupKey, ...groupData });
     setShowGroupDetails(true);
+    // Reset error states when viewing a new group
+    setRosterLoadFailed(false);
+    setRosterLoadErrorReason(null);
+    setSessionRoster([]);
+    
+    // Fetch session roster when viewing group details
+    // Only fetch if session key is valid (has proper room and time format)
+    if (groupKey && groupData) {
+      // Validate session key before fetching
+      // Check for obvious invalid patterns (Unknown Room, missing time, etc.)
+      if (groupKey && 
+          !groupKey.includes('Unknown Room') && 
+          !groupKey.endsWith('-') &&
+          groupKey.match(/\d{2}:\d{2}:\d{2}$/)) {
+        fetchSessionRoster(groupKey);
+      } else {
+        console.warn('⚠️ Skipping roster fetch for invalid session key:', groupKey);
+        // Set error state for invalid session keys
+        setRosterLoadFailed(true);
+        setRosterLoadErrorReason('Invalid session information (missing room or time)');
+      }
+    }
   };
 
   const backToMainView = () => {
     setShowGroupDetails(false);
     setSelectedGroup(null);
+    setSessionRoster([]);
+    setRosterLoadFailed(false);
+    setRosterLoadErrorReason(null);
   };
 
   const clearGroupAttendanceRecords = async () => {
@@ -410,6 +699,8 @@ function Reports() {
     switch (status?.toLowerCase()) {
       case 'present':
         return <CheckCircleIcon className="h-5 w-5 text-green-500" />;
+      case 'early':
+        return <CheckCircleIcon className="h-5 w-5 text-blue-500" />;
       case 'late':
         return <ExclamationTriangleIcon className="h-5 w-5 text-yellow-500" />;
       case 'absent':
@@ -423,6 +714,8 @@ function Reports() {
     switch (status?.toLowerCase()) {
       case 'present':
         return 'bg-green-100 text-green-800';
+      case 'early':
+        return 'bg-blue-100 text-blue-800';
       case 'late':
         return 'bg-yellow-100 text-yellow-800';
       case 'absent':
@@ -499,112 +792,169 @@ function Reports() {
             <div>
               <h1 className="text-2xl font-bold text-gray-900">{selectedGroup.title}</h1>
               <p className="text-gray-600 mt-1">{selectedGroup.subtitle}</p>
+              <div className="mt-3 flex items-center space-x-2">
+                <div className="flex items-center space-x-2 bg-gradient-to-r from-blue-50 to-indigo-50 px-4 py-2 rounded-lg border border-blue-200 shadow-sm">
+                  <div className="flex items-center space-x-2">
+                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                    <span className="text-sm font-semibold text-blue-800">Instructor:</span>
+                  </div>
+                  <span className="text-lg font-bold text-blue-900">
+                    {selectedGroup?.instructor || (rosterLoading ? 'Loading...' : 'Not assigned')}
+                  </span>
+                  {selectedGroup?.instructor && (
+                    <span className={`ml-3 inline-flex items-center px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(selectedGroup?.instructorStatus)}`}>
+                      {getStatusIcon(selectedGroup?.instructorStatus)}
+                      <span className="ml-1">{selectedGroup?.instructorStatus || 'Unknown'}</span>
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
             
-            {/* Group Statistics */}
-            <div className="flex space-x-8">
-              <div className="text-center">
-                <div className="text-3xl font-bold text-green-600">{selectedGroup.stats.present}</div>
-                <div className="text-sm text-gray-500">Present</div>
-              </div>
-              <div className="text-center">
-                <div className="text-3xl font-bold text-yellow-600">{selectedGroup.stats.late}</div>
-                <div className="text-sm text-gray-500">Late</div>
-              </div>
-              <div className="text-center">
-                <div className="text-3xl font-bold text-red-600">{selectedGroup.stats.absent}</div>
-                <div className="text-sm text-gray-500">Absent</div>
-              </div>
-              <div className="text-center">
-                <div className="text-3xl font-bold text-blue-600">{selectedGroup.stats.total}</div>
-                <div className="text-sm text-gray-500">Total</div>
-              </div>
+        {/* Group Statistics */}
+        <div className="flex space-x-8">
+          <div className="text-center">
+            <div className="text-3xl font-bold text-green-600">
+              {sessionRoster.length > 0 
+                ? sessionRoster.filter(s => s.STATUS === 'Present').length 
+                : selectedGroup.stats.present}
             </div>
+            <div className="text-sm text-gray-500">Present</div>
+          </div>
+          <div className="text-center">
+            <div className="text-3xl font-bold text-yellow-600">
+              {sessionRoster.length > 0 
+                ? sessionRoster.filter(s => s.STATUS === 'Late').length 
+                : selectedGroup.stats.late}
+            </div>
+            <div className="text-sm text-gray-500">Late</div>
+          </div>
+          <div className="text-center">
+            <div className="text-3xl font-bold text-red-600">
+              {sessionRoster.length > 0 
+                ? sessionRoster.filter(s => s.STATUS === 'Absent').length 
+                : selectedGroup.stats.absent}
+            </div>
+            <div className="text-sm text-gray-500">Absent</div>
+          </div>
+          <div className="text-center">
+            <div className="text-3xl font-bold text-blue-600">
+              {sessionRoster.length > 0 
+                ? sessionRoster.length 
+                : selectedGroup.stats.total}
+            </div>
+            <div className="text-sm text-gray-500">Enrolled</div>
+          </div>
+        </div>
           </div>
         </div>
 
-        {/* Detailed Attendance Records */}
+        {/* Class List */}
         <div className="bg-white rounded-lg shadow border border-gray-200">
           <div className="px-6 py-4 border-b border-gray-200">
-            <h3 className="text-lg font-medium text-gray-900">Attendance Records</h3>
+            <h3 className="text-lg font-medium text-gray-900">Class List</h3>
             <p className="text-sm text-gray-500">
-              {selectedGroup.reports.length} record{selectedGroup.reports.length !== 1 ? 's' : ''} found
+              {rosterLoading 
+                ? 'Loading class list...' 
+                : rosterLoadFailed
+                  ? rosterLoadErrorReason || 'Unable to load class list'
+                  : sessionRoster.length > 0 
+                    ? `${sessionRoster.length} enrolled student${sessionRoster.length !== 1 ? 's' : ''}`
+                    : 'No students enrolled in this subject'
+              }
             </p>
           </div>
           
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Student
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Date & Time
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Location
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {selectedGroup.reports.map((report) => (
-                  <tr key={report.ATTENDANCEID} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div className="flex-shrink-0 h-10 w-10">
-                          <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
-                            <AcademicCapIcon className="h-5 w-5 text-blue-600" />
-                          </div>
-                        </div>
-                        <div className="ml-4">
-                          <div className="text-sm font-medium text-gray-900">
-                            {report.FIRSTNAME} {report.LASTNAME}
-                          </div>
-                          <div className="text-sm text-gray-500">
-                            ID: {report.STUDENTID || 'N/A'}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">
-                        {formatDateTime(report.SCANDATETIME)}
-                      </div>
-                      <div className="text-sm text-gray-500">
-                        {report.AUTHMETHOD || 'Fingerprint'}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        {getStatusIcon(report.STATUS)}
-                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.STATUS)}`}>
-                          {report.STATUS || 'Unknown'}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">{report.LOCATION || 'N/A'}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <button
-                        onClick={() => viewReportDetails(report)}
-                        className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-                      >
-                        View Details
-                      </button>
-                    </td>
+          {rosterLoading ? (
+            <div className="flex items-center justify-center h-32">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+          ) : rosterLoadFailed ? (
+            <div className="text-center py-12">
+              <ExclamationTriangleIcon className="mx-auto h-12 w-12 text-yellow-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">Unable to load class roster</h3>
+              <p className="mt-1 text-sm text-gray-500 max-w-md mx-auto">
+                {rosterLoadErrorReason || 'The class roster could not be loaded. This may happen if the schedule for this session no longer exists in the system.'}
+              </p>
+              <p className="mt-2 text-xs text-gray-400">
+                Attendance records are still available below.
+              </p>
+            </div>
+          ) : sessionRoster.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Student
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sign In</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sign Out</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {sessionRoster.map((student) => (
+                    <tr key={student.USERID} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0 h-10 w-10">
+                            <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
+                              <AcademicCapIcon className="h-5 w-5 text-blue-600" />
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <div className="text-sm font-medium text-gray-900">
+                              {student.FIRSTNAME} {student.LASTNAME}
+                            </div>
+                            <div className="text-sm text-gray-500">
+                              ID: {student.STUDENTID || 'N/A'}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          {getStatusIcon(student.DISPLAY_STATUS || student.STATUS)}
+                          <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(student.DISPLAY_STATUS || student.STATUS)}`}>
+                            {student.DISPLAY_STATUS || student.STATUS}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {student.SIGNIN
+                            ? formatTime(new Date(student.SIGNIN).toTimeString().slice(0,5) + ':00')
+                            : (student.SCANDATETIME
+                              ? formatTime(new Date(student.SCANDATETIME).toTimeString().slice(0,5) + ':00')
+                              : <span className="text-gray-400">—</span>)}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {student.SIGNOUT
+                            ? formatTime(new Date(student.SIGNOUT).toTimeString().slice(0,5) + ':00')
+                            : <span className="text-gray-400">—</span>}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <AcademicCapIcon className="mx-auto h-12 w-12 text-gray-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">No students enrolled</h3>
+              <p className="mt-1 text-sm text-gray-500">
+                This subject doesn't have any enrolled students yet.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -668,7 +1018,17 @@ function Reports() {
           
           {Object.keys(sessions).length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {Object.entries(sessions).map(([sessionKey, session]) => (
+              {Object.entries(sessions)
+                .sort(([keyA, sessionA], [keyB, sessionB]) => {
+                  // Check if title or subtitle contains "null" (case-insensitive)
+                  const aHasNull = (sessionA.title?.toLowerCase().includes('null') || 
+                                   sessionA.subtitle?.toLowerCase().includes('null')) ? 1 : 0;
+                  const bHasNull = (sessionB.title?.toLowerCase().includes('null') || 
+                                   sessionB.subtitle?.toLowerCase().includes('null')) ? 1 : 0;
+                  // Sort: items with null go to bottom
+                  return aHasNull - bHasNull;
+                })
+                .map(([sessionKey, session]) => (
                 <div 
                   key={sessionKey} 
                   className="bg-gray-50 rounded-lg p-6 border border-gray-200 hover:shadow-md hover:border-blue-300 transition-all cursor-pointer"
@@ -731,7 +1091,6 @@ function Reports() {
   }
 
   // Show detailed group view
-  console.log('Current state:', { showGroupDetails, selectedGroup: selectedGroup?.key });
   if (showGroupDetails && selectedGroup) {
     return (
       <div className="space-y-6">
@@ -756,6 +1115,25 @@ function Reports() {
             <div>
               <h1 className="text-2xl font-bold text-gray-900">{selectedGroup.title}</h1>
               <p className="text-gray-600 mt-1">{selectedGroup.subtitle}</p>
+              <div className="mt-3 flex items-center space-x-2">
+                <div className="flex items-center space-x-2 bg-gradient-to-r from-blue-50 to-indigo-50 px-4 py-2 rounded-lg border border-blue-200 shadow-sm">
+                  <div className="flex items-center space-x-2">
+                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                    <span className="text-sm font-semibold text-blue-800">Instructor:</span>
+                  </div>
+                  <span className="text-lg font-bold text-blue-900">
+                    {selectedGroup?.instructor || (rosterLoading ? 'Loading...' : 'Not assigned')}
+                  </span>
+                  {selectedGroup?.instructor && (
+                    <span className={`ml-3 inline-flex items-center px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(selectedGroup?.instructorStatus)}`}>
+                      {getStatusIcon(selectedGroup?.instructorStatus)}
+                      <span className="ml-1">{selectedGroup?.instructorStatus || 'Unknown'}</span>
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
             <div className="flex space-x-4">
               <button
@@ -785,7 +1163,11 @@ function Reports() {
               </div>
               <div className="ml-4">
                 <p className="text-sm font-medium text-gray-500">Present</p>
-                <p className="text-2xl font-semibold text-gray-900">{selectedGroup.stats.present}</p>
+                <p className="text-2xl font-semibold text-gray-900">
+                  {sessionRoster.length > 0 
+                    ? sessionRoster.filter(s => s.STATUS === 'Present').length 
+                    : selectedGroup.stats.present}
+                </p>
               </div>
             </div>
           </div>
@@ -796,7 +1178,11 @@ function Reports() {
               </div>
               <div className="ml-4">
                 <p className="text-sm font-medium text-gray-500">Late</p>
-                <p className="text-2xl font-semibold text-gray-900">{selectedGroup.stats.late}</p>
+                <p className="text-2xl font-semibold text-gray-900">
+                  {sessionRoster.length > 0 
+                    ? sessionRoster.filter(s => s.STATUS === 'Late').length 
+                    : selectedGroup.stats.late}
+                </p>
               </div>
             </div>
           </div>
@@ -807,7 +1193,11 @@ function Reports() {
               </div>
               <div className="ml-4">
                 <p className="text-sm font-medium text-gray-500">Absent</p>
-                <p className="text-2xl font-semibold text-gray-900">{selectedGroup.stats.absent}</p>
+                <p className="text-2xl font-semibold text-gray-900">
+                  {sessionRoster.length > 0 
+                    ? sessionRoster.filter(s => s.STATUS === 'Absent').length 
+                    : selectedGroup.stats.absent}
+                </p>
               </div>
             </div>
           </div>
@@ -817,110 +1207,121 @@ function Reports() {
                 <UserGroupIcon className="h-8 w-8 text-blue-500" />
               </div>
               <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500">Total</p>
-                <p className="text-2xl font-semibold text-gray-900">{selectedGroup.stats.total}</p>
+                <p className="text-sm font-medium text-gray-500">Enrolled</p>
+                <p className="text-2xl font-semibold text-gray-900">
+                  {sessionRoster.length > 0 
+                    ? sessionRoster.length 
+                    : selectedGroup.stats.total}
+                </p>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Detailed Attendance Records */}
+        {/* Class List */}
         <div className="bg-white rounded-lg shadow border border-gray-200">
           <div className="px-6 py-4 border-b border-gray-200">
-            <h3 className="text-lg font-medium text-gray-900">Attendance Records</h3>
+            <h3 className="text-lg font-medium text-gray-900">Class List</h3>
             <p className="text-sm text-gray-500">
-              {selectedGroup.reports.length} record{selectedGroup.reports.length !== 1 ? 's' : ''} found
+              {rosterLoading 
+                ? 'Loading class list...' 
+                : rosterLoadFailed
+                  ? rosterLoadErrorReason || 'Unable to load class list'
+                  : sessionRoster.length > 0 
+                    ? `${sessionRoster.length} enrolled student${sessionRoster.length !== 1 ? 's' : ''}`
+                    : 'No students enrolled in this subject'
+              }
             </p>
           </div>
           
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Student
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Date & Time
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Method
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Location
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {selectedGroup.reports.map((report) => (
-                  <tr key={report.ATTENDANCEID} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div className="flex-shrink-0 h-10 w-10">
-                          <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
-                            <AcademicCapIcon className="h-5 w-5 text-blue-600" />
-                          </div>
-                        </div>
-                        <div className="ml-4">
-                          <div className="text-sm font-medium text-gray-900">
-                            {report.FIRSTNAME} {report.LASTNAME}
-                          </div>
-                          <div className="text-sm text-gray-500">
-                            ID: {report.STUDENTID || 'N/A'}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">
-                        {formatDateTime(report.SCANDATETIME)}
-                      </div>
-                      <div className="text-sm text-gray-500">
-                        {report.AUTHMETHOD || 'Fingerprint'}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        {getStatusIcon(report.STATUS)}
-                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.STATUS)}`}>
-                          {report.STATUS || 'Unknown'}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">
-                        {report.AUTHMETHOD || 'Fingerprint'}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center text-sm text-gray-900">
-                        <MapPinIcon className="h-4 w-4 mr-2 text-gray-400" />
-                        <div>
-                          <div>{report.ROOMNUMBER || 'N/A'}</div>
-                          <div className="text-xs text-gray-500">{report.ROOMNAME || ''}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                      <button
-                        onClick={() => viewReportDetails(report)}
-                        className="text-blue-600 hover:text-blue-900 flex items-center"
-                      >
-                        <EyeIcon className="h-4 w-4 mr-1" />
-                        View Details
-                      </button>
-                    </td>
+          {rosterLoading ? (
+            <div className="flex items-center justify-center h-32">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+          ) : rosterLoadFailed ? (
+            <div className="text-center py-12">
+              <ExclamationTriangleIcon className="mx-auto h-12 w-12 text-yellow-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">Unable to load class roster</h3>
+              <p className="mt-1 text-sm text-gray-500 max-w-md mx-auto">
+                {rosterLoadErrorReason || 'The class roster could not be loaded. This may happen if the schedule for this session no longer exists in the system.'}
+              </p>
+              <p className="mt-2 text-xs text-gray-400">
+                Attendance records are still available below.
+              </p>
+            </div>
+          ) : sessionRoster.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Student
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sign In</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sign Out</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {sessionRoster.map((student) => (
+                    <tr key={student.USERID} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0 h-10 w-10">
+                            <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
+                              <AcademicCapIcon className="h-5 w-5 text-blue-600" />
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <div className="text-sm font-medium text-gray-900">
+                              {student.FIRSTNAME} {student.LASTNAME}
+                            </div>
+                            <div className="text-sm text-gray-500">
+                              ID: {student.STUDENTID || 'N/A'}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          {getStatusIcon(student.DISPLAY_STATUS || student.STATUS)}
+                          <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(student.DISPLAY_STATUS || student.STATUS)}`}>
+                            {student.DISPLAY_STATUS || student.STATUS}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {student.SIGNIN
+                            ? formatTime(new Date(student.SIGNIN).toTimeString().slice(0,5) + ':00')
+                            : (student.SCANDATETIME
+                              ? formatTime(new Date(student.SCANDATETIME).toTimeString().slice(0,5) + ':00')
+                              : <span className="text-gray-400">—</span>)}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">
+                          {student.SIGNOUT
+                            ? formatTime(new Date(student.SIGNOUT).toTimeString().slice(0,5) + ':00')
+                            : <span className="text-gray-400">—</span>}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <AcademicCapIcon className="mx-auto h-12 w-12 text-gray-400" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900">No students enrolled</h3>
+              <p className="mt-1 text-sm text-gray-500">
+                This subject doesn't have any enrolled students yet.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Clear Group Records Confirmation Dialog */}
@@ -1225,7 +1626,17 @@ function Reports() {
       ) : viewMode === 'cards' ? (
         /* Card View */
         <div className="space-y-6">
-          {Object.entries(groupedReports).map(([key, group]) => {
+          {Object.entries(groupedReports)
+            .sort(([keyA, groupA], [keyB, groupB]) => {
+              // Check if title or subtitle contains "null" (case-insensitive)
+              const aHasNull = (groupA.title?.toLowerCase().includes('null') || 
+                               groupA.subtitle?.toLowerCase().includes('null')) ? 1 : 0;
+              const bHasNull = (groupB.title?.toLowerCase().includes('null') || 
+                               groupB.subtitle?.toLowerCase().includes('null')) ? 1 : 0;
+              // Sort: items with null go to bottom (1 - 0 = 1, so A goes after B)
+              return aHasNull - bHasNull;
+            })
+            .map(([key, group]) => {
             const hasSessions = group.sessions && Object.keys(group.sessions).length > 0;
             
             return (
@@ -1379,7 +1790,7 @@ function Reports() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm text-gray-900">
-                        {formatDateTime(report.SCANDATETIME)}
+                        {report.TIME_SCANNED ? formatTime(report.TIME_SCANNED) : formatDateTime(report.SCANDATETIME)}
                       </div>
                       <div className="text-sm text-gray-500">
                         {report.AUTHMETHOD || 'Fingerprint'}
@@ -1387,9 +1798,9 @@ function Reports() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
-                        {getStatusIcon(report.STATUS)}
-                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.STATUS)}`}>
-                          {report.STATUS || 'Unknown'}
+                        {getStatusIcon(report.DISPLAY_STATUS || report.STATUS)}
+                        <span className={`ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.DISPLAY_STATUS || report.STATUS)}`}>
+                          {report.DISPLAY_STATUS || report.STATUS || 'Unknown'}
                         </span>
                       </div>
                     </td>

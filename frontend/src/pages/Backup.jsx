@@ -4,16 +4,13 @@ import {
   DocumentArrowDownIcon,
   ServerIcon,
   FolderIcon,
-  CogIcon,
   ClockIcon,
-  CheckCircleIcon,
   ExclamationTriangleIcon,
-  XMarkIcon,
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 
-axios.defaults.baseURL = 'http://localhost:5000';
+axios.defaults.baseURL = 'http://172.72.100.126:5000';
 
 function Backup() {
   const [loading, setLoading] = useState(true);
@@ -78,14 +75,20 @@ function Backup() {
       // Refresh backups list
       await fetchBackups();
       
-      // Trigger download
-      const downloadUrl = `http://localhost:5000${response.data.downloadUrl}`;
+      // Trigger download with auth header to avoid navigation without token
+      const downloadUrl = `/api/backup/download/${response.data.filename}`;
+      const downloadResponse = await axios.get(downloadUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'blob'
+      });
+      const blobUrl = window.URL.createObjectURL(new Blob([downloadResponse.data]));
       const link = document.createElement('a');
-      link.href = downloadUrl;
+      link.href = blobUrl;
       link.download = response.data.filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
     } catch (error) {
       console.error('Error creating backup:', error);
       toast.error(error.response?.data?.message || 'Failed to create backup');

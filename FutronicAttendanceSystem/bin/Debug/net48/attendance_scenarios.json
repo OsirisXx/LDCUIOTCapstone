@@ -1,0 +1,8 @@
+{
+  "InstructorEarlyWindow": 15,
+  "StudentGracePeriod": 15,
+  "InstructorLateTolerance": 15,
+  "AutoCloseDelay": 15,
+  "StudentEarlyArrivalWindow": 15,
+  "InstructorEndTolerance": 2
+}

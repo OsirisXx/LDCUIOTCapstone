@@ -1,30 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArchiveBoxIcon,
   BookOpenIcon,
   BuildingOfficeIcon,
   CalendarDaysIcon,
   UsersIcon,
   ClipboardDocumentListIcon,
-  ClockIcon,
   ExclamationTriangleIcon,
-  CheckCircleIcon,
   XMarkIcon,
-  MagnifyingGlassIcon,
-  TrashIcon,
   DocumentArrowDownIcon,
-  EyeIcon,
-  CalendarIcon,
-  AcademicCapIcon,
-  MapPinIcon,
-  UserGroupIcon,
-  ClockIcon as ClockOutlineIcon,
+  DocumentArrowUpIcon,
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 
-axios.defaults.baseURL = 'http://localhost:5000';
+axios.defaults.baseURL = 'http://172.72.100.126:5000';
 
 function Archive() {
   const [loading, setLoading] = useState(true);
@@ -40,12 +30,25 @@ function Archive() {
   const [archiveSemester, setArchiveSemester] = useState('');
   const [archiveReason, setArchiveReason] = useState('');
   const [archiving, setArchiving] = useState(false);
+  const [unarchiving, setUnarchiving] = useState(false);
+  
+  // Unarchive confirmation modal states
+  const [showUnarchiveModal, setShowUnarchiveModal] = useState(false);
+  const [unarchiveModalAnimation, setUnarchiveModalAnimation] = useState('hidden');
+  const [showSecondConfirmation, setShowSecondConfirmation] = useState(false);
+  const [pendingUnarchiveKey, setPendingUnarchiveKey] = useState(null);
+  const [pendingUnarchiveDate, setPendingUnarchiveDate] = useState(null);
+  const [pendingUnarchiveCount, setPendingUnarchiveCount] = useState(0);
   const [selectedRoomIds, setSelectedRoomIds] = useState([]);
   const [selectedUserIds, setSelectedUserIds] = useState([]);
+  const [selectedBackupFiles, setSelectedBackupFiles] = useState([]);
   const [availableStudents, setAvailableStudents] = useState([]);
   const [loadingStudents, setLoadingStudents] = useState(false);
+  const [selectedUserType, setSelectedUserType] = useState('all');
   const [availableRooms, setAvailableRooms] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(false);
+  const [availableBackups, setAvailableBackups] = useState([]);
+  const [loadingBackups, setLoadingBackups] = useState(false);
   
   // View archived data states
   const [archivedSubjects, setArchivedSubjects] = useState([]);
@@ -53,10 +56,11 @@ function Archive() {
   const [archivedSchedules, setArchivedSchedules] = useState([]);
   const [archivedUsers, setArchivedUsers] = useState([]);
   const [archivedAttendance, setArchivedAttendance] = useState([]);
-  const [archivedSessions, setArchivedSessions] = useState([]);
+  const [archivedBackups, setArchivedBackups] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [paginationData, setPaginationData] = useState({});
+  const [expandedGroups, setExpandedGroups] = useState({});
+  
 
   useEffect(() => {
     fetchDashboardStats();
@@ -90,8 +94,37 @@ function Archive() {
         headers: { Authorization: `Bearer ${token}` }
       });
       
-      const uniqueYears = [...new Set(response.data.subjects.data.map(s => s.ACADEMICYEAR).filter(Boolean))];
-      const uniqueSemesters = [...new Set(response.data.subjects.data.map(s => s.SEMESTER).filter(Boolean))];
+      // Derive from subjects
+      const subjectYears = Array.isArray(response?.data?.subjects?.data)
+        ? response.data.subjects.data.map(s => s.ACADEMICYEAR).filter(Boolean)
+        : [];
+      const subjectSemesters = Array.isArray(response?.data?.subjects?.data)
+        ? response.data.subjects.data.map(s => s.SEMESTER).filter(Boolean)
+        : [];
+
+      // Also derive from attendance logs so the Attendance archive modal isn't empty
+      let attendanceYears = [];
+      let attendanceSemesters = [];
+      try {
+        const logsRes = await axios.get('/api/logs/attendance', {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const logs = Array.isArray(logsRes?.data?.logs) ? logsRes.data.logs : [];
+        attendanceYears = logs.map(l => l.ACADEMICYEAR).filter(Boolean);
+        attendanceSemesters = logs.map(l => l.SEMESTER).filter(Boolean);
+      } catch (e) {
+        // Best-effort: if attendance logs fail, proceed with subjects-only
+        console.warn('Could not enrich academic years from attendance logs:', e?.message || e);
+      }
+
+      const uniqueYears = [...new Set([...
+        subjectYears,
+        ...attendanceYears
+      ])];
+      const uniqueSemesters = [...new Set([...
+        subjectSemesters,
+        ...attendanceSemesters
+      ])];
       
       setAcademicYears(uniqueYears);
       setSemesters(uniqueSemesters);
@@ -117,7 +150,6 @@ function Archive() {
             params 
           });
           setArchivedSubjects(response.data.subjects);
-          setPaginationData(response.data.pagination);
           break;
         case 'rooms':
           response = await axios.get('/api/archive/rooms', { 
@@ -125,7 +157,6 @@ function Archive() {
             params 
           });
           setArchivedRooms(response.data.rooms);
-          setPaginationData(response.data.pagination);
           break;
         case 'schedules':
           response = await axios.get('/api/archive/schedules', { 
@@ -133,7 +164,6 @@ function Archive() {
             params 
           });
           setArchivedSchedules(response.data.schedules);
-          setPaginationData(response.data.pagination);
           break;
         case 'users':
           response = await axios.get('/api/archive/users', { 
@@ -141,7 +171,6 @@ function Archive() {
             params 
           });
           setArchivedUsers(response.data.users);
-          setPaginationData(response.data.pagination);
           break;
         case 'attendance':
           response = await axios.get('/api/archive/attendance', { 
@@ -149,19 +178,16 @@ function Archive() {
             params 
           });
           setArchivedAttendance(response.data.records);
-          setPaginationData(response.data.pagination);
           break;
-        case 'sessions':
-          response = await axios.get('/api/archive/sessions', { 
-            headers: { Authorization: `Bearer ${token}` },
-            params 
+        case 'backups':
+          response = await axios.get('/api/archive/backups', { 
+            headers: { Authorization: `Bearer ${token}` }
           });
-          setArchivedSessions(response.data.sessions);
-          setPaginationData(response.data.pagination);
+          setArchivedBackups(response.data.backups);
           break;
       }
       
-      setTotalPages(response.data.pagination.pages);
+      if (response.data.pagination) setTotalPages(response.data.pagination.pages);
     } catch (error) {
       console.error('Error fetching archived data:', error);
       toast.error('Failed to load archived data');
@@ -176,26 +202,54 @@ function Archive() {
     
     // Fetch data based on category
     if (category === 'users') {
-      await fetchStudents();
+      setSelectedUserType('all'); // Reset to 'all' when opening modal
+      await fetchUsers('all');
     } else if (category === 'rooms') {
       await fetchRooms();
+    } else if (category === 'backups') {
+      await fetchBackupsForArchiving();
     }
   };
 
-  const fetchStudents = async () => {
+  const fetchBackupsForArchiving = async () => {
+    try {
+      setLoadingBackups(true);
+      const token = localStorage.getItem('token');
+      const response = await axios.get('/api/backup/list', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setAvailableBackups(response.data.backups || []);
+    } catch (error) {
+      console.error('Error fetching backups:', error);
+      toast.error('Failed to load backups');
+    } finally {
+      setLoadingBackups(false);
+    }
+  };
+
+  const fetchUsers = async (userType = selectedUserType) => {
     try {
       setLoadingStudents(true);
       const token = localStorage.getItem('token');
-      const response = await axios.get('/api/users?type=student&limit=1000', {
+      const url = userType === 'all' 
+        ? '/api/users?limit=1000'
+        : `/api/users?type=${userType}&limit=1000`;
+      const response = await axios.get(url, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setAvailableStudents(response.data.users || []);
     } catch (error) {
-      console.error('Error fetching students:', error);
-      toast.error('Failed to load students');
+      console.error('Error fetching users:', error);
+      toast.error('Failed to load users');
     } finally {
       setLoadingStudents(false);
     }
+  };
+
+  const handleUserTypeChange = async (newType) => {
+    setSelectedUserType(newType);
+    setSelectedUserIds([]); // Clear selections when changing type
+    await fetchUsers(newType);
   };
 
   const fetchRooms = async () => {
@@ -250,6 +304,14 @@ function Archive() {
     }
   };
 
+  const selectAllBackups = () => {
+    if (selectedBackupFiles.length === availableBackups.length) {
+      setSelectedBackupFiles([]);
+    } else {
+      setSelectedBackupFiles(availableBackups.map(b => b.filename));
+    }
+  };
+
   const handleArchive = async () => {
     try {
       setArchiving(true);
@@ -261,7 +323,6 @@ function Archive() {
         case 'subjects':
         case 'schedules':
         case 'attendance':
-        case 'sessions':
           if (!archiveAcademicYear || !archiveSemester) {
             toast.error('Please select academic year and semester');
             return;
@@ -278,14 +339,27 @@ function Archive() {
           break;
         case 'users':
           if (selectedUserIds.length === 0) {
-            toast.error('Please select at least one student to archive');
+            const userTypeLabel = selectedUserType === 'all' ? 'user' : 
+              selectedUserType === 'student' ? 'student' :
+              selectedUserType === 'instructor' ? 'instructor' :
+              selectedUserType === 'custodian' ? 'custodian' :
+              selectedUserType === 'dean' ? 'dean' : 'user';
+            toast.error(`Please select at least one ${userTypeLabel} to archive`);
             return;
           }
           payload.user_ids = selectedUserIds;
           break;
+        case 'backups':
+          if (selectedBackupFiles.length === 0) {
+            toast.error('Please select at least one backup to archive');
+            return;
+          }
+          payload = { filenames: selectedBackupFiles };
+          break;
       }
 
-      const response = await axios.post(`/api/archive/${archiveCategory}`, payload, {
+      const endpoint = archiveCategory === 'backups' ? '/api/archive/backups' : `/api/archive/${archiveCategory}`;
+      const response = await axios.post(endpoint, payload, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
@@ -298,6 +372,7 @@ function Archive() {
       setSelectedUserIds([]);
       setAvailableStudents([]);
       setAvailableRooms([]);
+      setSelectedUserType('all');
       fetchDashboardStats();
       
       if (activeTab === archiveCategory) {
@@ -309,6 +384,62 @@ function Archive() {
     } finally {
       setArchiving(false);
     }
+  };
+
+  const handleUnarchiveClick = (groupKey, groupDate, itemCount) => {
+    setPendingUnarchiveKey(groupKey);
+    setPendingUnarchiveDate(groupDate);
+    setPendingUnarchiveCount(itemCount);
+    setShowSecondConfirmation(false);
+    setShowUnarchiveModal(true);
+    setTimeout(() => setUnarchiveModalAnimation('visible'), 10);
+  };
+
+  const handleUnarchiveConfirm = async () => {
+    if (!showSecondConfirmation) {
+      setShowSecondConfirmation(true);
+      return;
+    }
+
+    try {
+      setUnarchiving(true);
+      const token = localStorage.getItem('token');
+      
+      const response = await axios.put('/api/archive/attendance/unarchive', 
+        { archived_at: pendingUnarchiveKey },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      
+      toast.success(response.data.message);
+      fetchDashboardStats();
+      fetchArchivedData('attendance');
+      
+      // Close modal
+      setUnarchiveModalAnimation('hidden');
+      setTimeout(() => {
+        setShowUnarchiveModal(false);
+        setShowSecondConfirmation(false);
+        setPendingUnarchiveKey(null);
+        setPendingUnarchiveDate(null);
+        setPendingUnarchiveCount(0);
+      }, 300);
+    } catch (error) {
+      console.error('Unarchive error:', error);
+      toast.error(error.response?.data?.message || 'Failed to unarchive records');
+    } finally {
+      setUnarchiving(false);
+    }
+  };
+
+  const handleUnarchiveCancel = () => {
+    setUnarchiveModalAnimation('hidden');
+    setTimeout(() => {
+      setShowUnarchiveModal(false);
+      setShowSecondConfirmation(false);
+      setPendingUnarchiveKey(null);
+      setPendingUnarchiveDate(null);
+      setPendingUnarchiveCount(0);
+    }, 300);
   };
 
   const getCategoryStats = (category) => {
@@ -326,6 +457,41 @@ function Archive() {
       hour: '2-digit',
       minute: '2-digit'
     });
+  };
+
+  const getGroupKey = (category, item) => {
+    const raw = category === 'backups' ? item?.date : item?.ARCHIVED_AT;
+    if (!raw) return 'unknown';
+    const ms = new Date(raw).getTime();
+    if (Number.isNaN(ms)) return 'unknown';
+    // Group to seconds using local interpretation; use numeric key
+    return Math.floor(ms / 1000).toString();
+  };
+
+  const groupArchivedItems = (category, items) => {
+    const groups = {};
+    (items || []).forEach((item) => {
+      const key = getGroupKey(category, item);
+      if (!groups[key]) groups[key] = { items: [], displayDate: null };
+      groups[key].items.push(item);
+      const rawDate = category === 'backups' ? item?.date : item?.ARCHIVED_AT;
+      if (!groups[key].displayDate) groups[key].displayDate = rawDate;
+    });
+    return Object.entries(groups)
+      .sort((a, b) => parseInt(b[0], 10) - parseInt(a[0], 10))
+      .map(([key, data]) => ({ key, date: data.displayDate, items: data.items }));
+  };
+
+  const toggleGroup = (category, key) => {
+    setExpandedGroups(prev => {
+      const cat = prev[category] || {};
+      const next = { ...cat, [key]: !cat[key] };
+      return { ...prev, [category]: next };
+    });
+  };
+
+  const isGroupExpanded = (category, key) => {
+    return !!expandedGroups?.[category]?.[key];
   };
 
   if (loading && activeTab === 'dashboard') {
@@ -387,7 +553,7 @@ function Archive() {
               <UsersIcon className="h-8 w-8 text-yellow-500" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">Archived Students</p>
+              <p className="text-sm font-medium text-gray-500">Archived Users</p>
               <p className="text-2xl font-semibold text-gray-900">{getCategoryStats('users')}</p>
             </div>
           </div>
@@ -404,15 +570,15 @@ function Archive() {
           </div>
         </div>
         <div className="bg-white rounded-lg shadow p-6 border border-gray-200">
-          <div className="flex items-center">
-            <div className="flex-shrink-0">
-              <ClockIcon className="h-8 w-8 text-indigo-500" />
+            <div className="flex items-center">
+              <div className="flex-shrink-0">
+                <DocumentArrowDownIcon className="h-8 w-8 text-indigo-500" />
+              </div>
+              <div className="ml-4">
+                <p className="text-sm font-medium text-gray-500">Archived Backups</p>
+                <p className="text-2xl font-semibold text-gray-900">{getCategoryStats('backups')}</p>
+              </div>
             </div>
-            <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">Archived Sessions</p>
-              <p className="text-2xl font-semibold text-gray-900">{getCategoryStats('sessions')}</p>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -468,7 +634,7 @@ function Archive() {
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              Archived Students
+              Archived Users
             </button>
             <button
               onClick={() => setActiveTab('attendance')}
@@ -481,14 +647,14 @@ function Archive() {
               Archived Attendance
             </button>
             <button
-              onClick={() => setActiveTab('sessions')}
+              onClick={() => setActiveTab('backups')}
               className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'sessions'
+                activeTab === 'backups'
                   ? 'border-blue-500 text-blue-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              Archived Sessions
+              Archived Backups
             </button>
           </nav>
         </div>
@@ -555,20 +721,20 @@ function Archive() {
                   </button>
                 </div>
 
-                {/* Archive Students */}
+                {/* Archive Users */}
                 <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6">
                   <div className="flex items-center justify-between mb-4">
                     <UsersIcon className="h-8 w-8 text-yellow-600" />
-                    <span className="text-sm font-medium text-yellow-800">Students</span>
+                    <span className="text-sm font-medium text-yellow-800">Users</span>
                   </div>
                   <p className="text-sm text-gray-600 mb-4">
-                    Archive students (admins and instructors excluded). Related enrollments and attendance will be archived.
+                    Archive users by type (All, Students, Instructors, Custodians, Deans). Related enrollments and attendance will be archived.
                   </p>
                   <button
                     onClick={() => handleArchiveClick('users')}
                     className="w-full px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 transition-colors"
                   >
-                    Archive Students
+                    Archive Users
                   </button>
                 </div>
 
@@ -589,20 +755,20 @@ function Archive() {
                   </button>
                 </div>
 
-                {/* Archive Sessions */}
+                {/* Archive Backup Copies */}
                 <div className="bg-indigo-50 border-2 border-indigo-200 rounded-lg p-6">
                   <div className="flex items-center justify-between mb-4">
-                    <ClockIcon className="h-8 w-8 text-indigo-600" />
-                    <span className="text-sm font-medium text-indigo-800">Sessions</span>
+                    <DocumentArrowDownIcon className="h-8 w-8 text-indigo-600" />
+                    <span className="text-sm font-medium text-indigo-800">Backup Copies</span>
                   </div>
                   <p className="text-sm text-gray-600 mb-4">
-                    Archive sessions by academic year and semester.
+                    Archive backup zip files so they are hidden from Backup History.
                   </p>
                   <button
-                    onClick={() => handleArchiveClick('sessions')}
+                    onClick={() => handleArchiveClick('backups')}
                     className="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors"
                   >
-                    Archive Sessions
+                    Archive Backup Copies
                   </button>
                 </div>
               </div>
@@ -618,7 +784,7 @@ function Archive() {
                 </div>
               ) : (
                 <>
-                  {/* Archived Subjects View */}
+                  {/* Archived Subjects View (Grouped) */}
                   {activeTab === 'subjects' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Subjects</h3>
@@ -633,23 +799,61 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Academic Year</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Semester</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedSubjects.map((subject) => (
-                                <tr key={subject.SUBJECTID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{subject.SUBJECTCODE}</div>
-                                    <div className="text-sm text-gray-500">{subject.SUBJECTNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{subject.ACADEMICYEAR}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{subject.SEMESTER}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(subject.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('subjects', archivedSubjects).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('subjects', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('subjects', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('subjects', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('subjects', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Academic Year</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Semester</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((subject) => (
+                                                <tr key={subject.SUBJECTID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{subject.SUBJECTCODE}</div>
+                                                    <div className="text-gray-500">{subject.SUBJECTNAME}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{subject.ACADEMICYEAR}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{subject.SEMESTER}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -658,10 +862,13 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Rooms View */}
+                  {/* Archived Rooms View (Grouped) */}
                   {activeTab === 'rooms' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Rooms</h3>
+                      {archivedRooms.length > 0 && (
+                        <div className="text-xs text-gray-500">Diagnostics: {archivedRooms.length} rooms • Most recent archived at {formatDate(archivedRooms[0]?.ARCHIVED_AT)}</div>
+                      )}
                       {archivedRooms.length === 0 ? (
                         <div className="text-center py-12">
                           <BuildingOfficeIcon className="mx-auto h-12 w-12 text-gray-400" />
@@ -673,21 +880,59 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Building</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedRooms.map((room) => (
-                                <tr key={room.ROOMID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{room.ROOMNUMBER}</div>
-                                    <div className="text-sm text-gray-500">{room.ROOMNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{room.BUILDING}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(room.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('rooms', archivedRooms).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('rooms', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('rooms', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('rooms', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('rooms', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Building</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((room) => (
+                                                <tr key={room.ROOMID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{room.ROOMNUMBER}</div>
+                                                    <div className="text-gray-500">{room.ROOMNAME}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{room.BUILDING}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -696,7 +941,7 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Schedules View */}
+                  {/* Archived Schedules View (Grouped) */}
                   {activeTab === 'schedules' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Schedules</h3>
@@ -711,25 +956,63 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Day</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedSchedules.map((schedule) => (
-                                <tr key={schedule.SCHEDULEID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{schedule.SUBJECTCODE}</div>
-                                    <div className="text-sm text-gray-500">{schedule.SUBJECTNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{schedule.ROOMNUMBER}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{schedule.DAYOFWEEK}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{schedule.STARTTIME} - {schedule.ENDTIME}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(schedule.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('schedules', archivedSchedules).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('schedules', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('schedules', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('schedules', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('schedules', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Day</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((schedule) => (
+                                                <tr key={schedule.SCHEDULEID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{schedule.SUBJECTCODE}</div>
+                                                    <div className="text-gray-500">{schedule.SUBJECTNAME}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{schedule.ROOMNUMBER}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{schedule.DAYOFWEEK}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{schedule.STARTTIME} - {schedule.ENDTIME}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -738,37 +1021,75 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Users View */}
+                  {/* Archived Users View (Grouped) */}
                   {activeTab === 'users' && (
                     <div className="space-y-4">
-                      <h3 className="text-lg font-semibold text-gray-900">Archived Students</h3>
+                      <h3 className="text-lg font-semibold text-gray-900">Archived Users</h3>
                       {archivedUsers.length === 0 ? (
                         <div className="text-center py-12">
                           <UsersIcon className="mx-auto h-12 w-12 text-gray-400" />
-                          <h3 className="mt-2 text-sm font-medium text-gray-900">No archived students</h3>
-                          <p className="mt-1 text-sm text-gray-500">No students have been archived yet.</p>
+                          <h3 className="mt-2 text-sm font-medium text-gray-900">No archived users</h3>
+                          <p className="mt-1 text-sm text-gray-500">No users have been archived yet.</p>
                         </div>
                       ) : (
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Student ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Year Level</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedUsers.map((user) => (
-                                <tr key={user.USERID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{user.FIRSTNAME} {user.LASTNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.STUDENTID}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.YEARLEVEL || 'N/A'}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(user.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('users', archivedUsers).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('users', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('users', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('users', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('users', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Student ID</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Year Level</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((user) => (
+                                                <tr key={user.USERID}>
+                                                  <td className="px-4 py-2 text-sm">
+                                                    <div className="text-gray-900 font-medium">{user.FIRSTNAME} {user.LASTNAME}</div>
+                                                  </td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{user.STUDENTID}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{user.YEARLEVEL || 'N/A'}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -777,7 +1098,7 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Attendance View */}
+                  {/* Archived Attendance View (Grouped) */}
                   {activeTab === 'attendance' && (
                     <div className="space-y-4">
                       <h3 className="text-lg font-semibold text-gray-900">Archived Attendance Records</h3>
@@ -792,57 +1113,145 @@ function Archive() {
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Student</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action Type</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedAttendance.map((record) => (
-                                <tr key={record.ATTENDANCEID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{record.FIRSTNAME} {record.LASTNAME}</div>
-                                    <div className="text-sm text-gray-500">{record.STUDENTID}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                      record.STATUS === 'Present' ? 'bg-green-100 text-green-800' :
-                                      record.STATUS === 'Late' ? 'bg-yellow-100 text-yellow-800' :
-                                      'bg-red-100 text-red-800'
-                                    }`}>
-                                      {record.STATUS}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{record.ACTIONTYPE || 'N/A'}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                      record.AUTHMETHOD === 'RFID' ? 'bg-blue-100 text-blue-800' :
-                                      record.AUTHMETHOD === 'Fingerprint' ? 'bg-purple-100 text-purple-800' :
-                                      record.AUTHMETHOD === 'RFID + Fingerprint' ? 'bg-indigo-100 text-indigo-800' :
-                                      'bg-gray-100 text-gray-800'
-                                    }`}>
-                                      {record.AUTHMETHOD || 'Fingerprint'}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                                      record.LOCATION === 'inside' ? 'bg-green-100 text-green-800' :
-                                      'bg-orange-100 text-orange-800'
-                                    }`}>
-                                      {record.LOCATION === 'inside' ? 'Inside' : 'Outside'}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{record.ROOMNUMBER || 'N/A'}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{record.SUBJECTCODE || 'N/A'}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(record.DATE)}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(record.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('attendance', archivedAttendance).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <div className="flex items-center justify-end space-x-2">
+                                        <button
+                                          onClick={() => toggleGroup('attendance', group.key)}
+                                          className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                          style={{
+                                            background: isGroupExpanded('attendance', group.key)
+                                              ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                              : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                          }}
+                                        >
+                                          {isGroupExpanded('attendance', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                        </button>
+                                        <button
+                                          onClick={() => handleUnarchiveClick(group.key, group.date, group.items.length)}
+                                          disabled={unarchiving}
+                                          className="px-3 py-1.5 text-sm font-medium rounded-md text-white flex items-center space-x-1 disabled:opacity-50"
+                                          style={{
+                                            background: 'linear-gradient(135deg, #059669 0%, #047857 100%)'
+                                          }}
+                                        >
+                                          <DocumentArrowUpIcon className="h-4 w-4" />
+                                          <span>Unarchive</span>
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('attendance', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="mb-2 text-xs text-gray-500">
+                                          Showing {group.items.length} archived record{group.items.length !== 1 ? 's' : ''} 
+                                          ({group.items.filter(r => r.RECORD_TYPE === 'attendance_record').length} attendance record{group.items.filter(r => r.RECORD_TYPE === 'attendance_record').length !== 1 ? 's' : ''}, 
+                                          {' '}{group.items.filter(r => r.RECORD_TYPE === 'unknown_scan' || r.RECORD_TYPE === 'denied_access').length} access log{group.items.filter(r => r.RECORD_TYPE === 'unknown_scan' || r.RECORD_TYPE === 'denied_access').length !== 1 ? 's' : ''})
+                                        </div>
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Reason</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((record) => {
+                                                const isAccessLog = record.RECORD_TYPE === 'unknown_scan' || record.RECORD_TYPE === 'denied_access';
+                                                const isUnknownUser = record.RECORD_TYPE === 'unknown_scan';
+                                                
+                                                return (
+                                                  <tr key={record.ATTENDANCEID}>
+                                                    <td className="px-4 py-2 text-sm">
+                                                      <div className="text-gray-900 font-medium">
+                                                        {isUnknownUser ? 'Unknown User' : `${record.FIRSTNAME} ${record.LASTNAME}`}
+                                                      </div>
+                                                      {record.STUDENTID && (
+                                                        <div className="text-gray-500">ID: {record.STUDENTID}</div>
+                                                      )}
+                                                      {isAccessLog && record.RECORD_TYPE === 'unknown_scan' && (
+                                                        <div className="text-gray-500 text-xs italic">Unknown Scan</div>
+                                                      )}
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm">
+                                                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                                        record.STATUS === 'Present' ? 'bg-green-100 text-green-800' :
+                                                        record.STATUS === 'Late' ? 'bg-yellow-100 text-yellow-800' :
+                                                        record.STATUS === 'Unknown' ? 'bg-gray-100 text-gray-800' :
+                                                        record.STATUS === 'Denied' ? 'bg-red-100 text-red-800' :
+                                                        'bg-red-100 text-red-800'
+                                                      }`}>
+                                                        {record.STATUS}
+                                                      </span>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">{record.ACTIONTYPE || 'N/A'}</td>
+                                                    <td className="px-4 py-2 text-sm">
+                                                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                                        record.AUTHMETHOD === 'RFID' ? 'bg-blue-100 text-blue-800' :
+                                                        record.AUTHMETHOD === 'Fingerprint' ? 'bg-purple-100 text-purple-800' :
+                                                        record.AUTHMETHOD === 'RFID + Fingerprint' ? 'bg-indigo-100 text-indigo-800' :
+                                                        'bg-gray-100 text-gray-800'
+                                                      }`}>
+                                                        {record.AUTHMETHOD || 'N/A'}
+                                                      </span>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm">
+                                                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                                                        record.LOCATION === 'inside' ? 'bg-green-100 text-green-800' :
+                                                        'bg-orange-100 text-orange-800'
+                                                      }`}>
+                                                        {record.LOCATION === 'inside' ? 'Inside' : 'Outside'}
+                                                      </span>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">{record.ROOMNUMBER || 'N/A'}</td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">
+                                                      {isAccessLog ? (
+                                                        <span className="text-gray-400 italic">N/A</span>
+                                                      ) : (
+                                                        record.SUBJECTCODE || 'N/A'
+                                                      )}
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">
+                                                      {record.DATE ? formatDate(record.DATE) : (record.TIMESTAMP ? formatDate(record.TIMESTAMP) : 'N/A')}
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-900">
+                                                      {record.REASON ? (
+                                                        <span className="text-xs text-gray-600" title={record.REASON}>
+                                                          {record.REASON.length > 50 ? `${record.REASON.substring(0, 50)}...` : record.REASON}
+                                                        </span>
+                                                      ) : (
+                                                        <span className="text-gray-400">-</span>
+                                                      )}
+                                                    </td>
+                                                  </tr>
+                                                );
+                                              })}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -851,48 +1260,67 @@ function Archive() {
                     </div>
                   )}
 
-                  {/* Archived Sessions View */}
-                  {activeTab === 'sessions' && (
+                  {/* Archived Backups View (Grouped) */}
+                  {activeTab === 'backups' && (
                     <div className="space-y-4">
-                      <h3 className="text-lg font-semibold text-gray-900">Archived Sessions</h3>
-                      {archivedSessions.length === 0 ? (
-                        <div className="text-center py-12">
-                          <ClockIcon className="mx-auto h-12 w-12 text-gray-400" />
-                          <h3 className="mt-2 text-sm font-medium text-gray-900">No archived sessions</h3>
-                          <p className="mt-1 text-sm text-gray-500">No sessions have been archived yet.</p>
-                        </div>
+                      <h3 className="text-lg font-semibold text-gray-900">Archived Backup Copies</h3>
+                      {archivedBackups.length === 0 ? (
+                        <div className="text-center py-8 text-gray-500">No archived backups found</div>
                       ) : (
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                               <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived At</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Archived Date</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                               </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                              {archivedSessions.map((session) => (
-                                <tr key={session.SESSIONID} className="hover:bg-gray-50">
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">{session.SUBJECTCODE}</div>
-                                    <div className="text-sm text-gray-500">{session.SUBJECTNAME}</div>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{session.ROOMNUMBER}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(session.SESSIONDATE)}</td>
-                                  <td className="px-6 py-4 whitespace-nowrap">
-                                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                      session.STATUS === 'active' ? 'bg-green-100 text-green-800' :
-                                      session.STATUS === 'ended' ? 'bg-gray-100 text-gray-800' :
-                                      'bg-yellow-100 text-yellow-800'
-                                    }`}>
-                                      {session.STATUS}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(session.ARCHIVED_AT)}</td>
-                                </tr>
+                              {groupArchivedItems('backups', archivedBackups).map((group) => (
+                                <React.Fragment key={group.key}>
+                                  <tr className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(group.date)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{group.items.length}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                                      <button
+                                        onClick={() => toggleGroup('backups', group.key)}
+                                        className="px-3 py-1.5 text-sm font-medium rounded-md text-white"
+                                        style={{
+                                          background: isGroupExpanded('backups', group.key)
+                                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                            : 'linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%)'
+                                        }}
+                                      >
+                                        {isGroupExpanded('backups', group.key) ? 'Hide Archived Contents' : 'Show Archived Contents'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {isGroupExpanded('backups', group.key) && (
+                                    <tr>
+                                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                                        <div className="overflow-x-auto border border-gray-200 rounded">
+                                          <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-white">
+                                              <tr>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
+                                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Size (MB)</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                              {group.items.map((b) => (
+                                                <tr key={b.filename}>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{b.filename}</td>
+                                                  <td className="px-4 py-2 text-sm text-gray-900">{b.size}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
                               ))}
                             </tbody>
                           </table>
@@ -950,7 +1378,7 @@ function Archive() {
             <div className="mt-3">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-medium text-gray-900">
-                  Archive {archiveCategory.charAt(0).toUpperCase() + archiveCategory.slice(1)}
+                  {archiveCategory === 'users' ? 'Archive Users' : `Archive ${archiveCategory.charAt(0).toUpperCase() + archiveCategory.slice(1)}`}
                 </h3>
                 <button
                   onClick={() => setShowArchiveModal(false)}
@@ -970,7 +1398,7 @@ function Archive() {
                 </div>
               </div>
 
-              {(archiveCategory === 'subjects' || archiveCategory === 'schedules' || archiveCategory === 'attendance' || archiveCategory === 'sessions') && (
+              {(archiveCategory === 'subjects' || archiveCategory === 'schedules' || archiveCategory === 'attendance') && (
                 <div className="space-y-4 mb-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Academic Year</label>
@@ -1001,11 +1429,98 @@ function Archive() {
                 </div>
               )}
 
-              {archiveCategory === 'users' && (
+            {archiveCategory === 'backups' && (
                 <div className="mb-4">
                   <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm text-gray-600">Select backup files to archive:</p>
+                    {availableBackups.length > 0 && (
+                      <button
+                        onClick={selectAllBackups}
+                        className="px-3 py-1.5 text-sm font-medium rounded-md transition-all duration-200"
+                        style={{
+                          background: selectedBackupFiles.length === availableBackups.length 
+                            ? 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                            : 'linear-gradient(135deg, #800020 0%, #8b1538 100%)',
+                          color: 'white',
+                          boxShadow: '0 2px 4px rgba(128, 0, 32, 0.3)'
+                        }}
+                        onMouseEnter={(e) => {
+                          if (selectedBackupFiles.length !== availableBackups.length) {
+                            e.target.style.transform = 'scale(1.05)';
+                            e.target.style.boxShadow = '0 4px 8px rgba(128, 0, 32, 0.4)';
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          e.target.style.transform = 'scale(1)';
+                          e.target.style.boxShadow = '0 2px 4px rgba(128, 0, 32, 0.3)';
+                        }}
+                      >
+                        {selectedBackupFiles.length === availableBackups.length ? '✓ Deselect All' : 'Select All'}
+                      </button>
+                    )}
+                  </div>
+                  {loadingBackups ? (
+                    <div className="flex items-center justify-center py-8">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                    </div>
+                  ) : (
+                    <div className="border border-gray-300 rounded-md max-h-64 overflow-y-auto">
+                      {availableBackups.length === 0 ? (
+                        <div className="text-center py-8 text-gray-500">No backups found</div>
+                      ) : (
+                        <div className="divide-y divide-gray-200">
+                          {availableBackups.map((b) => (
+                            <label key={b.filename} className="flex items-center px-4 py-3 hover:bg-gray-50 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={selectedBackupFiles.includes(b.filename)}
+                                onChange={() => {
+                                  setSelectedBackupFiles(prev => prev.includes(b.filename)
+                                    ? prev.filter(f => f !== b.filename)
+                                    : [...prev, b.filename]
+                                  );
+                                }}
+                                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                              />
+                              <div className="ml-3 flex-1">
+                                <div className="text-sm font-medium text-gray-900">{b.filename}</div>
+                                <div className="text-sm text-gray-500">{b.size} MB • {formatDate(b.date)}</div>
+                              </div>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {selectedBackupFiles.length > 0 && (
+                    <p className="mt-2 text-sm text-blue-600">{selectedBackupFiles.length} backup{selectedBackupFiles.length > 1 ? 's' : ''} selected</p>
+                  )}
+                </div>
+              )}
+
+              {archiveCategory === 'users' && (
+                <div className="mb-4">
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Archive User Type</label>
+                    <select
+                      value={selectedUserType}
+                      onChange={(e) => handleUserTypeChange(e.target.value)}
+                      className="w-full border border-gray-300 rounded-md px-3 py-2"
+                    >
+                      <option value="all">Archive All</option>
+                      <option value="student">Archive Students</option>
+                      <option value="instructor">Archive Instructors</option>
+                      <option value="custodian">Archive Custodians</option>
+                      <option value="dean">Archive Deans</option>
+                    </select>
+                  </div>
+                  <div className="flex items-center justify-between mb-2">
                     <p className="text-sm text-gray-600">
-                      Select students to archive:
+                      Select {selectedUserType === 'all' ? 'users' : 
+                        selectedUserType === 'student' ? 'students' :
+                        selectedUserType === 'instructor' ? 'instructors' :
+                        selectedUserType === 'custodian' ? 'custodians' :
+                        selectedUserType === 'dean' ? 'deans' : 'users'} to archive:
                     </p>
                     {availableStudents.length > 0 && (
                       <button
@@ -1033,9 +1548,6 @@ function Archive() {
                       </button>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 mb-3">
-                    Note: Only students can be archived. Admins and instructors are excluded.
-                  </p>
                   
                   {loadingStudents ? (
                     <div className="flex items-center justify-center py-8">
@@ -1045,27 +1557,31 @@ function Archive() {
                     <div className="border border-gray-300 rounded-md max-h-64 overflow-y-auto">
                       {availableStudents.length === 0 ? (
                         <div className="text-center py-8 text-gray-500">
-                          No students found
+                          No {selectedUserType === 'all' ? 'users' : 
+                            selectedUserType === 'student' ? 'students' :
+                            selectedUserType === 'instructor' ? 'instructors' :
+                            selectedUserType === 'custodian' ? 'custodians' :
+                            selectedUserType === 'dean' ? 'deans' : 'users'} found
                         </div>
                       ) : (
                         <div className="divide-y divide-gray-200">
-                          {availableStudents.map((student) => (
+                          {availableStudents.map((user) => (
                             <label
-                              key={student.USERID}
+                              key={user.USERID}
                               className="flex items-center px-4 py-3 hover:bg-gray-50 cursor-pointer"
                             >
                               <input
                                 type="checkbox"
-                                checked={selectedUserIds.includes(student.USERID)}
-                                onChange={() => toggleStudentSelection(student.USERID)}
+                                checked={selectedUserIds.includes(user.USERID)}
+                                onChange={() => toggleStudentSelection(user.USERID)}
                                 className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                               />
                               <div className="ml-3 flex-1">
                                 <div className="text-sm font-medium text-gray-900">
-                                  {student.FIRSTNAME} {student.LASTNAME}
+                                  {user.FIRSTNAME} {user.LASTNAME}
                                 </div>
                                 <div className="text-sm text-gray-500">
-                                  {student.STUDENTID}
+                                  {user.STUDENTID || user.FACULTYID || 'N/A'} • {user.USERTYPE}
                                 </div>
                               </div>
                             </label>
@@ -1077,7 +1593,11 @@ function Archive() {
                   
                   {selectedUserIds.length > 0 && (
                     <p className="mt-2 text-sm text-blue-600">
-                      {selectedUserIds.length} student{selectedUserIds.length > 1 ? 's' : ''} selected
+                      {selectedUserIds.length} {selectedUserType === 'all' ? 'user' : 
+                        selectedUserType === 'student' ? 'student' :
+                        selectedUserType === 'instructor' ? 'instructor' :
+                        selectedUserType === 'custodian' ? 'custodian' :
+                        selectedUserType === 'dean' ? 'dean' : 'user'}{selectedUserIds.length > 1 ? 's' : ''} selected
                     </p>
                   )}
                 </div>
@@ -1198,6 +1718,107 @@ function Archive() {
                     'Archive'
                   )}
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* Unarchive Confirmation Modal */}
+      {showUnarchiveModal && createPortal(
+        <div className="fixed inset-0 overflow-y-auto z-[60]">
+          {/* Backdrop with blur and fade animation */}
+          <div className={`fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ease-in-out ${
+            unarchiveModalAnimation === 'visible' ? 'opacity-100' : 'opacity-0'
+          }`}>
+            <div className="flex min-h-full items-center justify-center p-4 text-center sm:p-0">
+              {/* Modal container with scale and fade animation */}
+              <div className={`relative transform overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all duration-300 ease-out sm:my-8 sm:w-full sm:max-w-lg ${
+                unarchiveModalAnimation === 'visible' 
+                  ? 'scale-100 opacity-100 translate-y-0' 
+                  : 'scale-95 opacity-0 translate-y-4'
+              }`}>
+                {/* Gradient header */}
+                <div className="bg-gradient-to-r from-green-50 to-emerald-100 px-6 py-8">
+                  <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-emerald-100 shadow-lg mb-4 animate-pulse">
+                    <DocumentArrowUpIcon className="h-8 w-8 text-green-600" />
+                  </div>
+                  
+                  {!showSecondConfirmation ? (
+                    <>
+                      <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                        Unarchive Attendance Records
+                      </h3>
+                      <p className="text-sm text-gray-600 leading-relaxed">
+                        Are you sure you want to unarchive <strong>{pendingUnarchiveCount} attendance records</strong> from <strong>{formatDate(pendingUnarchiveDate)}</strong>?
+                        This will restore them to active view.
+                      </p>
+                      <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                        <p className="text-sm text-blue-800 font-medium">
+                          ℹ️ These records will be restored to active attendance logs and will be visible in regular reports.
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                        Final Confirmation Required
+                      </h3>
+                      <p className="text-sm text-gray-600 leading-relaxed">
+                        You are about to unarchive <strong>{pendingUnarchiveCount} attendance records</strong> archived on <strong>{formatDate(pendingUnarchiveDate)}</strong>.
+                        This will restore them to active view immediately.
+                      </p>
+                      <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                        <p className="text-sm text-green-800 font-medium">
+                          ✅ Confirm to restore these archived attendance records to active status.
+                        </p>
+                      </div>
+                    </>
+                  )}
+                </div>
+                
+                {/* Action buttons */}
+                <div className="bg-gray-50 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-3 space-y-3 space-y-reverse sm:space-y-0">
+                  <button
+                    type="button"
+                    onClick={handleUnarchiveCancel}
+                    disabled={unarchiving}
+                    className="w-full sm:w-auto inline-flex justify-center items-center px-6 py-3 border border-gray-300 shadow-sm text-sm font-medium rounded-xl text-gray-700 bg-white hover:bg-gray-50 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-all duration-200 ease-in-out transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Cancel
+                  </button>
+                  
+                  {!showSecondConfirmation ? (
+                    <button
+                      type="button"
+                      onClick={handleUnarchiveConfirm}
+                      disabled={unarchiving}
+                      className="w-full sm:w-auto inline-flex justify-center items-center px-6 py-3 border border-transparent shadow-sm text-sm font-medium rounded-xl text-white bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all duration-200 ease-in-out transform hover:scale-105 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Continue to Final Confirmation
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleUnarchiveConfirm}
+                      disabled={unarchiving}
+                      className="w-full sm:w-auto inline-flex justify-center items-center px-6 py-3 border border-transparent shadow-sm text-sm font-medium rounded-xl text-white bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition-all duration-200 ease-in-out transform hover:scale-105 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {unarchiving ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                          Unarchiving Records...
+                        </>
+                      ) : (
+                        <>
+                          <DocumentArrowUpIcon className="h-4 w-4 mr-2" />
+                          CONFIRM UNARCHIVE
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>

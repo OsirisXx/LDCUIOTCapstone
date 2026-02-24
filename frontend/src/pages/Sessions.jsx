@@ -3,20 +3,22 @@ import {
   PlayIcon, 
   StopIcon, 
   CheckCircleIcon,
-  XCircleIcon,
   ExclamationTriangleIcon,
   LockClosedIcon,
   LockOpenIcon,
   ClockIcon,
   CalendarDaysIcon,
-  UserGroupIcon,
   MapPinIcon,
-  AcademicCapIcon,
-  SunIcon,
-  MoonIcon
+  AcademicCapIcon
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+
+const shouldHideAdminAccess = (subjectCode, subjectName) => {
+  const normalizedCode = subjectCode?.toString().trim().toUpperCase();
+  const normalizedName = subjectName?.toString().trim().toLowerCase();
+  return normalizedCode === 'ADMIN-ACCESS' || (normalizedName && normalizedName.includes('administrative door access'));
+};
 
 function Sessions() {
   const [sessions, setSessions] = useState([]);
@@ -56,29 +58,26 @@ function Sessions() {
       const headers = { Authorization: `Bearer ${token}` };
 
       // Use the same unified data endpoint as the management page
-      const unifiedResponse = await axios.get('http://localhost:5000/api/unified/data', { headers });
+      const unifiedResponse = await axios.get('http://172.72.100.126:5000/api/unified/data', { headers });
       const unifiedData = unifiedResponse.data;
       
-      console.log('Unified data response:', unifiedData);
-
       // Extract data from unified response
-      const allSchedulesData = unifiedData.schedules?.data || [];
-      console.log('All schedules data:', allSchedulesData);
-      console.log('Sample schedule data:', allSchedulesData[0]);
-      console.log('Sample schedule keys:', allSchedulesData[0] ? Object.keys(allSchedulesData[0]) : 'No data');
-      setAllSchedules(allSchedulesData);
+      const schedulesResponse = unifiedData.schedules?.data || [];
+      const sanitizedSchedules = schedulesResponse.filter(schedule => !shouldHideAdminAccess(schedule.SUBJECTCODE, schedule.SUBJECTNAME));
+      setAllSchedules(sanitizedSchedules);
 
       // Filter today's schedules
       const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-      const todaysSchedules = allSchedulesData.filter(schedule => schedule.DAYOFWEEK === currentDay);
+      const todaysSchedules = sanitizedSchedules.filter(schedule => schedule.DAYOFWEEK === currentDay);
       setTodaysSchedule(todaysSchedules);
 
       // Get instructors and rooms from unified data
-      const instructorsData = unifiedData.subjects?.data || [];
+      const instructorsResponse = unifiedData.subjects?.data || [];
+      const sanitizedSubjects = instructorsResponse.filter(subject => !shouldHideAdminAccess(subject.SUBJECTCODE, subject.SUBJECTNAME));
       const roomsData = unifiedData.rooms?.data || [];
       
       // Extract unique instructors
-      const uniqueInstructors = [...new Map(instructorsData.map(item => [item.INSTRUCTORID, {
+      const uniqueInstructors = [...new Map(sanitizedSubjects.map(item => [item.INSTRUCTORID, {
         USERID: item.INSTRUCTORID,
         FIRSTNAME: item.instructor_name?.split(' ')[0] || '',
         LASTNAME: item.instructor_name?.split(' ').slice(1).join(' ') || '',
@@ -123,7 +122,6 @@ function Sessions() {
           attendance_count: 0
         }));
       
-      console.log('Virtual active sessions:', virtualSessions);
       setSessions(virtualSessions);
 
     } catch (error) {
@@ -179,20 +177,13 @@ function Sessions() {
       const now = new Date();
       const currentTimeStr = now.toTimeString().slice(0, 8); // HH:MM:SS format
       
-      console.log('Current time string:', currentTimeStr);
-      console.log('Today\'s schedules:', todaysSchedule);
-      
       // Find all current ongoing classes
       const ongoing = todaysSchedule.filter(schedule => {
         const startTime = schedule.STARTTIME;
         const endTime = schedule.ENDTIME;
         const isOngoing = currentTimeStr >= startTime && currentTimeStr <= endTime;
-        console.log(`Checking schedule ${schedule?.SUBJECTCODE || 'Unknown'}: ${startTime}-${endTime}, isOngoing: ${isOngoing}`);
-        console.log('Schedule object:', schedule);
         return isOngoing;
       });
-      
-      console.log('Current ongoing classes:', ongoing);
       setCurrentOngoingClasses(ongoing || []);
       
       // Find upcoming classes (next 3 classes after current time)
@@ -201,7 +192,6 @@ function Sessions() {
         .sort((a, b) => a.STARTTIME.localeCompare(b.STARTTIME))
         .slice(0, 3);
       
-      console.log('Upcoming classes:', upcoming);
       setUpcomingClasses(upcoming);
     }
   }, [todaysSchedule, currentTime]);
@@ -331,32 +321,29 @@ function Sessions() {
     return ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].filter(day => days.includes(day));
   };
 
-  const getUniqueRooms = () => {
+  const uniqueRooms = useMemo(() => {
     if (!allSchedules || allSchedules.length === 0) {
       return [];
     }
-    
-    const rooms = [...new Map(allSchedules.map(schedule => {
-      console.log('Processing schedule for room:', schedule);
-      return [
-        schedule.ROOMID, 
-        { 
-          id: schedule.ROOMID, 
-          number: schedule.room_number || schedule.ROOMNUMBER || 'Unknown', 
-          name: schedule.room_name || schedule.ROOMNAME || 'Unknown Room', 
-          building: schedule.BUILDING || 'Unknown Building' 
+
+    const rooms = [...new Map(allSchedules.map(schedule => (
+      [
+        schedule.ROOMID,
+        {
+          id: schedule.ROOMID,
+          number: schedule.room_number || schedule.ROOMNUMBER || 'Unknown',
+          name: schedule.room_name || schedule.ROOMNAME || 'Unknown Room',
+          building: schedule.BUILDING || 'Unknown Building'
         }
-      ];
-    })).values()];
-    
-    console.log('Unique rooms before sort:', rooms);
-    
+      ]
+    ))).values()];
+
     return rooms.sort((a, b) => {
       const aNum = a.number || 'Unknown';
       const bNum = b.number || 'Unknown';
       return aNum.localeCompare(bNum);
     });
-  };
+  }, [allSchedules]);
 
   const getFilteredSchedules = () => {
     let filtered = allSchedules;
@@ -571,9 +558,7 @@ function Sessions() {
           <p className="text-gray-500">No active sessions for today</p>
         ) : (
           <div className="space-y-4">
-            {sessions.map((session) => {
-              console.log('Session data:', session);
-              return (
+            {sessions.map((session) => (
               <div key={session.id} className="border border-gray-200 rounded-lg p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center space-x-3">
@@ -643,8 +628,7 @@ function Sessions() {
                   </div>
                 </div>
               </div>
-              );
-            })}
+              ))}
           </div>
         )}
       </div>
@@ -689,7 +673,7 @@ function Sessions() {
                 className="border border-gray-300 rounded-md px-3 py-2 text-sm"
               >
                 <option value="">All Rooms</option>
-                {allSchedules.length > 0 && getUniqueRooms().map(room => (
+                {allSchedules.length > 0 && uniqueRooms.map(room => (
                   <option key={room.id} value={room.id}>
                     {room.number} - {room.name}
                   </option>

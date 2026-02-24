@@ -19,8 +19,8 @@
 #include <Adafruit_SSD1306.h>
 
 // WiFi credentials - 2.4GHz Network (ESP32 Compatible)
-const char* ssid = "RedmiTurbo";         // Your current WiFi network
-const char* password = "OneTwo11"; // Your WiFi password
+const char* ssid = "WIFi2.4";         // Your current WiFi network
+const char* password = "fOrtnite901_"; // Your WiFi password
 
 // Security - API Key for authentication
 const char* API_KEY = "LDCU_IOT_2025_SECURE_KEY_XYZ123"; // Change this to your own secret key
@@ -33,7 +33,7 @@ String discoveredServerIP = "";
 bool ipDiscovered = false;
 
 // Manual IP override (uncomment and set if auto-discovery fails)
-const char* manualServerIP = "192.168.111.24"; // Your computer's current IP (matches your ipconfig)
+const char* manualServerIP = "172.72.100.126"; // Server PC Ethernet IP for lab demonstration
 
 // Alternative: Use localhost if on same machine
 // const char* manualServerIP = "localhost"; // Alternative for testing
@@ -44,22 +44,21 @@ WebServer server(80);
 
 // No LED pins needed (you don't have LEDs)
 
-// Buzzer pin for audio feedback
-#define BUZZER_PIN 18
+// Buzzer pin (not connected but defined to avoid compile errors)
+#define BUZZER_PIN 19
 
 // Solenoid Lock Control
 #define RELAY_PIN 5     // Relay control pin for solenoid lock
 #define LOCK_DURATION 3000  // How long to keep lock open (3 seconds)
 
-// OLED Display Configuration
+// OLED Display Configuration (I2C)
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 #define SCREEN_ADDRESS 0x3C
 
-// Using ESP32 default I2C pins (SDA=21, SCL=22)
-
-// Initialize OLED display
+// I2C OLED: SCL=GPIO 21, SDA=GPIO 22 (but user has SDA on GPIO 23)
+// Initialize OLED display for I2C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Global variable to track if display is working
@@ -79,8 +78,8 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  // Initialize I2C for OLED (use default ESP32 I2C pins)
-  Wire.begin();
+  // Initialize I2C with custom pins: SDA=23, SCL=21
+  Wire.begin(23, 21);  // SDA on GPIO 23, SCL on GPIO 21
   
   // Initialize OLED display (simple approach like working code)
   Serial.println("🖥️ Initializing OLED display...");

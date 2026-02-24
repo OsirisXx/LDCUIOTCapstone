@@ -278,7 +278,6 @@ function Dashboard() {
                 return sortedSessions.map((session, index) => {
                   const isActive = currentTime >= session.STARTTIME && currentTime <= session.ENDTIME;
                   const isScheduled = currentTime < session.STARTTIME;
-                  const isEnded = currentTime > session.ENDTIME;
                   
                   let status = 'ended';
                   if (isActive) status = 'active';

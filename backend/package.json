@@ -9,11 +9,12 @@
     "setup-db": "node scripts/setupDatabase.js",
     "set-admin-password": "node scripts/setAdminPassword.js",
     "insert-sample-data": "node scripts/insertSampleData.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "dependencies": {
     "archiver": "^7.0.1",
     "axios": "^1.10.0",
+    "@supabase/supabase-js": "^2.47.10",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",

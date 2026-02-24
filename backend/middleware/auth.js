@@ -22,6 +22,7 @@ const authenticateToken = async (req, res, next) => {
             return res.status(401).json({ message: 'Invalid token - user not found or inactive' });
         }
 
+        user.role = (user.role || '').toLowerCase();
         req.user = user;
         next();
     } catch (error) {
@@ -36,7 +37,13 @@ const requireRole = (roles) => {
             return res.status(401).json({ message: 'Authentication required' });
         }
 
-        if (!roles.includes(req.user.role)) {
+        const userRole = (req.user.role || '').toLowerCase();
+
+        if (userRole === 'superadmin') {
+            return next();
+        }
+
+        if (!roles.map(role => role.toLowerCase()).includes(userRole)) {
             return res.status(403).json({ message: 'Insufficient permissions' });
         }
 
@@ -47,11 +54,13 @@ const requireRole = (roles) => {
 const requireAdmin = requireRole(['admin']);
 const requireInstructor = requireRole(['instructor', 'admin']);
 const requireStudent = requireRole(['student', 'instructor', 'admin']);
+const requireSuperAdmin = requireRole(['superadmin']);
 
 module.exports = {
     authenticateToken,
     requireRole,
     requireAdmin,
     requireInstructor,
-    requireStudent
+    requireStudent,
+    requireSuperAdmin
 }; 

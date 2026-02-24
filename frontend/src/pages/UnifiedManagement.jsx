@@ -8,11 +8,8 @@ import {
   EyeIcon,
   XMarkIcon,
   ClockIcon,
-  UserGroupIcon,
   MapPinIcon,
-  AcademicCapIcon,
   ChevronDownIcon,
-  ChevronUpIcon,
   UsersIcon,
   DocumentArrowUpIcon,
   CloudArrowUpIcon,
@@ -20,13 +17,15 @@ import {
   CheckCircleIcon,
   ArrowDownTrayIcon,
   TrashIcon,
-  ExclamationTriangleIcon
+  ExclamationTriangleIcon,
+  Squares2X2Icon,
+  ListBulletIcon
 } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 import axios from 'axios';
 
 // Set up axios defaults
-axios.defaults.baseURL = 'http://localhost:5000';
+axios.defaults.baseURL = 'http://172.72.100.126:5000';
 
 function UnifiedManagement() {
   const [data, setData] = useState(null);
@@ -41,6 +40,7 @@ function UnifiedManagement() {
   const [modalType, setModalType] = useState(''); // 'room', 'subject', 'schedule'
   const [expandedCards, setExpandedCards] = useState(new Set());
   const [studentSearchTerm, setStudentSearchTerm] = useState('');
+  const [viewMode, setViewMode] = useState('card'); // 'card' | 'list'
   
   // Bulk operations states
   const [selectedItems, setSelectedItems] = useState(new Set());
@@ -559,76 +559,6 @@ function UnifiedManagement() {
     }
   };
 
-  // Delete functionality
-  const handleDeleteClick = (item, type) => {
-    setDeleteItem({ ...item, type });
-    setShowDeleteModal(true);
-    setTimeout(() => setDeleteModalAnimation('visible'), 10);
-  };
-
-  const handleDeleteConfirm = async () => {
-    if (!deleteItem) return;
-
-    setIsDeleting(true);
-    try {
-      let endpoint = '';
-      let idField = '';
-
-      switch (deleteItem.type) {
-        case 'room':
-          endpoint = '/api/rooms';
-          idField = 'roomId';
-          break;
-        case 'subject':
-          endpoint = '/api/subjects';
-          idField = 'subjectId';
-          break;
-        case 'schedule':
-          endpoint = '/api/schedules';
-          idField = 'scheduleId';
-          break;
-        default:
-          throw new Error('Invalid delete type');
-      }
-
-      await axios.delete(`${endpoint}/${deleteItem[idField]}`, {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('token')}`
-        }
-      });
-
-      toast.success(`${deleteItem.type.charAt(0).toUpperCase() + deleteItem.type.slice(1)} deleted successfully!`);
-      
-      // Refresh data
-      await fetchData();
-      
-      // Close modal
-      setDeleteModalAnimation('hidden');
-      setTimeout(() => {
-        setShowDeleteModal(false);
-        setDeleteItem(null);
-      }, 300);
-
-    } catch (error) {
-      console.error('Delete error:', error);
-      if (error.response?.data?.message) {
-        toast.error(error.response.data.message);
-      } else {
-        toast.error(`Failed to delete ${deleteItem.type}`);
-      }
-    } finally {
-      setIsDeleting(false);
-    }
-  };
-
-  const handleDeleteCancel = () => {
-    setDeleteModalAnimation('hidden');
-    setTimeout(() => {
-      setShowDeleteModal(false);
-      setDeleteItem(null);
-    }, 300);
-  };
-
   // TEMPORARY: Schedule editing functions
   const handleEditSchedule = (schedule) => {
     setEditingSchedule(schedule);
@@ -861,6 +791,348 @@ function UnifiedManagement() {
     }
   };
 
+  const renderRoomsList = (items) => (
+    <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+      <table className="min-w-full divide-y divide-gray-200 text-sm">
+        <thead className="bg-gray-50 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
+          <tr>
+            <th className="px-4 py-3 w-12"></th>
+            <th className="px-4 py-3">Room</th>
+            <th className="px-4 py-3">Building</th>
+            <th className="px-4 py-3">Capacity</th>
+            <th className="px-4 py-3">Schedules</th>
+            <th className="px-4 py-3">Subjects</th>
+            <th className="px-4 py-3">Status</th>
+            <th className="px-4 py-3 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {items.map((room) => {
+            const isExpanded = expandedCards.has(room.ROOMID);
+            const schedules = data?.rooms?.schedules?.[room.ROOMID] || [];
+
+            return (
+              <React.Fragment key={room.ROOMID}>
+                <tr className="hover:bg-gray-50">
+                  <td className="px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedItems.has(room.ROOMID)}
+                      onChange={() => handleSelectItem(room.ROOMID)}
+                      className="h-4 w-4 text-blue-600 border-gray-300 rounded"
+                    />
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-gray-900">{room.ROOMNUMBER}</div>
+                    <div className="text-xs text-gray-500">{room.ROOMNAME}</div>
+                  </td>
+                  <td className="px-4 py-3 text-gray-600">{room.BUILDING || 'N/A'}</td>
+                  <td className="px-4 py-3 text-gray-600">{room.CAPACITY ?? 'N/A'}</td>
+                  <td className="px-4 py-3 text-gray-600">{room.schedule_count || 0}</td>
+                  <td className="px-4 py-3 text-gray-600">{room.subject_count || 0}</td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                        room.STATUS === 'Available'
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-gray-100 text-gray-800'
+                      }`}
+                    >
+                      {room.STATUS || 'N/A'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right space-x-2">
+                    {schedules.length > 0 && (
+                      <button
+                        onClick={() => toggleCardExpansion(room.ROOMID)}
+                        className="inline-flex items-center rounded-md border border-blue-200 px-3 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100"
+                      >
+                        {isExpanded ? 'Hide schedules' : 'Show schedules'}
+                        <ChevronDownIcon className={`ml-1 h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => fetchDetailedData(room.ROOMID, 'room')}
+                      className="inline-flex items-center rounded-md border border-gray-300 px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                    >
+                      View
+                    </button>
+                    <button
+                      onClick={() => handleDelete(room, 'room')}
+                      className="inline-flex items-center rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+                {isExpanded && schedules.length > 0 && (
+                  <tr>
+                    <td colSpan={8} className="bg-gray-50">
+                      <div className="p-4 space-y-2">
+                        <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Current Schedules</h4>
+                        <div className="grid gap-2 md:grid-cols-2">
+                          {schedules.map((schedule) => (
+                            <div key={schedule.SCHEDULEID} className="rounded-lg border border-gray-200 bg-white p-3 text-xs">
+                              <div className="flex items-center justify-between text-gray-700">
+                                <span className="font-semibold">{schedule.SUBJECTCODE}</span>
+                                <span className="text-gray-500">{schedule.DAYOFWEEK}</span>
+                              </div>
+                              <div className="text-gray-600">
+                                {formatTime(schedule.STARTTIME)} - {formatTime(schedule.ENDTIME)}
+                              </div>
+                              <div className="text-gray-500">{schedule.SUBJECTNAME}</div>
+                              <div className="text-blue-600">{schedule.enrolled_students || 0} students</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const renderSubjectsList = (items) => (
+    <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+      <table className="min-w-full divide-y divide-gray-200 text-sm">
+        <thead className="bg-gray-50 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
+          <tr>
+            <th className="px-4 py-3 w-12"></th>
+            <th className="px-4 py-3">Subject</th>
+            <th className="px-4 py-3">Instructor</th>
+            <th className="px-4 py-3">Term</th>
+            <th className="px-4 py-3">Students</th>
+            <th className="px-4 py-3">Schedules</th>
+            <th className="px-4 py-3">Rooms</th>
+            <th className="px-4 py-3 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {items.map((subject) => {
+            const isExpanded = expandedCards.has(subject.SUBJECTID);
+            const schedules = data?.subjects?.schedules?.[subject.SUBJECTID] || [];
+
+            return (
+              <React.Fragment key={subject.SUBJECTID}>
+                <tr className="hover:bg-gray-50">
+                  <td className="px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedItems.has(subject.SUBJECTID)}
+                      onChange={() => handleSelectItem(subject.SUBJECTID)}
+                      className="h-4 w-4 text-blue-600 border-gray-300 rounded"
+                    />
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-gray-900">{subject.SUBJECTCODE}</div>
+                    <div className="text-xs text-gray-500">{subject.SUBJECTNAME}</div>
+                  </td>
+                  <td className="px-4 py-3 text-gray-600">{subject.instructor_name || 'Unassigned'}</td>
+                  <td className="px-4 py-3 text-gray-600">
+                    {subject.SEMESTER || 'N/A'} • {subject.ACADEMICYEAR || 'N/A'}
+                  </td>
+                  <td className="px-4 py-3 text-gray-600">{subject.enrolled_students || 0}</td>
+                  <td className="px-4 py-3 text-gray-600">{subject.schedule_count || 0}</td>
+                  <td className="px-4 py-3 text-gray-600">{subject.room_count || 0}</td>
+                  <td className="px-4 py-3 text-right space-x-2">
+                    {schedules.length > 0 && (
+                      <button
+                        onClick={() => toggleCardExpansion(subject.SUBJECTID)}
+                        className="inline-flex items-center rounded-md border border-blue-200 px-3 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100"
+                      >
+                        {isExpanded ? 'Hide schedules' : 'Show schedules'}
+                        <ChevronDownIcon className={`ml-1 h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => fetchDetailedData(subject.SUBJECTID, 'subject')}
+                      className="inline-flex items-center rounded-md border border-gray-300 px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                    >
+                      View
+                    </button>
+                    <button
+                      onClick={() => handleDelete(subject, 'subject')}
+                      className="inline-flex items-center rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+                {isExpanded && schedules.length > 0 && (
+                  <tr>
+                    <td colSpan={8} className="bg-gray-50">
+                      <div className="p-4 space-y-2">
+                        <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Schedule Details</h4>
+                        <div className="grid gap-2 md:grid-cols-2">
+                          {schedules.map((schedule) => (
+                            <div key={schedule.SCHEDULEID} className="rounded-lg border border-gray-200 bg-white p-3 text-xs">
+                              <div className="flex items-center justify-between text-gray-700">
+                                <span className="font-semibold">{schedule.DAYOFWEEK}</span>
+                                <span className="text-gray-500">
+                                  {formatTime(schedule.STARTTIME)} - {formatTime(schedule.ENDTIME)}
+                                </span>
+                              </div>
+                              <div className="text-gray-600">
+                                {schedule.ROOMNUMBER} - {schedule.ROOMNAME} ({schedule.BUILDING})
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const renderSchedulesList = (items) => (
+    <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+      <table className="min-w-full divide-y divide-gray-200 text-sm">
+        <thead className="bg-gray-50 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
+          <tr>
+            <th className="px-4 py-3 w-12"></th>
+            <th className="px-4 py-3">Subject</th>
+            <th className="px-4 py-3">Instructor</th>
+            <th className="px-4 py-3">Meetings</th>
+            <th className="px-4 py-3">Students</th>
+            <th className="px-4 py-3 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {items.map((group) => {
+            const uniqueKey = `schedule-${group.subject_code}-${group.schedules[0]?.SCHEDULEID || 'default'}`;
+            const meetingPreview = group.schedules
+              .map((schedule) => `${schedule.DAYOFWEEK} ${formatTime(schedule.STARTTIME)}-${formatTime(schedule.ENDTIME)} (${schedule.ROOMNUMBER || 'TBD'})`)
+              .join(' • ');
+            const totalStudents = group.schedules.reduce((sum, schedule) => sum + (schedule.enrolled_students || 0), 0);
+            const isExpanded = expandedCards.has(uniqueKey);
+
+            return (
+              <React.Fragment key={uniqueKey}>
+                <tr className="hover:bg-gray-50">
+                  <td className="px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedItems.has(uniqueKey)}
+                      onChange={() => handleSelectItem(uniqueKey)}
+                      className="h-4 w-4 text-blue-600 border-gray-300 rounded"
+                    />
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-gray-900">{group.subject_code}</div>
+                    <div className="text-xs text-gray-500">{group.subject_name}</div>
+                  </td>
+                  <td className="px-4 py-3 text-gray-600">{group.instructor_name || 'Unassigned'}</td>
+                  <td className="px-4 py-3 text-xs text-gray-600">
+                    {meetingPreview || 'No schedules'}
+                  </td>
+                  <td className="px-4 py-3 text-gray-600">{totalStudents}</td>
+                  <td className="px-4 py-3 text-right space-x-2">
+                    {group.schedules.length > 0 && (
+                      <button
+                        onClick={() => toggleCardExpansion(uniqueKey)}
+                        className="inline-flex items-center rounded-md border border-blue-200 px-3 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100"
+                      >
+                        {isExpanded ? 'Hide schedules' : 'Show schedules'}
+                        <ChevronDownIcon className={`ml-1 h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => fetchDetailedData(group.schedules[0]?.SCHEDULEID, 'schedule')}
+                      className="inline-flex items-center rounded-md border border-gray-300 px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                    >
+                      View
+                    </button>
+                    <button
+                      onClick={() => handleDelete(group.schedules[0], 'schedule')}
+                      className="inline-flex items-center rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-600 hover:bg-red-50"
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+                {isExpanded && group.schedules.length > 0 && (
+                  <tr>
+                    <td colSpan={6} className="bg-gray-50">
+                      <div className="p-4 space-y-2">
+                        <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Scheduled Meetings</h4>
+                        <div className="space-y-2">
+                          {group.schedules.map((schedule, index) => (
+                            <div
+                              key={schedule.SCHEDULEID}
+                              className="rounded-lg border border-gray-200 bg-white p-3 text-xs"
+                              style={{ transitionDelay: `${index * 40}ms` }}
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="font-medium text-gray-800">
+                                  {schedule.DAYOFWEEK} • {formatTime(schedule.STARTTIME)} - {formatTime(schedule.ENDTIME)}
+                                </div>
+                                <div className="flex space-x-1">
+                                  <button
+                                    onClick={() => handleEditSchedule(schedule)}
+                                    className="text-gray-400 hover:text-yellow-600 p-1 rounded transition-colors duration-150"
+                                    title="Edit Schedule"
+                                  >
+                                    <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    onClick={() => handleDelete(schedule, 'schedule')}
+                                    className="text-gray-400 hover:text-red-600 p-1 rounded transition-colors duration-150"
+                                    title="Delete Schedule"
+                                  >
+                                    <TrashIcon className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-4 text-gray-600 mt-1">
+                                <span>{schedule.ROOMNUMBER} - {schedule.ROOMNAME} ({schedule.BUILDING})</span>
+                                <span>{schedule.enrolled_students || 0} students</span>
+                                <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5">
+                                  {schedule.SEMESTER} • {schedule.ACADEMICYEAR}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  const renderListView = () => {
+    if (!filteredData.length) return null;
+
+    switch (sortBy) {
+      case 'rooms':
+        return renderRoomsList(filteredData);
+      case 'subjects':
+        return renderSubjectsList(filteredData);
+      case 'schedules':
+        return renderSchedulesList(filteredData);
+      default:
+        return null;
+    }
+  };
+
   const getSortIcon = (type) => {
     switch (type) {
       case 'rooms':
@@ -901,7 +1173,7 @@ function UnifiedManagement() {
               className="text-gray-400 hover:text-blue-600 p-1 rounded"
               title={isExpanded ? "Collapse" : "Expand"}
             >
-              {isExpanded ? <ChevronUpIcon className="h-4 w-4" /> : <ChevronDownIcon className="h-4 w-4" />}
+              <ChevronDownIcon className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? 'rotate-180' : 'rotate-0'}`} />
             </button>
             <button
               onClick={() => fetchDetailedData(room.ROOMID, 'room')}
@@ -987,7 +1259,7 @@ function UnifiedManagement() {
               className="text-gray-400 hover:text-blue-600 p-1 rounded"
               title={isExpanded ? "Collapse" : "Expand"}
             >
-              {isExpanded ? <ChevronUpIcon className="h-4 w-4" /> : <ChevronDownIcon className="h-4 w-4" />}
+              <ChevronDownIcon className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? 'rotate-180' : 'rotate-0'}`} />
             </button>
             <button
               onClick={() => fetchDetailedData(subject.SUBJECTID, 'subject')}
@@ -1810,7 +2082,7 @@ function UnifiedManagement() {
 
       {/* Data Grid */}
       {filteredData.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center space-x-3">
             <input
               type="checkbox"
@@ -1822,25 +2094,51 @@ function UnifiedManagement() {
               Select All ({filteredData.length} {sortBy})
             </span>
           </div>
+          <div className="flex items-center space-x-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-gray-500">View</span>
+            {[
+              { key: 'card', label: 'Cards', icon: Squares2X2Icon },
+              { key: 'list', label: 'List', icon: ListBulletIcon }
+            ].map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                onClick={() => setViewMode(key)}
+                className={`inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium transition ${
+                  viewMode === key
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                <Icon className="h-4 w-4 mr-1" />
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="text-sm text-gray-500">
             {selectedItems.size} selected
           </div>
         </div>
       )}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 items-start content-start">
-        {(() => {
-          const cols = distributeIntoColumns(Array.isArray(filteredData) ? filteredData : [], 3);
-          return cols.map((colItems, colIdx) => (
-            <div key={`col-${colIdx}`} className="space-y-6">
-              {colItems.map((item, idx) => (
-                <React.Fragment key={`item-${colIdx}-${idx}`}>
-                  {renderItem(item)}
-                </React.Fragment>
-              ))}
-            </div>
-          ));
-        })()}
-      </div>
+      {viewMode === 'card' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 items-start content-start">
+          {(() => {
+            const cols = distributeIntoColumns(Array.isArray(filteredData) ? filteredData : [], 3);
+            return cols.map((colItems, colIdx) => (
+              <div key={`col-${colIdx}`} className="space-y-6">
+                {colItems.map((item, idx) => (
+                  <React.Fragment key={`item-${colIdx}-${idx}`}>
+                    {renderItem(item)}
+                  </React.Fragment>
+                ))}
+              </div>
+            ));
+          })()}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {renderListView()}
+        </div>
+      )}
 
       {filteredData.length === 0 && !loading && (
         <div className="text-center py-12">
@@ -2350,17 +2648,6 @@ function UnifiedManagement() {
                 </button>
               </div>
               
-              <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 mb-4">
-                <div className="flex">
-                  <ExclamationTriangleIcon className="h-5 w-5 text-yellow-400" />
-                  <div className="ml-3">
-                    <p className="text-sm text-yellow-800">
-                      <strong>Note:</strong> This is a temporary edit feature for quick schedule modifications.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
               <form onSubmit={handleEditSubmit} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700">Subject</label>

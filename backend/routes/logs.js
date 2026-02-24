@@ -38,6 +38,103 @@ function getPhilippineTime() {
     };
 }
 
+/**
+ * Gets or creates an "Administrative Access" schedule for custodians and deans without specific class schedules.
+ * This ensures all attendance records have a valid SCHEDULEID without requiring schema changes.
+ */
+async function getOrCreateAdministrativeSchedule(roomId) {
+    try {
+        if (!roomId) {
+            console.log('⚠️ Room ID is null or empty, cannot create administrative schedule');
+            return null;
+        }
+
+        // Get current academic year and semester from settings
+        const academicYear = await getSingleResult(
+            "SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year'"
+        );
+        const semester = await getSingleResult(
+            "SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester'"
+        );
+        const academicYearValue = academicYear?.SETTINGVALUE || '2024-2025';
+        const semesterValue = semester?.SETTINGVALUE || 'First Semester';
+
+        // First, get or create the "Administrative Access" subject
+        let adminSubjectId = await getSingleResult(
+            "SELECT SUBJECTID FROM SUBJECTS WHERE SUBJECTCODE = 'ADMIN-ACCESS' AND ARCHIVED_AT IS NULL LIMIT 1"
+        );
+        adminSubjectId = adminSubjectId?.SUBJECTID;
+
+        if (!adminSubjectId) {
+            // Get a system admin user ID (or use first admin user)
+            const adminUser = await getSingleResult(
+                "SELECT USERID FROM USERS WHERE USERTYPE = 'admin' AND ARCHIVED_AT IS NULL LIMIT 1"
+            );
+
+            if (!adminUser) {
+                console.log('❌ No admin user found to assign Administrative Access subject');
+                return null;
+            }
+
+            // Create the subject
+            const { v4: uuidv4 } = require('uuid');
+            adminSubjectId = uuidv4();
+            await executeQuery(
+                `INSERT INTO SUBJECTS (SUBJECTID, SUBJECTCODE, SUBJECTNAME, INSTRUCTORID, SEMESTER, YEAR, ACADEMICYEAR)
+                 VALUES (?, 'ADMIN-ACCESS', 'Administrative Door Access', ?, ?, YEAR(CURDATE()), ?)`,
+                [adminSubjectId, adminUser.USERID, semesterValue, academicYearValue]
+            );
+            console.log('✅ Created Administrative Access subject:', adminSubjectId);
+        }
+
+        // Now, get or create a schedule for this subject in the specified room
+        let schedule = await getSingleResult(
+            `SELECT SCHEDULEID FROM CLASSSCHEDULES 
+             WHERE SUBJECTID = ? AND ROOMID = ? 
+             AND ACADEMICYEAR = ? AND SEMESTER = ?
+             AND ARCHIVED_AT IS NULL
+             LIMIT 1`,
+            [adminSubjectId, roomId, academicYearValue, semesterValue]
+        );
+
+        if (schedule?.SCHEDULEID) {
+            console.log('✅ Found existing Administrative Access schedule:', schedule.SCHEDULEID);
+            return schedule.SCHEDULEID;
+        }
+
+        // If schedule doesn't exist, create it (Monday, all day access)
+        const { v4: uuidv4 } = require('uuid');
+        const scheduleId = uuidv4();
+        await executeQuery(
+            `INSERT INTO CLASSSCHEDULES (SCHEDULEID, SUBJECTID, ROOMID, DAYOFWEEK, STARTTIME, ENDTIME, ACADEMICYEAR, SEMESTER)
+             VALUES (?, ?, ?, 'Monday', '00:00:00', '23:59:59', ?, ?)`,
+            [scheduleId, adminSubjectId, roomId, academicYearValue, semesterValue]
+        );
+        console.log('✅ Created Administrative Access schedule:', scheduleId, 'for room', roomId);
+
+        // Create schedules for other weekdays too (Tuesday-Friday) for completeness
+        const weekdays = ['Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+        for (const day of weekdays) {
+            try {
+                const additionalScheduleId = uuidv4();
+                await executeQuery(
+                    `INSERT INTO CLASSSCHEDULES (SCHEDULEID, SUBJECTID, ROOMID, DAYOFWEEK, STARTTIME, ENDTIME, ACADEMICYEAR, SEMESTER)
+                     VALUES (?, ?, ?, ?, '00:00:00', '23:59:59', ?, ?)`,
+                    [additionalScheduleId, adminSubjectId, roomId, day, academicYearValue, semesterValue]
+                );
+            } catch (err) {
+                // Ignore duplicate key errors, log others
+                console.log(`⚠️ Could not create additional administrative schedule for ${day}:`, err.message);
+            }
+        }
+
+        return scheduleId;
+    } catch (error) {
+        console.error('❌ Failed to get/create administrative schedule:', error.message);
+        return null;
+    }
+}
+
 // OLD PROBLEMATIC ENDPOINT REMOVED - Using simplified version at end of file
 
 // Get access logs with proper column names
@@ -430,6 +527,11 @@ router.post('/attendance-logs', [
             });
         }
 
+        // Get user type to determine if we should use session schedule
+        const userType = (user.USERTYPE || '').toLowerCase();
+        const isCustodian = userType === 'custodian';
+        const isDean = userType === 'dean';
+
         // Check enrollment if subject is provided and user is a student
         if (subject_id && user.USERTYPE === 'student') {
             console.log('🔍 Checking enrollment for student:', {
@@ -506,56 +608,163 @@ router.post('/attendance-logs', [
             }
         }
 
-        // Try to find an active session for today (but subject_id takes priority)
-        if (room_id && !subject_id) {
-            sessionData = await getSingleResult(
-                `SELECT s.*, cs.*, sub.SUBJECTCODE, sub.SUBJECTNAME, r.ROOMNUMBER, r.ROOMNAME
-                 FROM SESSIONS s
-                 JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
-                 JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
-                 JOIN ROOMS r ON s.ROOMID = r.ROOMID
-                 WHERE s.ROOMID = ? AND s.SESSIONDATE = ? AND s.STATUS = 'active'
-                 ORDER BY s.STARTTIME ASC LIMIT 1`,
-                [room_id, currentDate]
-            );
-        }
-
-        // If no active session found or subject_id was provided, create a mock session
-        if (!sessionData || subject_id) {
-            // Create a mock session for attendance logging
-            sessionData = {
-                SESSIONID: null,
-                SCHEDULEID: null,
-                ROOMID: roomData ? roomData.ROOMID : null,
-                SUBJECTCODE: subjectInfo ? subjectInfo.SUBJECTCODE : 'GENERAL',
-                SUBJECTNAME: subjectInfo ? subjectInfo.SUBJECTNAME : 'General Attendance',
-                ROOMNUMBER: roomData ? roomData.ROOMNUMBER : 'UNKNOWN',
-                ACADEMICYEAR: '2024-2025',
-                SEMESTER: 'First Semester'
-            };
-        }
-
-        // Determine attendance status based on time
-        let status = 'Present';
-        if (sessionData.STARTTIME) {
-            const sessionStart = new Date(`${currentDate} ${sessionData.STARTTIME}`);
-            const scanTime = new Date(`${currentDate} ${currentTime}`);
-            const timeDiff = (scanTime - sessionStart) / (1000 * 60); // minutes
-
-            if (timeDiff > 15) { // 15 minutes late tolerance
-                status = 'Late';
+                // For deans: Check if they have a scheduled class at this time
+        let deanScheduleId = null;
+        if (isDean) {
+            const currentDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+            try {
+                const deanSchedule = await getSingleResult(
+                    `SELECT cs.SCHEDULEID, cs.STARTTIME, cs.ENDTIME, sub.SUBJECTCODE, sub.SUBJECTNAME
+                     FROM CLASSSCHEDULES cs
+                     JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+                     WHERE cs.INSTRUCTORID = ?
+                       AND cs.DAYOFWEEK = ?
+                       AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                       AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+                       AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')
+                       AND cs.ARCHIVED_AT IS NULL
+                     LIMIT 1`,
+                    [user.USERID, currentDay]
+                );
+                if (deanSchedule) {
+                    deanScheduleId = deanSchedule.SCHEDULEID;
+                    console.log('📚 Dean has scheduled class:', deanSchedule.SUBJECTCODE);
+                }
+            } catch (err) {
+                console.log('⚠️ Error checking dean schedule:', err.message);
             }
         }
 
-        // Create attendance record
+        // Find active session for today - but skip for custodians and deans without their own schedule
+        console.log('🔍 Looking for active session...');
+        if (!isCustodian && (!isDean || deanScheduleId)) {
+            // Only look for session if user is not a custodian and (not a dean or dean has their own schedule)
+            if (room_id && !subject_id) {
+                try {
+                    sessionData = await getSingleResult(
+                        `SELECT s.*, cs.*, sub.SUBJECTCODE, sub.SUBJECTNAME, r.ROOMNUMBER, r.ROOMNAME
+                         FROM SESSIONS s
+                         JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
+                         JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+                         JOIN ROOMS r ON s.ROOMID = r.ROOMID
+                         WHERE s.ROOMID = ? AND s.SESSIONDATE = ? AND s.STATUS = 'active'
+                         ORDER BY s.STARTTIME ASC LIMIT 1`,
+                        [room_id, currentDate]
+                    );
+                    console.log('📚 Session data found:', sessionData ? sessionData.SUBJECTCODE : 'No active session');
+                } catch (sessionError) {
+                    console.log('⚠️ Session query failed, continuing without session:', sessionError.message);
+                    sessionData = null;
+                }
+            }
+        } else {
+            console.log(`🔒 Skipping session lookup for ${userType} (${isCustodian ? 'custodian' : 'dean without schedule'})`);
+        }
+
+        // If no active session found or subject_id was provided, create a mock session for regular users
+        if (!sessionData && !isCustodian && (!isDean || deanScheduleId)) {
+            if (subject_id) {
+                // Create a mock session for attendance logging
+                sessionData = {
+                    SESSIONID: null,
+                    SCHEDULEID: null,
+                    ROOMID: roomData ? roomData.ROOMID : null,
+                    SUBJECTCODE: subjectInfo ? subjectInfo.SUBJECTCODE : 'GENERAL', 
+                    SUBJECTNAME: subjectInfo ? subjectInfo.SUBJECTNAME : 'General Attendance',
+                    ROOMNUMBER: roomData ? roomData.ROOMNUMBER : 'UNKNOWN',
+                    ACADEMICYEAR: '2024-2025',
+                    SEMESTER: 'First Semester'
+                };
+            }
+        }
+
+        // Determine attendance status and schedule ID
+        console.log('⏰ Determining attendance status...');
+        let status = 'Present';
+        let scheduleId = null;
+
+        // For custodians: Always Present, use administrative schedule
+        if (isCustodian) {
+            const roomIdToUse = roomData ? roomData.ROOMID : room_id;
+            if (roomIdToUse) {
+                scheduleId = await getOrCreateAdministrativeSchedule(roomIdToUse);
+            }
+            status = 'Present';
+            sessionData = null; // Don't use session data
+            console.log('🧹 Custodian access - using administrative schedule, status: Present');
+        }
+        // For deans: Use their own schedule if exists, otherwise administrative schedule
+        else if (isDean) {
+            if (deanScheduleId) {
+                // Dean has their own schedule - use it and calculate late
+                scheduleId = deanScheduleId;
+                // Find the session for this schedule
+                const deanSession = await getSingleResult(
+                    `SELECT s.SESSIONID, cs.STARTTIME
+                     FROM SESSIONS s
+                     JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
+                     WHERE s.SCHEDULEID = ? AND s.SESSIONDATE = ? AND s.STATUS = 'active'
+                     LIMIT 1`,
+                    [deanScheduleId, currentDate]
+                );
+
+                if (deanSession && deanSession.STARTTIME) {
+                    const startTime = new Date(`${currentDate} ${deanSession.STARTTIME}`);
+                    const currentDateTime = new Date();
+                    const lateThresholdMinutes = 15;
+
+                    if (currentDateTime > new Date(startTime.getTime() + lateThresholdMinutes * 60000)) {
+                        status = 'Late';
+                    }
+                }
+                // Use dean's session data
+                if (deanSession) {
+                    sessionData = await getSingleResult(
+                        `SELECT s.*, cs.*, sub.SUBJECTCODE, sub.SUBJECTNAME, r.ROOMNUMBER, r.ROOMNAME
+                         FROM SESSIONS s
+                         JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
+                         JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+                         JOIN ROOMS r ON s.ROOMID = r.ROOMID
+                         WHERE s.SCHEDULEID = ? AND s.SESSIONDATE = ? AND s.STATUS = 'active'
+                         LIMIT 1`,
+                        [deanScheduleId, currentDate]
+                    );
+                }
+                console.log(`👨‍🏫 Dean with schedule - scheduleId: ${scheduleId}, status: ${status}`);
+            } else {
+                // Dean without schedule - administrative access
+                const roomIdToUse = roomData ? roomData.ROOMID : room_id;
+                if (roomIdToUse) {
+                    scheduleId = await getOrCreateAdministrativeSchedule(roomIdToUse);
+                }
+                status = 'Present';
+                sessionData = null; // Don't use session data
+                console.log('👨‍🏫 Dean administrative access - using administrative schedule, status: Present');
+            }
+        }
+        // For students/instructors: Normal late calculation
+        else {
+            scheduleId = sessionData?.SCHEDULEID;
+            if (sessionData && sessionData.STARTTIME) {
+                const startTime = new Date(`${currentDate} ${sessionData.STARTTIME}`);
+                const scanTime = new Date(`${currentDate} ${currentTime}`);
+                const timeDiff = (scanTime - startTime) / (1000 * 60); // minutes
+
+                if (timeDiff > 15) { // 15 minutes late tolerance
+                    status = 'Late';
+                }
+            }
+        }
+
+        console.log('📊 Status determined:', status, 'ScheduleId:', scheduleId || 'NULL');
+
+                // Create attendance record
         const { v4: uuidv4 } = require('uuid');
         const attendanceId = uuidv4();
-        const sessionId = sessionData.SESSIONID || uuidv4();
+        const sessionId = sessionData?.SESSIONID || null;
 
-        // Handle null SCHEDULEID by creating a default schedule or using existing one
-        let scheduleId = sessionData.SCHEDULEID;
-
-        if (!scheduleId) {
+        // Handle null SCHEDULEID - only for regular users, not custodians/deans (they already have admin schedule)
+        if (!scheduleId && !isCustodian && (!isDean || deanScheduleId)) {
             // If subject_id is provided, always create a new schedule with that subject
             if (subject_id) {
                 const { v4: uuidv4 } = require('uuid');
@@ -674,17 +883,33 @@ router.post('/attendance-logs', [
             subjectInfo: subjectInfo ? `${subjectInfo.SUBJECTCODE} - ${subjectInfo.SUBJECTNAME}` : 'No subject'
         });
 
+                // Check if schedule is administrative (for custodians/deans without specific schedules)
+        let isAdministrativeSchedule = false;
+        if (scheduleId) {
+            try {
+                const adminCheck = await getSingleResult(
+                    `SELECT COUNT(*) as count FROM CLASSSCHEDULES cs 
+                     JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID 
+                     WHERE cs.SCHEDULEID = ? AND s.SUBJECTCODE = 'ADMIN-ACCESS'`,
+                    [scheduleId]
+                );
+                isAdministrativeSchedule = adminCheck?.count > 0;
+            } catch (err) {
+                // Ignore error
+            }
+        }
+
         await executeQuery(
             `INSERT INTO ATTENDANCERECORDS (
                 ATTENDANCEID, USERID, SCHEDULEID, SESSIONID, SCANTYPE,
                 SCANDATETIME, DATE, TIMEIN, AUTHMETHOD, LOCATION,
                 STATUS, ACADEMICYEAR, SEMESTER, CREATED_AT, UPDATED_AT
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,    
             [
                 attendanceId,
                 user.USERID,
-                scheduleId,
-                sessionId,
+                scheduleId || null,
+                sessionId || null,
                 'time_in',
                 scanDateTime,
                 currentDate,
@@ -692,8 +917,8 @@ router.post('/attendance-logs', [
                 'Fingerprint',
                 location,
                 status,
-                sessionData.ACADEMICYEAR || '2024-2025',
-                sessionData.SEMESTER || 'First Semester'
+                sessionData?.ACADEMICYEAR || '2024-2025',
+                sessionData?.SEMESTER || 'First Semester'
             ]
         );
 
@@ -719,7 +944,7 @@ router.post('/attendance-logs', [
             ]
         );
 
-        // Return success response
+                // Return success response
         res.status(201).json({
             message: 'Attendance recorded successfully',
             attendance: {
@@ -734,8 +959,8 @@ router.post('/attendance-logs', [
                 status: status,
                 scan_time: scanDateTime,
                 location: location,
-                room: sessionData.ROOMNUMBER,
-                subject: `${sessionData.SUBJECTCODE} - ${sessionData.SUBJECTNAME}`
+                room: isAdministrativeSchedule ? null : (sessionData?.ROOMNUMBER || null),
+                subject: isAdministrativeSchedule ? null : (sessionData?.SUBJECTCODE ? `${sessionData.SUBJECTCODE} - ${sessionData.SUBJECTNAME}` : null)
             }
         });
 
@@ -748,67 +973,261 @@ router.post('/attendance-logs', [
     }
 });
 
-// Get attendance logs - ULTRA SIMPLE VERSION FOR TESTING
+// Get attendance logs with pagination and filtering
 router.get('/attendance', authenticateToken, async (req, res) => {
     try {
-        console.log('Attendance logs endpoint called');
+        // Extract pagination and filter parameters
+        const { page = 1, limit = 10, search, date, status } = req.query;
+        const pageNum = Math.max(1, parseInt(page) || 1);
+        const limitNum = Math.max(1, Math.min(100, parseInt(limit) || 10));
+        const offset = (pageNum - 1) * limitNum;
 
-        // First, check if tables exist and have data
-        const testQuery = `SELECT COUNT(*) as count FROM ATTENDANCERECORDS`;
-        const testResult = await executeQuery(testQuery, []);
-        console.log('ATTENDANCERECORDS table has', testResult[0]?.count || 0, 'records');
+        // Check if ARCHIVED_AT column exists in ACCESSLOGS table
+        let accessLogsHasArchivedColumn = false;
+        try {
+            const columnCheck = await getSingleResult(`
+                SELECT COUNT(*) as count 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = DATABASE() 
+                AND TABLE_NAME = 'ACCESSLOGS' 
+                AND COLUMN_NAME = 'ARCHIVED_AT'
+            `);
+            accessLogsHasArchivedColumn = columnCheck && columnCheck.count > 0;
+        } catch (error) {
+            console.warn('Could not check for ARCHIVED_AT column in ACCESSLOGS:', error.message);
+            // Assume column doesn't exist if check fails
+            accessLogsHasArchivedColumn = false;
+        }
+
+        // Build WHERE clause for filters
+        let whereClause = 'WHERE ar.ARCHIVED_AT IS NULL';
+        const params = [];
+
+        // Search filter (name, student ID)
+        if (search) {
+            whereClause += ' AND (u.FIRSTNAME LIKE ? OR u.LASTNAME LIKE ? OR u.STUDENTID LIKE ? OR u.FACULTYID LIKE ?)';
+            const searchTerm = `%${search}%`;
+            params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+        }
+
+        // Date filter
+        if (date) {
+            whereClause += ' AND DATE(ar.SCANDATETIME) = ?';
+            params.push(date);
+        }
+
+        // Status filter
+        let filterUnknownScans = true; // By default, include denied access logs when no status filter
+        if (status) {
+            if (status === 'Unknown') {
+                // When filtering for Unknown, only show unknown scans (exclude attendance records)
+                filterUnknownScans = true;
+                whereClause += ' AND 1=0'; // This will exclude all attendance records
+                // Will only show ACCESSLOGS entries where USERID IS NULL
+            } else if (status === 'Denied') {
+                // When filtering for Denied, only show denied access logs (exclude attendance records)
+                filterUnknownScans = true;
+                whereClause += ' AND 1=0'; // This will exclude all attendance records
+                // Will only show ACCESSLOGS entries where RESULT = 'denied'
+            } else if (status === 'Present') {
+                // Filter by status - for Present, we need to include ADMIN-ACCESS and custodian/dean door access
+                whereClause += ' AND (';
+                whereClause += '  ar.STATUS = ? OR'; // Normal Present status
+                whereClause += '  sub.SUBJECTCODE = ? OR'; // ADMIN-ACCESS maps to Present
+                whereClause += '  (LOWER(u.USERTYPE) IN (?, ?) AND ar.ACTIONTYPE = ?)'; // custodian/dean door access
+                whereClause += ')';
+                params.push('Present', 'ADMIN-ACCESS', 'custodian', 'dean', 'Door Access');
+                filterUnknownScans = false; // Don't include denied access logs when filtering for Present
+            } else {
+                // For Late or Absent, only check ar.STATUS directly (ADMIN-ACCESS and door access are always Present)
+                whereClause += ' AND ar.STATUS = ?';
+                params.push(status);
+                filterUnknownScans = false; // Don't include denied access logs when filtering for Late/Absent
+            }
+        }
+
+        // Build WHERE clause for denied access logs (both known and unknown users)
+        // Updated to include ALL denied access attempts, not just unknown users
+        // Also filter out archived access logs (if column exists)
+        let deniedAccessWhereClause = 'WHERE al.ACCESSTYPE = \'attendance_scan\' AND al.RESULT = \'denied\'';
+        if (accessLogsHasArchivedColumn) {
+            deniedAccessWhereClause += ' AND al.ARCHIVED_AT IS NULL';
+        }
+        const deniedAccessParams = [];
+        
+        // If status filter is 'Unknown', only show unknown user denials
+        // If status filter is 'Denied', show all denied access attempts (known and unknown)
+        // Otherwise (no status filter or other filters), show all denied access attempts
+        if (status === 'Unknown') {
+            deniedAccessWhereClause += ' AND al.USERID IS NULL';
+        }
+        // For 'Denied' status or no status filter, show all denied attempts (no additional filter)
+
+        // Search filter for denied access logs (searches in REASON field, user names, or student IDs)
+        if (search) {
+            deniedAccessWhereClause += ` AND (
+                al.REASON LIKE ? OR
+                EXISTS (
+                    SELECT 1 FROM USERS u 
+                    WHERE u.USERID = al.USERID 
+                    AND (u.FIRSTNAME LIKE ? OR u.LASTNAME LIKE ? OR u.STUDENTID LIKE ? OR u.FACULTYID LIKE ?)
+                )
+            )`;
+            const searchTerm = `%${search}%`;
+            deniedAccessParams.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+        }
+
+        // Date filter for denied access logs
+        if (date) {
+            deniedAccessWhereClause += ' AND DATE(al.TIMESTAMP) = ?';
+            deniedAccessParams.push(date);
+        }
 
         // Enhanced query with room, subject, and session information (day, time, room)
-        const logsQuery = `
+        // Also includes unknown RFID scans from ACCESSLOGS using UNION (when filterUnknownScans is true)
+        let logsQuery = `
             SELECT
+                ar.ATTENDANCEID as ID,
                 ar.ATTENDANCEID,
                 ar.SCHEDULEID,
+                ar.SCANDATETIME as TIMESTAMP,
                 ar.SCANDATETIME,
-                ar.STATUS,
+                CASE 
+                    WHEN sub.SUBJECTCODE = 'ADMIN-ACCESS' THEN 'Present'
+                    WHEN (LOWER(u.USERTYPE) IN ('custodian', 'dean') AND ar.ACTIONTYPE = 'Door Access') THEN 'Present'
+                    ELSE ar.STATUS
+                END as STATUS,
                 ar.AUTHMETHOD,
+                ar.ACTIONTYPE,
                 ar.LOCATION,
                 ar.ACADEMICYEAR,
                 ar.SEMESTER,
                 u.FIRSTNAME,
                 u.LASTNAME,
                 u.STUDENTID,
-                COALESCE(sub.SUBJECTCODE, c.COURSECODE) as SUBJECTCODE,
-                COALESCE(sub.SUBJECTNAME, c.COURSENAME) as SUBJECTNAME,
+                u.USERTYPE,
+                CASE 
+                    WHEN sub.SUBJECTCODE = 'ADMIN-ACCESS' THEN NULL
+                    WHEN (LOWER(u.USERTYPE) IN ('custodian', 'dean') AND ar.ACTIONTYPE = 'Door Access') THEN NULL
+                    ELSE COALESCE(sub.SUBJECTCODE, c.COURSECODE)
+                END as SUBJECTCODE,
+                CASE 
+                    WHEN sub.SUBJECTCODE = 'ADMIN-ACCESS' THEN NULL
+                    WHEN (LOWER(u.USERTYPE) IN ('custodian', 'dean') AND ar.ACTIONTYPE = 'Door Access') THEN NULL
+                    ELSE COALESCE(sub.SUBJECTNAME, c.COURSENAME)
+                END as SUBJECTNAME,
                 r.ROOMNUMBER,
                 r.ROOMNAME,
                 cs.DAYOFWEEK,
                 cs.STARTTIME,
                 cs.ENDTIME,
-                DATE(ar.SCANDATETIME) as ATTENDANCE_DATE
+                DATE(ar.SCANDATETIME) as DATE,
+                NULL as REASON,
+                'attendance_record' as RECORD_TYPE
             FROM ATTENDANCERECORDS ar
             JOIN USERS u ON ar.USERID = u.USERID
-            LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID
+            LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID        
             LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
             LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
             LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
-            WHERE ar.ARCHIVED_AT IS NULL
-            ORDER BY ar.SCANDATETIME DESC
-            LIMIT 50
+            ${whereClause}`;
+
+        // Add UNION ALL for denied access logs (both known and unknown users) if filterUnknownScans is true
+        if (filterUnknownScans) {
+            logsQuery += `
+            
+            UNION ALL
+            
+            SELECT
+                al.LOGID as ID,
+                al.LOGID as ATTENDANCEID,
+                NULL as SCHEDULEID,
+                al.TIMESTAMP as SCANDATETIME,
+                al.TIMESTAMP,
+                CASE 
+                    WHEN al.USERID IS NULL THEN 'Unknown'
+                    ELSE 'Denied'
+                END as STATUS,
+                al.AUTHMETHOD,
+                CASE 
+                    WHEN al.USERID IS NULL THEN 'Unknown Scan'
+                    ELSE 'Access Denied'
+                END as ACTIONTYPE,
+                al.LOCATION,
+                NULL as ACADEMICYEAR,
+                NULL as SEMESTER,
+                COALESCE(u.FIRSTNAME, 'Unknown') as FIRSTNAME,
+                COALESCE(u.LASTNAME, 'User') as LASTNAME,
+                u.STUDENTID,
+                u.USERTYPE,
+                NULL as SUBJECTCODE,
+                NULL as SUBJECTNAME,
+                r.ROOMNUMBER,
+                r.ROOMNAME,
+                NULL as DAYOFWEEK,
+                NULL as STARTTIME,
+                NULL as ENDTIME,
+                DATE(al.TIMESTAMP) as DATE,
+                al.REASON,
+                CASE 
+                    WHEN al.USERID IS NULL THEN 'unknown_scan'
+                    ELSE 'denied_access'
+                END as RECORD_TYPE
+            FROM ACCESSLOGS al
+            LEFT JOIN USERS u ON al.USERID = u.USERID
+            LEFT JOIN ROOMS r ON al.ROOMID = r.ROOMID
+            ${deniedAccessWhereClause}`;
+        }
+        
+        logsQuery += `
+            
+            ORDER BY TIMESTAMP DESC
+            LIMIT ? OFFSET ?
         `;
 
-        console.log('Executing query:', logsQuery);
-        const logs = await executeQuery(logsQuery, []);
-        console.log('Query executed successfully, found', logs.length, 'records');
+        // Combine params for UNION query (only include deniedAccessParams if filterUnknownScans is true)
+        const queryParams = filterUnknownScans 
+            ? [...params, ...deniedAccessParams, limitNum.toString(), offset.toString()]
+            : [...params, limitNum.toString(), offset.toString()];
+        const logs = await executeQuery(logsQuery, queryParams);
 
-        // Debug: Show the latest 3 records
-        if (logs && logs.length > 0) {
-            console.log('📋 Latest 3 records from attendance logs query:');
-            logs.slice(0, 3).forEach((log, index) => {
-                console.log(`  ${index + 1}. ${log.FIRSTNAME} ${log.LASTNAME} - ${log.SCANDATETIME} - ${log.AUTHMETHOD} - Subject: ${log.SUBJECTCODE || 'N/A'} - ScheduleID: ${log.SCHEDULEID || 'N/A'}`);
-            });
+        // Get total count for pagination (combining both tables if filterUnknownScans is true)
+        let countQuery = `
+            SELECT COUNT(*) as total FROM (
+                SELECT ar.ATTENDANCEID
+                FROM ATTENDANCERECORDS ar
+                JOIN USERS u ON ar.USERID = u.USERID
+                LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID        
+                LEFT JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+                LEFT JOIN COURSES c ON cs.SUBJECTID = c.COURSEID
+                LEFT JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+                ${whereClause}`;
+        
+        if (filterUnknownScans) {
+            countQuery += `
+                
+                UNION ALL
+                
+                SELECT al.LOGID
+                FROM ACCESSLOGS al
+                LEFT JOIN ROOMS r ON al.ROOMID = r.ROOMID
+                ${deniedAccessWhereClause}`;
         }
+        
+        countQuery += `
+            ) as combined
+        `;
+        const countParams = filterUnknownScans ? [...params, ...deniedAccessParams] : [...params];
+        const totalResult = await getSingleResult(countQuery, countParams);
+        const total = totalResult?.total || 0;
+        const totalPages = Math.ceil(total / limitNum);
 
         res.json({
             logs: logs || [],
-            total: logs.length,
-            page: 1,
-            limit: 50,
-            totalPages: 1
+            total: total,
+            page: pageNum,
+            limit: limitNum,
+            totalPages: totalPages
         });
 
     } catch (error) {
@@ -825,6 +1244,7 @@ router.post('/rfid-scan', [
     body('rfid_data').isString().isLength({ min: 4, max: 50 }),
     body('scan_type').optional().isIn(['rfid']).default('rfid'),
     body('location').optional().isIn(['inside', 'outside']).default('inside'),
+    body('room_id').optional().isUUID(),
     body('timestamp').optional().isISO8601()
 ], async (req, res) => {
     console.log('🔖 RFID ENDPOINT HIT - Request received:', req.body);
@@ -854,9 +1274,52 @@ router.post('/rfid-scan', [
 
         if (!user) {
             console.log(`❌ No user found for RFID: ${rfid_data}`);
+            
+            // Log unknown RFID scan to ACCESSLOGS table
+            try {
+                let effectiveRoomId = req.body.room_id;
+                if (!effectiveRoomId) {
+                    // Try to get a default room ID from the ROOMS table
+                    const defaultRoom = await getSingleResult(
+                        'SELECT ROOMID FROM ROOMS WHERE ARCHIVED_AT IS NULL AND STATUS = "Available" ORDER BY CREATED_AT ASC LIMIT 1'
+                    );
+                    effectiveRoomId = defaultRoom?.ROOMID;
+                }
+                
+                if (effectiveRoomId) {
+                    const { v4: uuidv4 } = require('uuid');
+                    const accessLogId = uuidv4();
+                    const phTime = getPhilippineTime();
+                    
+                    await executeQuery(
+                        `INSERT INTO ACCESSLOGS (
+                            LOGID, USERID, ROOMID, TIMESTAMP, ACCESSTYPE, AUTHMETHOD,
+                            LOCATION, RESULT, REASON, CREATED_AT
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                        [
+                            accessLogId,
+                            null, // NULL USERID for unknown scans
+                            effectiveRoomId,
+                            phTime.dateTime,
+                            'attendance_scan', // Use attendance_scan type
+                            'RFID',
+                            location,
+                            'denied',
+                            `Unknown RFID card: ${rfid_data}`
+                        ]
+                    );
+                    console.log(`📝 Logged unknown RFID scan attempt: ${rfid_data}`);
+                } else {
+                    console.log('⚠️ Cannot log unknown scan - no room_id available');
+                }
+            } catch (logError) {
+                console.error('Error logging unknown scan:', logError);
+            }
+            
             return res.status(404).json({
                 message: 'RFID card not registered or user inactive',
-                rfid_data: rfid_data
+                rfid_data: rfid_data,
+                logged: true
             });
         }
 
@@ -1162,6 +1625,480 @@ router.delete('/attendance/clear-group', authenticateToken, async (req, res) => 
             message: 'Failed to clear group attendance records',
             error: error.message,
             details: error.sql || 'No SQL details available'
+        });
+    }
+});
+
+// Get session roster - all enrolled students with attendance status
+router.get('/attendance/session-roster/:sessionKey', authenticateToken, async (req, res) => {
+    try {
+        const { sessionKey } = req.params;
+        
+        console.log('📋 Session roster request for:', sessionKey);
+        
+        // Parse sessionKey format: DATE-ROOM-STARTTIME
+        // The format is: 2025-10-25T16:00:00.000Z-WAC-302-15:07:00
+        // We need to split on the last occurrence of the pattern that separates room and time
+        
+        console.log('📋 Session key parts before parsing:', sessionKey);
+        
+        // Find the last occurrence of a pattern like "-WAC-302-" or "-WAC-302-15:07:00"
+        // We'll look for the pattern where we have a room number followed by a time
+        const roomTimeMatch = sessionKey.match(/^(.+)-([A-Z]+-\d+)-(\d{2}:\d{2}:\d{2})$/);
+        
+        if (!roomTimeMatch) {
+            return res.status(400).json({ 
+                message: 'Invalid session key format. Expected: DATE-ROOM-STARTTIME',
+                received: sessionKey,
+                example: '2025-10-25T16:00:00.000Z-WAC-302-15:07:00'
+            });
+        }
+        
+        const date = roomTimeMatch[1]; // Everything before the room
+        const room = roomTimeMatch[2]; // Room number like "WAC-302"
+        const startTime = roomTimeMatch[3]; // Time like "15:07:00"
+        
+        console.log('📋 Parsed session key:', { date, room, startTime });
+        
+        // Get day of week from date
+        // The date might be in ISO format like "2025-10-25T16:00:00.000Z" or just "2025-10-25"
+        // We need to extract just the date part for the day calculation
+        const dateOnly = date.includes('T') ? date.split('T')[0] : date; // Extract "2025-10-25" from "2025-10-25T16:00:00.000Z" or use as-is if already YYYY-MM-DD
+        const actualDate = dateOnly; // Use the extracted date
+        const sessionDate = new Date(actualDate + 'T00:00:00');
+        const dayOfWeek = sessionDate.toLocaleDateString('en-US', { weekday: 'long' });
+        
+        console.log('📋 Date parsing:', { originalDate: date, dateOnly, actualDate, dayOfWeek, sessionDate });
+        
+        // First, find the schedule ID for this session
+        const scheduleQuery = `
+            SELECT 
+                cs.SCHEDULEID,
+                cs.SUBJECTID,
+                cs.ACADEMICYEAR,
+                cs.SEMESTER,
+                sub.SUBJECTCODE,
+                sub.SUBJECTNAME,
+                sub.INSTRUCTORID,
+                r.ROOMNUMBER,
+                r.ROOMNAME,
+                u.FIRSTNAME as INSTRUCTOR_FIRSTNAME,
+                u.LASTNAME as INSTRUCTOR_LASTNAME
+            FROM CLASSSCHEDULES cs
+            JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+            JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+            LEFT JOIN USERS u ON sub.INSTRUCTORID = u.USERID
+            WHERE r.ROOMNUMBER = ?
+              AND cs.DAYOFWEEK = ?
+              AND cs.STARTTIME = ?
+              AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+              AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')
+        `;
+        
+        console.log('🔍 Looking for schedule with:', { room, dayOfWeek, startTime });
+        console.log('🔍 Query:', scheduleQuery);
+        console.log('🔍 Query parameters:', [room, dayOfWeek, startTime]);
+        
+        const schedule = await getSingleResult(scheduleQuery, [room, dayOfWeek, startTime]);
+        
+        if (!schedule) {
+            console.log('❌ No schedule found. Let me check what schedules exist...');
+            
+            // Debug: Check what schedules exist for this room
+            const debugQuery = `
+                SELECT 
+                    cs.SCHEDULEID,
+                    cs.DAYOFWEEK,
+                    cs.STARTTIME,
+                    cs.ENDTIME,
+                    sub.SUBJECTCODE,
+                    sub.SUBJECTNAME,
+                    r.ROOMNUMBER
+                FROM CLASSSCHEDULES cs
+                JOIN SUBJECTS sub ON cs.SUBJECTID = sub.SUBJECTID
+                JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+                WHERE r.ROOMNUMBER = ?
+                AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+                AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')
+                ORDER BY cs.DAYOFWEEK, cs.STARTTIME
+            `;
+            
+            const debugSchedules = await executeQuery(debugQuery, [room]);
+            console.log('🔍 Available schedules for room', room, ':', debugSchedules);
+            
+            return res.status(404).json({ 
+                message: 'Schedule not found for this session',
+                details: { room, dayOfWeek, startTime },
+                availableSchedules: debugSchedules
+            });
+        }
+        
+        console.log('📚 Found schedule:', schedule.SCHEDULEID);
+        
+        // Build roster with aggregated sign-in and sign-out times
+        const rosterQuery = `
+            SELECT 
+                u.USERID,
+                u.FIRSTNAME,
+                u.LASTNAME,
+                u.STUDENTID,
+                COALESCE(
+                  (SELECT ar2.STATUS 
+                   FROM ATTENDANCERECORDS ar2 
+                   WHERE ar2.USERID = u.USERID 
+                     AND ar2.SCHEDULEID = ? 
+                     AND DATE(ar2.SCANDATETIME) = ?
+                   ORDER BY ar2.SCANDATETIME DESC 
+                   LIMIT 1),
+                  'Absent'
+                ) AS STATUS,
+                COALESCE(
+                  (SELECT CASE 
+                    WHEN ar2.STATUS = 'Early Arrival' THEN 'Early Arrival'
+                    WHEN ar2.STATUS LIKE 'Early Scan%' THEN 'Early Arrival'
+                    WHEN ar2.SCANTYPE IN ('early_arrival', 'early_arrival_upgraded') THEN 'Early Arrival'
+                    WHEN ar2.ACTIONTYPE = 'Early Arrival' THEN 'Early Arrival'
+                    ELSE ar2.STATUS
+                   END
+                   FROM ATTENDANCERECORDS ar2 
+                   WHERE ar2.USERID = u.USERID 
+                     AND ar2.SCHEDULEID = ? 
+                     AND DATE(ar2.SCANDATETIME) = ?
+                   ORDER BY ar2.SCANDATETIME DESC 
+                   LIMIT 1),
+                  NULL
+                ) AS DISPLAY_STATUS,
+                (
+                  CASE 
+                    WHEN EXISTS (
+                      SELECT 1 FROM ATTENDANCERECORDS ea
+                      WHERE ea.USERID = u.USERID
+                        AND ea.SCHEDULEID = ?
+                        AND DATE(ea.SCANDATETIME) = ?
+                        AND ea.SCANTYPE IN ('early_arrival', 'early_arrival_upgraded', 'time_in_confirmation')
+                    ) THEN (
+                      SELECT MIN(ar3.SCANDATETIME)
+                      FROM ATTENDANCERECORDS ar3
+                      WHERE ar3.USERID = u.USERID
+                        AND ar3.SCHEDULEID = ?
+                        AND DATE(ar3.SCANDATETIME) = ?
+                        AND ar3.SCANTYPE IN ('early_arrival', 'early_arrival_upgraded', 'time_in_confirmation')
+                    )
+                    ELSE (
+                      SELECT MAX(ar3b.SCANDATETIME)
+                      FROM ATTENDANCERECORDS ar3b
+                      WHERE ar3b.USERID = u.USERID
+                        AND ar3b.SCHEDULEID = ?
+                        AND DATE(ar3b.SCANDATETIME) = ?
+                        AND ar3b.SCANTYPE IN ('time_in', 'time_in_confirmation')
+                    )
+                  END
+                ) AS SIGNIN,
+                (SELECT MAX(ar4.SCANDATETIME)
+                 FROM ATTENDANCERECORDS ar4
+                 WHERE ar4.USERID = u.USERID
+                   AND DATE(ar4.SCANDATETIME) = ?
+                   AND ar4.SCANTYPE = 'time_out'
+                   AND (
+                     ar4.SCHEDULEID = ?
+                     OR ar4.SCHEDULEID IS NULL
+                     OR EXISTS (
+                       SELECT 1 FROM ATTENDANCERECORDS ar5
+                       WHERE ar5.USERID = u.USERID
+                         AND ar5.SCHEDULEID = ?
+                         AND DATE(ar5.SCANDATETIME) = ?
+                         AND ar5.SCANTYPE IN ('time_in', 'time_in_confirmation', 'early_arrival', 'early_arrival_upgraded')
+                         AND ar5.SCANDATETIME < ar4.SCANDATETIME
+                     )
+                   )
+                 ) AS SIGNOUT
+            FROM SUBJECTENROLLMENT se
+            JOIN USERS u ON se.USERID = u.USERID
+            WHERE se.SUBJECTID = ?
+              AND se.ACADEMICYEAR = ?
+              AND se.SEMESTER = ?
+              AND se.STATUS = 'enrolled'
+            ORDER BY u.LASTNAME, u.FIRSTNAME
+        `;
+
+        const roster = await executeQuery(rosterQuery, [
+            schedule.SCHEDULEID,
+            actualDate,
+            // DISPLAY_STATUS parameters
+            schedule.SCHEDULEID,
+            actualDate,
+            // SIGNIN CASE parameters
+            schedule.SCHEDULEID, actualDate, // EXISTS early
+            schedule.SCHEDULEID, actualDate, // MIN early types
+            schedule.SCHEDULEID, actualDate, // MAX regular time_in types
+            // SIGNOUT parameters
+            actualDate,
+            schedule.SCHEDULEID, // Primary schedule match
+            schedule.SCHEDULEID, // For EXISTS check in sign-out
+            actualDate,
+            // enrollment filters
+            schedule.SUBJECTID,
+            schedule.ACADEMICYEAR,
+            schedule.SEMESTER
+        ]);
+
+        console.log('👥 Aggregated roster loaded:', roster.length, 'students');
+
+        // Compute roster statistics
+        const finalRoster = roster;
+        
+        // Calculate statistics
+        // Use DISPLAY_STATUS if available, otherwise fall back to STATUS
+        const stats = {
+            total: finalRoster.length,
+            present: finalRoster.filter(s => {
+                const status = s.DISPLAY_STATUS || s.STATUS;
+                return status === 'Present' || status === 'Early' || status === 'Early Arrival';
+            }).length,
+            late: finalRoster.filter(s => {
+                const status = s.DISPLAY_STATUS || s.STATUS;
+                return status === 'Late';
+            }).length,
+            absent: finalRoster.filter(s => {
+                const status = s.DISPLAY_STATUS || s.STATUS;
+                return status === 'Absent';
+            }).length
+        };
+
+        // Determine instructor status for this session/date
+        let instructorStatus = 'Unknown';
+        let instructorScanTime = null;
+        if (schedule.INSTRUCTORID) {
+            const instr = await getSingleResult(
+                `SELECT STATUS, SCANDATETIME
+                 FROM ATTENDANCERECORDS
+                 WHERE USERID = ? AND SCHEDULEID = ? AND DATE(SCANDATETIME) = ?
+                 ORDER BY SCANDATETIME DESC
+                 LIMIT 1`,
+                [schedule.INSTRUCTORID, schedule.SCHEDULEID, actualDate]
+            );
+            if (instr) {
+                instructorStatus = instr.STATUS || 'Unknown';
+                instructorScanTime = instr.SCANDATETIME || null;
+            }
+        }
+        
+        res.json({
+            success: true,
+            session: {
+                subjectCode: schedule.SUBJECTCODE,
+                subjectName: schedule.SUBJECTNAME,
+                date: actualDate,
+                room: schedule.ROOMNUMBER,
+                roomName: schedule.ROOMNAME,
+                startTime: startTime,
+                scheduleId: schedule.SCHEDULEID,
+                instructor: schedule.INSTRUCTOR_FIRSTNAME && schedule.INSTRUCTOR_LASTNAME 
+                    ? `${schedule.INSTRUCTOR_FIRSTNAME} ${schedule.INSTRUCTOR_LASTNAME}`
+                    : 'Not assigned',
+                instructorStatus,
+                instructorScanTime
+            },
+            roster: finalRoster,
+            statistics: stats
+        });
+        
+    } catch (error) {
+        console.error('❌ Session roster error:', error);
+        res.status(500).json({ 
+            message: 'Internal server error', 
+            error: error.message 
+        });
+    }
+});
+
+// Early arrival scan endpoint - For students arriving before instructor starts session
+router.post('/early-arrival-scan', [
+    body('identifier').isString(),
+    body('auth_method').isIn(['fingerprint', 'rfid']),
+    body('room_id').isUUID()
+], async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { identifier, auth_method, room_id } = req.body;
+
+        console.log('⏰ Early arrival scan request:', { identifier, auth_method, room_id });
+
+        // Get user by authentication method (case-insensitive)
+        const authMethod = await getSingleResult(
+            `SELECT am.AUTHID as auth_id, am.USERID as user_id, am.METHODTYPE as method_type, 
+                    am.IDENTIFIER as identifier, am.ISACTIVE as is_active,
+                    u.USERID as id, u.FIRSTNAME as first_name, u.LASTNAME as last_name, 
+                    u.USERTYPE as role, u.STATUS as status, u.USERID
+             FROM AUTHENTICATIONMETHODS am
+             JOIN USERS u ON am.USERID = u.USERID
+             WHERE am.IDENTIFIER = ? AND UPPER(am.METHODTYPE) = UPPER(?) AND am.ISACTIVE = TRUE AND u.STATUS = 'Active'`,
+            [identifier, auth_method]
+        );
+
+        if (!authMethod) {
+            console.log('❌ Invalid credentials for early arrival');
+            return res.status(401).json({ message: 'Invalid credentials' });
+        }
+
+        if (authMethod.role !== 'student') {
+            console.log('❌ Only students can scan for early arrival');
+            return res.status(403).json({ message: 'Only students can scan for early arrival' });
+        }
+
+        // Get configured early arrival window (default 15 minutes)
+        const earlyArrivalWindow = parseInt(
+            (await getSingleResult(
+                'SELECT SETTINGVALUE as setting_value FROM SETTINGS WHERE SETTINGKEY = "student_early_arrival_window"'
+            ))?.setting_value || '15'
+        );
+
+        console.log(`⏰ Early arrival window: ${earlyArrivalWindow} minutes`);
+
+        // Check if there's a class starting within the early arrival window
+        const now = new Date();
+        const currentDay = now.toLocaleDateString('en-US', { weekday: 'long' });
+        const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:00`;
+
+        console.log(`📅 Checking for classes: Day=${currentDay}, Time=${currentTime}`);
+
+        // Find schedule that starts within the early arrival window
+        const schedule = await getSingleResult(`
+            SELECT cs.SCHEDULEID as schedule_id,
+                   cs.SUBJECTID as subject_id,
+                   s.SUBJECTCODE as subject_code,
+                   s.SUBJECTNAME as subject_name,
+                   cs.STARTTIME as start_time,
+                   cs.ENDTIME as end_time,
+                   r.ROOMNUMBER as room_number,
+                   r.ROOMNAME as room_name
+            FROM CLASSSCHEDULES cs
+            JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
+            JOIN ROOMS r ON cs.ROOMID = r.ROOMID
+            WHERE cs.ROOMID = ?
+              AND cs.DAYOFWEEK = ?
+              AND cs.STARTTIME > ?
+              AND cs.STARTTIME <= TIME_ADD(?, INTERVAL ? MINUTE)
+              AND cs.ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+              AND cs.SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')`,
+            [room_id, currentDay, currentTime, currentTime, earlyArrivalWindow]
+        );
+
+        if (!schedule) {
+            console.log(`❌ No class starting within ${earlyArrivalWindow} minutes`);
+            return res.status(403).json({ 
+                message: `Too early or no class starting within ${earlyArrivalWindow} minutes. Please scan within ${earlyArrivalWindow} minutes of class start.`,
+                earlyArrivalWindow
+            });
+        }
+
+        console.log(`✅ Found upcoming class: ${schedule.subject_code} starting at ${schedule.start_time}`);
+
+        // Check if student is enrolled in this subject
+        const enrollment = await getSingleResult(
+            `SELECT ENROLLMENTID, STATUS
+             FROM SUBJECTENROLLMENT
+             WHERE USERID = ?
+               AND SUBJECTID = ?
+               AND STATUS = 'enrolled'
+               AND ACADEMICYEAR = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_academic_year')
+               AND SEMESTER = (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY = 'current_semester')`,
+            [authMethod.user_id, schedule.subject_id]
+        );
+
+        if (!enrollment) {
+            console.log(`❌ Student not enrolled in ${schedule.subject_code}`);
+            return res.status(403).json({ 
+                message: `You are not enrolled in ${schedule.subject_code} - ${schedule.subject_name}`
+            });
+        }
+
+        console.log('✅ Student is enrolled in the subject');
+
+        // Check if already recorded early arrival for this schedule today
+        const existingRecord = await getSingleResult(
+            `SELECT ATTENDANCEID as id, STATUS as status
+             FROM ATTENDANCERECORDS 
+             WHERE USERID = ? AND SCHEDULEID = ? AND DATE(SCANDATETIME) = CURDATE()
+             AND STATUS IN ('Awaiting Confirmation', 'Present', 'Late', 'Early Arrival')`,
+            [authMethod.user_id, schedule.schedule_id]
+        );
+
+        if (existingRecord) {
+            console.log(`⚠️ Student already has attendance record: ${existingRecord.status}`);
+            return res.status(409).json({ 
+                message: `You already have a ${existingRecord.status} record for this class today`,
+                existingStatus: existingRecord.status
+            });
+        }
+
+        // Create early arrival attendance record
+        const { v4: uuidv4 } = require('uuid');
+        const attendanceId = uuidv4();
+        const phTime = getPhilippineTime();
+
+        await executeQuery(
+            `INSERT INTO ATTENDANCERECORDS (
+                ATTENDANCEID, USERID, SCHEDULEID, SESSIONID, SCANTYPE,
+                SCANDATETIME, DATE, TIMEIN, AUTHMETHOD, LOCATION,
+                STATUS, ACADEMICYEAR, SEMESTER, CREATED_AT, UPDATED_AT
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [
+                attendanceId,
+                authMethod.user_id,
+                schedule.schedule_id,
+                null, // No session yet
+                'time_in',
+                phTime.dateTime,
+                phTime.date,
+                phTime.time,
+                auth_method === 'rfid' ? 'RFID' : 'Fingerprint',
+                'outside',
+                'Awaiting Confirmation',
+                (await getSingleResult('SELECT SETTINGVALUE as value FROM SETTINGS WHERE SETTINGKEY = "current_academic_year"')).value,
+                (await getSingleResult('SELECT SETTINGVALUE as value FROM SETTINGS WHERE SETTINGKEY = "current_semester"')).value
+            ]
+        );
+
+        console.log(`✅ Early arrival recorded for ${authMethod.first_name} ${authMethod.last_name}`);
+
+        // Log access
+        const accessLogId = uuidv4();
+        await executeQuery(
+            `INSERT INTO ACCESSLOGS (
+                LOGID, USERID, ROOMID, TIMESTAMP, ACCESSTYPE, AUTHMETHOD,
+                LOCATION, RESULT, REASON
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                accessLogId,
+                authMethod.user_id,
+                room_id,
+                phTime.dateTime,
+                'early_arrival_scan',
+                auth_method === 'rfid' ? 'RFID' : 'Fingerprint',
+                'outside',
+                'success',
+                `Early arrival for ${schedule.subject_code}`
+            ]
+        );
+
+        res.status(201).json({
+            message: `Early arrival recorded for ${schedule.subject_code}. Please scan inside when class starts.`,
+            status: 'Awaiting Confirmation',
+            subject: `${schedule.subject_code} - ${schedule.subject_name}`,
+            classTime: schedule.start_time,
+            attendance_id: attendanceId
+        });
+
+    } catch (error) {
+        console.error('❌ Early arrival scan error:', error);
+        res.status(500).json({ 
+            message: 'Internal server error', 
+            error: error.message 
         });
     }
 });

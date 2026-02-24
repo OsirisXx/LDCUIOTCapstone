@@ -1,11 +1,11 @@
 const express = require('express');
 const { executeQuery, getSingleResult } = require('../config/database');
-const { authenticateToken, requireInstructor } = require('../middleware/auth');
+const { authenticateToken, requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
 // Get unified data for rooms, subjects, and schedules with academic year filtering
-router.get('/data', authenticateToken, requireInstructor, async (req, res) => {
+router.get('/data', authenticateToken, requireAdmin, async (req, res) => {
     try {
         // Check if optional column exists to avoid selecting non-existent fields
         const isLabCol = await getSingleResult(
@@ -227,7 +227,7 @@ router.get('/data', authenticateToken, requireInstructor, async (req, res) => {
 });
 
 // Get detailed data for a specific room
-router.get('/room/:id', authenticateToken, requireInstructor, async (req, res) => {
+router.get('/room/:id', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { id } = req.params;
         const { academic_year, semester } = req.query;
@@ -305,7 +305,7 @@ router.get('/room/:id', authenticateToken, requireInstructor, async (req, res) =
 });
 
 // Get detailed data for a specific subject
-router.get('/subject/:id', authenticateToken, requireInstructor, async (req, res) => {
+router.get('/subject/:id', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { id } = req.params;
 
@@ -394,7 +394,7 @@ router.get('/subject/:id', authenticateToken, requireInstructor, async (req, res
 });
 
 // Get detailed data for a specific schedule
-router.get('/schedule/:id', authenticateToken, requireInstructor, async (req, res) => {
+router.get('/schedule/:id', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { id } = req.params;
 

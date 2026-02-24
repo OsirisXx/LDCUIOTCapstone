@@ -187,6 +187,9 @@ router.post('/heartbeat', [
 ], async (req, res) => {
     try {
         const apiKey = req.header('x-device-api-key');
+        console.log('🔑 Backend API Key from .env:', process.env.DEVICE_API_KEY);
+        console.log('🔑 API Key from request:', apiKey);
+        console.log('🔑 Keys match:', apiKey === process.env.DEVICE_API_KEY);
         if (!process.env.DEVICE_API_KEY || apiKey !== process.env.DEVICE_API_KEY) {
             return res.status(401).json({ message: 'Unauthorized device' });
         }
@@ -222,6 +225,24 @@ router.get('/online', authenticateToken, requireInstructor, async (req, res) => 
         res.json({ devices });
     } catch (error) {
         console.error('List online devices error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+// Debug endpoint to see all devices in registry
+router.get('/debug/registry', (req, res) => {
+    try {
+        const allDevices = Array.from(deviceRegistry.deviceIdToDevice.values());
+        res.json({ 
+            total_devices: allDevices.length,
+            devices: allDevices,
+            registry_info: {
+                heartbeat_ttl_ms: deviceRegistry.heartbeatTtlMs,
+                cleanup_interval_ms: deviceRegistry.cleanupIntervalMs
+            }
+        });
+    } catch (error) {
+        console.error('Debug registry error:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });

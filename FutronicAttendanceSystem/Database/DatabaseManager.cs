@@ -4,6 +4,8 @@ using System.Data;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
+using System.IO;
 using MySql.Data.MySqlClient;
 using FutronicAttendanceSystem.Database.Models;
 using FutronicAttendanceSystem.Database.Config;
@@ -96,6 +98,50 @@ namespace FutronicAttendanceSystem.Database
                 LogMessage("WARNING", "Using default academic settings - Year: 2024-2025, Semester: First Semester");
                 Console.WriteLine($"Warning: Failed to load academic settings, using defaults: {ex.Message}");
             }
+        }
+
+        private int LoadInstructorEarlyWindow()
+        {
+            try
+            {
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "attendance_scenarios.json");
+                if (File.Exists(configPath))
+                {
+                    string json = File.ReadAllText(configPath);
+                    var config = JsonDocument.Parse(json);
+                    if (config.RootElement.TryGetProperty("InstructorEarlyWindow", out var value))
+                    {
+                        return value.GetInt32();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("WARNING", $"Failed to load InstructorEarlyWindow: {ex.Message}");
+            }
+            return 15; // Default fallback
+        }
+
+        private int LoadStudentEarlyArrivalWindow()
+        {
+            try
+            {
+                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "attendance_scenarios.json");
+                if (File.Exists(configPath))
+                {
+                    string json = File.ReadAllText(configPath);
+                    var config = JsonDocument.Parse(json);
+                    if (config.RootElement.TryGetProperty("StudentEarlyArrivalWindow", out var value))
+                    {
+                        return value.GetInt32();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("WARNING", $"Failed to load StudentEarlyArrivalWindow: {ex.Message}");
+            }
+            return 15; // Default fallback
         }
 
         private void RegisterDevice()
@@ -249,8 +295,8 @@ namespace FutronicAttendanceSystem.Database
             try
             {
                 // FIXED: Load ALL active users with proper fingerprint status check
-                // Use LEFT JOIN to include users without fingerprints so they can be enrolled
-                // Check if user has active fingerprint in AUTHENTICATIONMETHODS table
+                // Use subquery to get one fingerprint template and check existence
+                // This ensures one row per user even when they have multiple fingerprints
                 var cmd = new MySqlCommand(@"
                     SELECT 
                         U.USERID,
@@ -264,18 +310,24 @@ namespace FutronicAttendanceSystem.Database
                         U.FACULTYID,
                         U.YEARLEVEL,
                         U.RFIDTAG,
-                        A.FINGERPRINTTEMPLATE,
+                        (SELECT A1.FINGERPRINTTEMPLATE 
+                         FROM AUTHENTICATIONMETHODS A1 
+                         WHERE A1.USERID = U.USERID 
+                           AND A1.METHODTYPE = 'Fingerprint' 
+                           AND A1.ISACTIVE = 1 
+                           AND A1.STATUS = 'Active' 
+                         LIMIT 1) as FINGERPRINTTEMPLATE,
                         CASE 
-                            WHEN A.USERID IS NOT NULL AND A.METHODTYPE = 'Fingerprint' AND A.ISACTIVE = 1 AND A.STATUS = 'Active'
-                            THEN TRUE 
+                            WHEN EXISTS (
+                                SELECT 1 FROM AUTHENTICATIONMETHODS A2 
+                                WHERE A2.USERID = U.USERID 
+                                  AND A2.METHODTYPE = 'Fingerprint' 
+                                  AND A2.ISACTIVE = 1 
+                                  AND A2.STATUS = 'Active'
+                            ) THEN TRUE 
                             ELSE FALSE 
                         END as HAS_FINGERPRINT
                     FROM USERS U
-                    LEFT JOIN AUTHENTICATIONMETHODS A 
-                        ON A.USERID = U.USERID 
-                       AND A.METHODTYPE = 'Fingerprint' 
-                       AND A.ISACTIVE = 1
-                       AND A.STATUS = 'Active'
                     WHERE U.STATUS = 'Active'
                     ORDER BY U.LASTNAME, U.FIRSTNAME", connection);
 
@@ -768,27 +820,30 @@ namespace FutronicAttendanceSystem.Database
                     throw new Exception($"User with GUID {userGuid} not found or not active");
                 }
 
-                // Delete any existing fingerprint records for this user
-                var deleteExistingCmd = new MySqlCommand(@"
-                    DELETE FROM AUTHENTICATIONMETHODS 
-                    WHERE USERID = @USERID AND METHODTYPE = 'Fingerprint'", connection);
-                deleteExistingCmd.Parameters.AddWithValue("@USERID", userGuid);
-                deleteExistingCmd.ExecuteNonQuery();
+                // Count existing fingerprints to generate unique identifier
+                var countCmd = new MySqlCommand(@"
+                    SELECT COUNT(*) FROM AUTHENTICATIONMETHODS 
+                    WHERE USERID = @USERID AND METHODTYPE = 'Fingerprint' AND ISACTIVE = 1", connection);
+                countCmd.Parameters.AddWithValue("@USERID", userGuid);
+                var existingCount = Convert.ToInt32(countCmd.ExecuteScalar());
+                
+                // Generate unique identifier: FP_{userGuid}_{count+1}
+                string identifier = $"FP_{userGuid}_{existingCount + 1}";
 
-                // Insert new fingerprint record
+                // Insert new fingerprint record (don't delete existing ones)
                 var insertFingerprintCmd = new MySqlCommand(@"
                     INSERT INTO AUTHENTICATIONMETHODS (AUTHID, USERID, METHODTYPE, IDENTIFIER, FINGERPRINTTEMPLATE, ISACTIVE, STATUS)
                     VALUES (UUID(), @USERID, 'Fingerprint', @IDENTIFIER, @TEMPLATE, TRUE, 'Active')", connection);
                 
                 insertFingerprintCmd.Parameters.AddWithValue("@USERID", userGuid);
-                insertFingerprintCmd.Parameters.AddWithValue("@IDENTIFIER", $"FP_{userGuid}");
+                insertFingerprintCmd.Parameters.AddWithValue("@IDENTIFIER", identifier);
                 insertFingerprintCmd.Parameters.AddWithValue("@TEMPLATE", fingerprintTemplate ?? new byte[0]);
                 
                 var result = insertFingerprintCmd.ExecuteNonQuery() > 0;
                 
                 if (result)
                 {
-                    LogMessage("INFO", $"Successfully added fingerprint for user {userGuid}");
+                    LogMessage("INFO", $"Successfully added fingerprint {existingCount + 1} for user {userGuid}");
                 }
                 
                 return result;
@@ -798,6 +853,167 @@ namespace FutronicAttendanceSystem.Database
                 LogMessage("ERROR", $"Failed to add fingerprint to existing user: {ex.Message}");
                 throw new Exception($"Failed to add fingerprint to existing user: {ex.Message}", ex);
             }
+        }
+
+        // Get fingerprint count for a user
+        public int GetFingerprintCount(string userGuid)
+        {
+            try
+            {
+                var cmd = new MySqlCommand(@"
+                    SELECT COUNT(*) 
+                    FROM AUTHENTICATIONMETHODS 
+                    WHERE USERID = @USERID 
+                    AND METHODTYPE = 'Fingerprint' 
+                    AND ISACTIVE = 1 
+                    AND STATUS = 'Active'", connection);
+                cmd.Parameters.AddWithValue("@USERID", userGuid);
+                var count = Convert.ToInt32(cmd.ExecuteScalar());
+                return count;
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to get fingerprint count: {ex.Message}");
+                return 0;
+            }
+        }
+
+        // Get all fingerprints for a user
+        public List<FingerprintInfo> GetUserFingerprints(string userGuid)
+        {
+            var fingerprints = new List<FingerprintInfo>();
+            try
+            {
+                var cmd = new MySqlCommand(@"
+                    SELECT AUTHID, IDENTIFIER, DATEREGISTERED, LASTUPDATED
+                    FROM AUTHENTICATIONMETHODS
+                    WHERE USERID = @USERID AND METHODTYPE = 'Fingerprint' AND ISACTIVE = 1 AND STATUS = 'Active'
+                    ORDER BY DATEREGISTERED", connection);
+                cmd.Parameters.AddWithValue("@USERID", userGuid);
+                
+                using (var reader = cmd.ExecuteReader())
+                {
+                    int index = 1;
+                    while (reader.Read())
+                    {
+                        fingerprints.Add(new FingerprintInfo
+                        {
+                            AuthId = reader["AUTHID"].ToString(),
+                            Identifier = reader["IDENTIFIER"].ToString(),
+                            FingerprintNumber = index++,
+                            DateRegistered = reader.IsDBNull(reader.GetOrdinal("DATEREGISTERED")) 
+                                ? DateTime.MinValue 
+                                : Convert.ToDateTime(reader["DATEREGISTERED"]),
+                            LastUpdated = reader.IsDBNull(reader.GetOrdinal("LASTUPDATED")) 
+                                ? DateTime.MinValue 
+                                : Convert.ToDateTime(reader["LASTUPDATED"])
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to get user fingerprints: {ex.Message}");
+            }
+            return fingerprints;
+        }
+
+        // Delete a specific fingerprint by AUTHID
+        public bool DeleteFingerprint(string authId)
+        {
+            try
+            {
+                var cmd = new MySqlCommand(@"
+                    UPDATE AUTHENTICATIONMETHODS 
+                    SET ISACTIVE = FALSE, STATUS = 'Suspended'
+                    WHERE AUTHID = @AUTHID", connection);
+                cmd.Parameters.AddWithValue("@AUTHID", authId);
+                return cmd.ExecuteNonQuery() > 0;
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to delete fingerprint: {ex.Message}");
+                return false;
+            }
+        }
+
+        // Delete all fingerprints for a user
+        public bool DeleteAllFingerprints(string userGuid)
+        {
+            MySqlTransaction transaction = null;
+            try
+            {
+                transaction = connection.BeginTransaction();
+
+                var deleteCmd = new MySqlCommand(@"
+                    DELETE FROM AUTHENTICATIONMETHODS
+                    WHERE USERID = @USERID AND METHODTYPE = 'Fingerprint'", connection, transaction);
+                deleteCmd.Parameters.AddWithValue("@USERID", userGuid);
+
+                var rowsDeleted = deleteCmd.ExecuteNonQuery();
+                transaction.Commit();
+
+                return rowsDeleted > 0;
+            }
+            catch (Exception ex)
+            {
+                try { transaction?.Rollback(); } catch { }
+                LogMessage("ERROR", $"Failed to delete all fingerprints: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                transaction?.Dispose();
+            }
+        }
+
+        // Load all fingerprints for identification (one record per fingerprint, not per user)
+        public List<UserFingerprint> LoadAllFingerprintsForIdentification()
+        {
+            var fingerprints = new List<UserFingerprint>();
+            try
+            {
+                var cmd = new MySqlCommand(@"
+                    SELECT 
+                        U.USERID,
+                        CONCAT(U.FIRSTNAME, ' ', U.LASTNAME) as USERNAME,
+                        U.USERTYPE,
+                        A.AUTHID,
+                        A.FINGERPRINTTEMPLATE,
+                        A.IDENTIFIER
+                    FROM USERS U
+                    INNER JOIN AUTHENTICATIONMETHODS A 
+                        ON A.USERID = U.USERID 
+                       AND A.METHODTYPE = 'Fingerprint' 
+                       AND A.ISACTIVE = 1
+                       AND A.STATUS = 'Active'
+                    WHERE U.STATUS = 'Active'
+                    ORDER BY U.LASTNAME, U.FIRSTNAME", connection);
+
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        if (!reader.IsDBNull(reader.GetOrdinal("FINGERPRINTTEMPLATE")))
+                        {
+                            fingerprints.Add(new UserFingerprint
+                            {
+                                UserId = reader["USERID"].ToString(),
+                                Username = reader["USERNAME"].ToString(),
+                                UserType = reader["USERTYPE"].ToString(),
+                                AuthId = reader["AUTHID"].ToString(),
+                                Template = (byte[])reader["FINGERPRINTTEMPLATE"],
+                                Identifier = reader["IDENTIFIER"].ToString()
+                            });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to load fingerprints for identification: {ex.Message}");
+            }
+            return fingerprints;
         }
 
         public User GetUserByRfidTag(string rfidTag)
@@ -828,6 +1044,8 @@ namespace FutronicAttendanceSystem.Database
                         {
                             Id = 0, // USERID is a GUID string, not an integer
                             Username = firstName + " " + lastName,
+                            FirstName = firstName,
+                            LastName = lastName,
                             FingerprintTemplate = new byte[0], // No fingerprint template in this table
                             EmployeeId = reader.GetString("USERID"), // Use USERID as the GUID
                             Department = reader.IsDBNull(reader.GetOrdinal("DEPARTMENT")) ? null : reader.GetString("DEPARTMENT"),
@@ -875,6 +1093,82 @@ namespace FutronicAttendanceSystem.Database
             }
         }
 
+        // Update user authentication settings (RFID and Fingerprint enable/disable)
+        public bool UpdateUserAuthSettings(string employeeId, bool enableRfid, bool enableFingerprint)
+        {
+            try
+            {
+                // Note: These columns may not exist in the database yet
+                // For now, just return true as a stub - the settings are stored in memory
+                Console.WriteLine($"UpdateUserAuthSettings called for {employeeId}: RFID={enableRfid}, Fingerprint={enableFingerprint}");
+                Console.WriteLine("Note: Auth settings are currently stored in memory only (database columns may not exist)");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to update auth settings: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Log an access attempt to ACCESSLOGS table (supports NULL USERID for unknown users)
+        /// </summary>
+        public void LogAccessAttempt(string userId, string roomId, string authMethod, 
+            string location, string accessType, string result, string reason = null)
+        {
+            try
+            {
+                if (connection == null || connection.State != System.Data.ConnectionState.Open)
+                {
+                    Console.WriteLine("Database connection not available for logging access attempt");
+                    return;
+                }
+
+                // Use CurrentRoomId if roomId is not provided
+                string effectiveRoomId = string.IsNullOrEmpty(roomId) ? CurrentRoomId : roomId;
+                
+                if (string.IsNullOrEmpty(effectiveRoomId))
+                {
+                    Console.WriteLine("⚠️ Cannot log access attempt - no room ID available");
+                    LogMessage("WARNING", "Cannot log access attempt - no room ID available");
+                    return;
+                }
+
+                string logId = Guid.NewGuid().ToString();
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+
+                var cmd = new MySqlCommand(@"
+                    INSERT INTO ACCESSLOGS (
+                        LOGID, USERID, ROOMID, TIMESTAMP, ACCESSTYPE, AUTHMETHOD,
+                        LOCATION, RESULT, REASON, CREATED_AT
+                    ) VALUES (
+                        @LOGID, @USERID, @ROOMID, @TIMESTAMP, @ACCESSTYPE, @AUTHMETHOD,
+                        @LOCATION, @RESULT, @REASON, NOW()
+                    )", connection);
+
+                cmd.Parameters.AddWithValue("@LOGID", logId);
+                cmd.Parameters.AddWithValue("@USERID", string.IsNullOrEmpty(userId) ? (object)DBNull.Value : userId);
+                cmd.Parameters.AddWithValue("@ROOMID", effectiveRoomId);
+                cmd.Parameters.AddWithValue("@TIMESTAMP", timestamp);
+                cmd.Parameters.AddWithValue("@ACCESSTYPE", accessType);
+                cmd.Parameters.AddWithValue("@AUTHMETHOD", authMethod);
+                cmd.Parameters.AddWithValue("@LOCATION", location);
+                cmd.Parameters.AddWithValue("@RESULT", result);
+                cmd.Parameters.AddWithValue("@REASON", string.IsNullOrEmpty(reason) ? (object)DBNull.Value : reason);
+
+                cmd.ExecuteNonQuery();
+                Console.WriteLine($"✅ Access attempt logged: {accessType} - {result} for room {effectiveRoomId}");
+                LogMessage("INFO", $"Access attempt logged: {accessType} - {result} - {(string.IsNullOrEmpty(userId) ? "Unknown User" : userId)}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Failed to log access attempt: {ex.Message}");
+                LogMessage("ERROR", $"Failed to log access attempt: {ex.Message}");
+                // Don't throw - logging failures shouldn't break the application
+            }
+        }
+
         public bool DeleteUser(int userId)
         {
             try
@@ -906,12 +1200,12 @@ namespace FutronicAttendanceSystem.Database
             public string SubjectName { get; set; }
         }
 
-        // New method that accepts the user GUID directly (non-throwing variant returns result)
-        public AttendanceAttemptResult TryRecordAttendanceByGuid(string userGuid, string action, string notes = null)
+        // New method that accepts the user GUID directly with optional location (non-throwing variant returns result)
+        public AttendanceAttemptResult TryRecordAttendanceByGuid(string userGuid, string action, string location = null)
         {
             try
             {
-                var result = InternalTryRecordAttendance(userGuid, action, notes);
+                var result = InternalTryRecordAttendance(userGuid, action, location);
                 return result;
             }
             catch (Exception ex)
@@ -983,87 +1277,404 @@ namespace FutronicAttendanceSystem.Database
             }
         }
 
-        private AttendanceAttemptResult InternalTryRecordAttendance(string userGuid, string action, string notes = null)
+        /// <summary>
+        /// Gets or creates an "Administrative Access" schedule for custodians and deans without specific class schedules.
+        /// This ensures all attendance records have a valid SCHEDULEID without requiring schema changes.
+        /// </summary>
+        private string GetOrCreateAdministrativeSchedule(string roomId)
         {
             try
             {
-                LogMessage("INFO", $"Recording attendance for user {userGuid}, action {action}, current room: {CurrentRoomId}");
-                
-                // First, validate if there's a scheduled class for the current time and room
-                var scheduleValidation = ValidateScheduleForCurrentTime(userGuid);
-                if (!scheduleValidation.IsValid)
+                if (string.IsNullOrWhiteSpace(roomId))
                 {
-                    LogMessage("WARNING", $"Schedule validation failed: {scheduleValidation.Reason}");
-                    return new AttendanceAttemptResult { Success = false, Reason = scheduleValidation.Reason, SubjectName = scheduleValidation.SubjectName };
+                    LogMessage("WARNING", "Room ID is null or empty, cannot create administrative schedule");
+                    return null;
                 }
 
-                // Try to find an active session for today in the current device's room
-                string sessionId = null;
-                string scheduleId = null;
-                using (var cmdFindSession = new MySqlCommand(@"
-                    SELECT SESSIONID, SCHEDULEID 
-                    FROM SESSIONS 
-                    WHERE SESSIONDATE = CURRENT_DATE 
-                      AND STATUS IN ('active','waiting')
-                      AND ROOMID = @currentRoomId
-                    ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC 
+                // Get current academic year and semester from settings
+                string academicYear = CurrentAcademicYear;
+                string semester = CurrentSemester;
+
+                // First, get or create the "Administrative Access" subject
+                string adminSubjectId = null;
+                using (var cmdGetSubject = new MySqlCommand(@"
+                    SELECT SUBJECTID FROM SUBJECTS 
+                    WHERE SUBJECTCODE = 'ADMIN-ACCESS' 
+                      AND ARCHIVED_AT IS NULL 
                     LIMIT 1", connection))
                 {
-                    cmdFindSession.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");
-                    using (var r = cmdFindSession.ExecuteReader())
+                    var subjectObj = cmdGetSubject.ExecuteScalar();
+                    if (subjectObj != null)
                     {
-                        if (r.Read())
-                        {
-                            sessionId = r.GetString(0);
-                            scheduleId = r.GetString(1);
-                            LogMessage("INFO", $"Found session {sessionId} for room {CurrentRoomId}");
-                        }
-                        else
-                        {
-                            LogMessage("INFO", $"No active session found for room {CurrentRoomId} today");
-                        }
+                        adminSubjectId = subjectObj.ToString();
+                        LogMessage("INFO", $"Found existing Administrative Access subject: {adminSubjectId}");
                     }
                 }
 
-                // Use the schedule from validation if no active session found
-                if (sessionId == null && !string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))
+                // If subject doesn't exist, create it
+                if (string.IsNullOrWhiteSpace(adminSubjectId))
                 {
-                    scheduleId = scheduleValidation.ScheduleId;
-                    LogMessage("INFO", $"Using validated schedule {scheduleId} for attendance recording");
+                    // Get a system admin user ID (or use first admin user)
+                    string adminUserId = null;
+                    using (var cmdGetAdmin = new MySqlCommand(@"
+                        SELECT USERID FROM USERS 
+                        WHERE USERTYPE = 'admin' AND ARCHIVED_AT IS NULL 
+                        LIMIT 1", connection))
+                    {
+                        var adminObj = cmdGetAdmin.ExecuteScalar();
+                        if (adminObj != null)
+                        {
+                            adminUserId = adminObj.ToString();
+                        }
+                    }
+
+                    if (string.IsNullOrWhiteSpace(adminUserId))
+                    {
+                        LogMessage("ERROR", "No admin user found to assign Administrative Access subject");
+                        return null;
+                    }
+
+                    // Create the subject
+                    adminSubjectId = Guid.NewGuid().ToString();
+                    using (var cmdCreateSubject = new MySqlCommand(@"
+                        INSERT INTO SUBJECTS (SUBJECTID, SUBJECTCODE, SUBJECTNAME, INSTRUCTORID, SEMESTER, YEAR, ACADEMICYEAR)
+                        VALUES (@subjectId, 'ADMIN-ACCESS', 'Administrative Door Access', @instructorId, @semester, YEAR(CURDATE()), @academicYear)", connection))
+                    {
+                        cmdCreateSubject.Parameters.AddWithValue("@subjectId", adminSubjectId);
+                        cmdCreateSubject.Parameters.AddWithValue("@instructorId", adminUserId);
+                        cmdCreateSubject.Parameters.AddWithValue("@semester", semester);
+                        cmdCreateSubject.Parameters.AddWithValue("@academicYear", academicYear);
+                        cmdCreateSubject.ExecuteNonQuery();
+                        LogMessage("INFO", $"Created Administrative Access subject: {adminSubjectId}");
+                    }
                 }
 
-                // Check if we need a schedule or if user role allows recording without one
-                if (string.IsNullOrWhiteSpace(scheduleId))
+                // Now, get or create a schedule for this subject in the specified room
+                string scheduleId = null;
+                using (var cmdGetSchedule = new MySqlCommand(@"
+                    SELECT SCHEDULEID FROM CLASSSCHEDULES 
+                    WHERE SUBJECTID = @subjectId 
+                      AND ROOMID = @roomId 
+                      AND ACADEMICYEAR = @academicYear
+                      AND SEMESTER = @semester
+                      AND ARCHIVED_AT IS NULL
+                    LIMIT 1", connection))
                 {
-                    // Check user type to see if they can record without a schedule
-                    string userType = null;
-                    using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid", connection))
+                    cmdGetSchedule.Parameters.AddWithValue("@subjectId", adminSubjectId);
+                    cmdGetSchedule.Parameters.AddWithValue("@roomId", roomId);
+                    cmdGetSchedule.Parameters.AddWithValue("@academicYear", academicYear);
+                    cmdGetSchedule.Parameters.AddWithValue("@semester", semester);
+                    var scheduleObj = cmdGetSchedule.ExecuteScalar();
+                    if (scheduleObj != null)
                     {
-                        cmdGetUserType.Parameters.AddWithValue("@userGuid", userGuid);
-                        var userTypeObj = cmdGetUserType.ExecuteScalar();
-                        if (userTypeObj != null)
+                        scheduleId = scheduleObj.ToString();
+                        LogMessage("INFO", $"Found existing Administrative Access schedule: {scheduleId} for room {roomId}");
+                        return scheduleId;
+                    }
+                }
+
+                // If schedule doesn't exist, create it (Monday-Friday, all day access)
+                scheduleId = Guid.NewGuid().ToString();
+                using (var cmdCreateSchedule = new MySqlCommand(@"
+                    INSERT INTO CLASSSCHEDULES (SCHEDULEID, SUBJECTID, ROOMID, DAYOFWEEK, STARTTIME, ENDTIME, ACADEMICYEAR, SEMESTER)
+                    VALUES (@scheduleId, @subjectId, @roomId, 'Monday', '00:00:00', '23:59:59', @academicYear, @semester)", connection))
+                {
+                    cmdCreateSchedule.Parameters.AddWithValue("@scheduleId", scheduleId);
+                    cmdCreateSchedule.Parameters.AddWithValue("@subjectId", adminSubjectId);
+                    cmdCreateSchedule.Parameters.AddWithValue("@roomId", roomId);
+                    cmdCreateSchedule.Parameters.AddWithValue("@academicYear", academicYear);
+                    cmdCreateSchedule.Parameters.AddWithValue("@semester", semester);
+                    cmdCreateSchedule.ExecuteNonQuery();
+                    LogMessage("INFO", $"Created Administrative Access schedule: {scheduleId} for room {roomId}");
+                }
+
+                // Create schedules for other weekdays too (Tuesday-Friday) for completeness
+                string[] weekdays = { "Tuesday", "Wednesday", "Thursday", "Friday" };
+                foreach (string day in weekdays)
+                {
+                    string additionalScheduleId = Guid.NewGuid().ToString();
+                    try
+                    {
+                        using (var cmdCreateAdditional = new MySqlCommand(@"
+                            INSERT INTO CLASSSCHEDULES (SCHEDULEID, SUBJECTID, ROOMID, DAYOFWEEK, STARTTIME, ENDTIME, ACADEMICYEAR, SEMESTER)
+                            VALUES (@scheduleId, @subjectId, @roomId, @dayOfWeek, '00:00:00', '23:59:59', @academicYear, @semester)", connection))
                         {
-                            userType = userTypeObj.ToString();
+                            cmdCreateAdditional.Parameters.AddWithValue("@scheduleId", additionalScheduleId);
+                            cmdCreateAdditional.Parameters.AddWithValue("@subjectId", adminSubjectId);
+                            cmdCreateAdditional.Parameters.AddWithValue("@roomId", roomId);
+                            cmdCreateAdditional.Parameters.AddWithValue("@dayOfWeek", day);
+                            cmdCreateAdditional.Parameters.AddWithValue("@academicYear", academicYear);
+                            cmdCreateAdditional.Parameters.AddWithValue("@semester", semester);
+                            cmdCreateAdditional.ExecuteNonQuery();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Ignore duplicate key errors, log others
+                        LogMessage("WARNING", $"Could not create additional administrative schedule for {day}: {ex.Message}");
+                    }
+                }
+
+                return scheduleId;
+            }
+            catch (Exception ex)
+            {
+                LogMessage("ERROR", $"Failed to get/create administrative schedule: {ex.Message}");
+                return null;
+            }
+        }
+
+        private AttendanceAttemptResult InternalTryRecordAttendance(string userGuid, string action, string location = null)
+        {
+            try
+            {
+                LogMessage("INFO", $"Recording attendance for user {userGuid}, action {action}, current room: {CurrentRoomId}");                                
+
+                // Check if this is a sign-out action - if so, use more lenient validation
+                bool isSignOut = !string.IsNullOrEmpty(action) && 
+                    (action.IndexOf("sign-out", StringComparison.OrdinalIgnoreCase) >= 0 || 
+                     action.IndexOf("sign out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     action.IndexOf("check-out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     action.IndexOf("check out", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                if (isSignOut)
+                {
+                    LogMessage("INFO", $"🔍 SIGN-OUT DETECTED: Processing sign-out for user {userGuid}, action: {action}");
+                    Console.WriteLine($"🔍 SIGN-OUT DETECTED: Processing sign-out for user {userGuid}, action: {action}");
+                }
+
+                // First, validate if there's a scheduled class for the current time and room                                                                   
+                var scheduleValidation = ValidateScheduleForCurrentTime(userGuid);
+                
+                // Check if this is a door access action (for instructors, custodians, deans)
+                bool isDoorAccessAction = !string.IsNullOrEmpty(action) && action.IndexOf("Door Access", StringComparison.OrdinalIgnoreCase) >= 0;
+                
+                // For sign-out or door access, allow if validation fails but there's an active session or prior sign-in today
+                if (!scheduleValidation.IsValid && !isSignOut && !isDoorAccessAction)
+                {
+                    LogMessage("WARNING", $"Schedule validation failed: {scheduleValidation.Reason}");                                                          
+                    return new AttendanceAttemptResult { Success = false, Reason = scheduleValidation.Reason, SubjectName = scheduleValidation.SubjectName };   
+                }
+                
+                // For sign-out with failed validation, try to find active session or prior sign-in
+                if (!scheduleValidation.IsValid && isSignOut)
+                {
+                    LogMessage("INFO", $"Sign-out action with failed schedule validation - checking for active session or prior sign-in...");
+                    
+                    // Check for active session in this room (any status)
+                    using (var cmdFindSession = new MySqlCommand(@"
+                        SELECT SESSIONID, SCHEDULEID, STATUS
+                        FROM SESSIONS
+                        WHERE SESSIONDATE = CURRENT_DATE
+                          AND ROOMID = @currentRoomId
+                          AND STATUS IN ('active', 'waiting', 'ended')
+                        ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC
+                        LIMIT 1", connection))
+                    {
+                        cmdFindSession.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");
+                        using (var r = cmdFindSession.ExecuteReader())
+                        {
+                            if (r.Read())
+                            {
+                                string foundSessionId = r.GetString(0);
+                                string foundScheduleId = r.IsDBNull(1) ? null : r.GetString(1);
+                                string sessionStatus = r.GetString(2);
+                                
+                                LogMessage("INFO", $"Found active session {foundSessionId} (status: {sessionStatus}) for sign-out");
+                                
+                                // Use the schedule from the session
+                                if (!string.IsNullOrEmpty(foundScheduleId))
+                                {
+                                    scheduleValidation.IsValid = true;
+                                    scheduleValidation.ScheduleId = foundScheduleId;
+                                    scheduleValidation.Reason = "Sign-out allowed - active session found";
+                                }
+                            }
                         }
                     }
                     
-                    // Allow recording without schedule for custodian and dean
-                    if (userType != null && (userType.Equals("custodian", StringComparison.OrdinalIgnoreCase) || 
-                                             userType.Equals("dean", StringComparison.OrdinalIgnoreCase)))
+                    // If still invalid, check for prior sign-in today in this room
+                    if (!scheduleValidation.IsValid)
                     {
-                        LogMessage("INFO", $"Recording attendance without schedule for {userType}");
+                        using (var cmdFindSignIn = new MySqlCommand(@"
+                            SELECT DISTINCT ar.SCHEDULEID, cs.SUBJECTID, s.SUBJECTNAME
+                            FROM ATTENDANCERECORDS ar
+                            LEFT JOIN CLASSSCHEDULES cs ON ar.SCHEDULEID = cs.SCHEDULEID
+                            LEFT JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID
+                            WHERE ar.USERID = @userGuid
+                              AND DATE(ar.SCANDATETIME) = CURRENT_DATE
+                              AND ar.SCANTYPE IN ('time_in', 'time_in_confirmation', 'early_arrival', 'early_arrival_upgraded')
+                              AND EXISTS (
+                                  SELECT 1 FROM CLASSSCHEDULES cs2
+                                  WHERE cs2.SCHEDULEID = ar.SCHEDULEID
+                                    AND cs2.ROOMID = @currentRoomId
+                              )
+                            ORDER BY ar.SCANDATETIME DESC
+                            LIMIT 1", connection))
+                        {
+                            cmdFindSignIn.Parameters.AddWithValue("@userGuid", userGuid);
+                            cmdFindSignIn.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");
+                            using (var r = cmdFindSignIn.ExecuteReader())
+                            {
+                                if (r.Read())
+                                {
+                                    string foundScheduleId = r.IsDBNull(0) ? null : r.GetString(0);
+                                    if (!string.IsNullOrEmpty(foundScheduleId))
+                                    {
+                                        scheduleValidation.IsValid = true;
+                                        scheduleValidation.ScheduleId = foundScheduleId;
+                                        scheduleValidation.SubjectName = r.IsDBNull(2) ? "Unknown" : r.GetString(2);
+                                        scheduleValidation.Reason = "Sign-out allowed - prior sign-in found";
+                                        LogMessage("INFO", $"Sign-out allowed - found prior sign-in with schedule {foundScheduleId}");
+                                    }
+                                }
+                            }
+                        }
                     }
-                    else
+                    
+                    // If still invalid, deny sign-out
+                    if (!scheduleValidation.IsValid)
                     {
-                        // Other roles require a schedule
-                        LogMessage("ERROR", "RecordAttendance: No valid schedule available to attach attendance.");
-                        return new AttendanceAttemptResult { Success = false, Reason = "No valid schedule available" };
+                        LogMessage("WARNING", $"Sign-out denied - no active session or prior sign-in found: {scheduleValidation.Reason}");
+                        return new AttendanceAttemptResult { Success = false, Reason = "Sign-out denied: No active session or prior sign-in found", SubjectName = scheduleValidation.SubjectName };
                     }
                 }
 
-                // Map action to scan type and status
-                string scanType = string.Equals(action, "Check In", StringComparison.OrdinalIgnoreCase) ? "time_in" : "time_out";
+                // Get user type first to determine if we should use administrative schedule for door access
+                string userType = null;
+                using (var cmdGetUserType = new MySqlCommand("SELECT USERTYPE FROM USERS WHERE USERID = @userGuid AND ARCHIVED_AT IS NULL", connection))
+                {
+                    cmdGetUserType.Parameters.AddWithValue("@userGuid", userGuid);
+                    var userTypeObj = cmdGetUserType.ExecuteScalar();
+                    if (userTypeObj != null)
+                    {
+                        userType = userTypeObj.ToString();
+                    }
+                }
+
+                bool isCustodian = userType != null && userType.Equals("custodian", StringComparison.OrdinalIgnoreCase);
+                bool isDean = userType != null && userType.Equals("dean", StringComparison.OrdinalIgnoreCase);
+                bool isInstructor = userType != null && userType.Equals("instructor", StringComparison.OrdinalIgnoreCase);
+
+                // CRITICAL FIX: For door access actions, prioritize administrative schedule and skip session lookup
+                // This ensures door access records are properly logged even when other sessions are active
+                string sessionId = null;
+                string scheduleId = null;
+                
+                // For custodians, deans, or instructors with door access action, use administrative schedule first
+                // This takes priority over active sessions to ensure proper logging
+                // For instructors, always use administrative schedule for door access (even if they have a regular schedule)
+                if (isDoorAccessAction && (isCustodian || isDean || isInstructor))
+                {
+                    scheduleId = GetOrCreateAdministrativeSchedule(CurrentRoomId ?? "");
+                    if (string.IsNullOrWhiteSpace(scheduleId))
+                    {
+                        LogMessage("ERROR", $"RecordAttendance: Failed to get administrative schedule for {userType} door access. CurrentRoomId: {CurrentRoomId ?? "NULL"}");
+                        return new AttendanceAttemptResult { Success = false, Reason = "Failed to get administrative schedule" };
+                    }
+                    sessionId = null; // Don't associate door access with a session
+                    LogMessage("INFO", $"Using administrative schedule {scheduleId} for {userType} door access (prioritized over active sessions)");
+                }
+                else
+                {
+                    // For non-door-access actions, try to find an active session for today in the current device's room
+                    // For sign-out, also include 'ended' sessions since sign-out can happen after session ends
+                    string sessionQuery = isSignOut 
+                        ? @"SELECT SESSIONID, SCHEDULEID
+                            FROM SESSIONS
+                            WHERE SESSIONDATE = CURRENT_DATE
+                              AND STATUS IN ('active','waiting','ended')
+                              AND ROOMID = @currentRoomId
+                            ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
+                            LIMIT 1"
+                        : @"SELECT SESSIONID, SCHEDULEID
+                            FROM SESSIONS
+                            WHERE SESSIONDATE = CURRENT_DATE
+                              AND STATUS IN ('active','waiting')
+                              AND ROOMID = @currentRoomId
+                            ORDER BY COALESCE(STARTTIME, TIMESTAMP(CURRENT_DATE,'00:00:00')) DESC                                                                       
+                            LIMIT 1";
+                        
+                    using (var cmdFindSession = new MySqlCommand(sessionQuery, connection))
+                    {
+                        cmdFindSession.Parameters.AddWithValue("@currentRoomId", CurrentRoomId ?? "");                                                              
+                        using (var r = cmdFindSession.ExecuteReader())
+                        {
+                            if (r.Read())
+                            {
+                                sessionId = r.GetString(0);
+                                scheduleId = r.IsDBNull(1) ? null : r.GetString(1);
+                                LogMessage("INFO", $"Found session {sessionId} for room {CurrentRoomId}");                                                          
+                            }
+                            else
+                            {
+                                LogMessage("INFO", $"No active session found for room {CurrentRoomId} today");                                                      
+                            }
+                        }
+                    }
+
+                    // Use the schedule from validation if no active session found  
+                    if (sessionId == null && !string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))                                                             
+                    {
+                        scheduleId = scheduleValidation.ScheduleId;
+                        LogMessage("INFO", $"Using validated schedule {scheduleId} for attendance recording");                                                      
+                    }
+
+                    // For custodians, deans, or instructors with door access action without a specific schedule, use administrative schedule
+                    if (string.IsNullOrWhiteSpace(scheduleId) && (isCustodian || (isDean && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId)) || (isInstructor && isDoorAccessAction && string.IsNullOrWhiteSpace(scheduleValidation.ScheduleId))))
+                    {
+                        scheduleId = GetOrCreateAdministrativeSchedule(CurrentRoomId ?? "");
+                        if (string.IsNullOrWhiteSpace(scheduleId))
+                        {
+                            LogMessage("ERROR", $"RecordAttendance: Failed to get administrative schedule for {userType}.");
+                            return new AttendanceAttemptResult { Success = false, Reason = "Failed to get administrative schedule" };
+                        }
+                        sessionId = null; // Don't associate with a session
+                        LogMessage("INFO", $"Using administrative schedule {scheduleId} for {userType} door access");
+                    }
+                }
+                
+                // Other roles require a schedule (except sign-out and door access, which can use NULL if no schedule found)
+                if (string.IsNullOrWhiteSpace(scheduleId) && !isSignOut && !isDoorAccessAction)
+                {
+                    LogMessage("ERROR", "RecordAttendance: No valid schedule available to attach attendance.");
+                    return new AttendanceAttemptResult { Success = false, Reason = "No valid schedule available" };
+                }
+                
+                // For sign-out without schedule, allow NULL schedule (will be matched by sign-in schedule in reports)
+                if (string.IsNullOrWhiteSpace(scheduleId) && isSignOut)
+                {
+                    LogMessage("INFO", $"Sign-out record will be created with NULL scheduleId - will be matched by sign-in schedule in reports");
+                }
+
+                // Map action to scan type and status (robust parsing)
+                string scanType;
+                if (!string.IsNullOrEmpty(action))
+                {
+                    var a = action.ToLowerInvariant();
+                    if (a.Contains("check-in") || a.Contains("check in") || a.Contains("sign-in") || a.Contains("sign in"))
+                    {
+                        scanType = "time_in";
+                    }
+                    else if (a.Contains("check-out") || a.Contains("check out") || a.Contains("sign-out") || a.Contains("sign out"))
+                    {
+                        scanType = "time_out";
+                    }
+                    else
+                    {
+                        scanType = "time_in"; // sensible default
+                    }
+                }
+                else
+                {
+                    scanType = "time_in";
+                }
                 string status = "Present";
+                // Note: isDoorAccessAction was already determined above, but keep this for backward compatibility
+                if (!isDoorAccessAction)
+                {
+                    isDoorAccessAction = !string.IsNullOrEmpty(action) && action.IndexOf("Door Access", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
                 
                 // Determine auth method based on action string
                 string authMethod = "Fingerprint"; // Default
@@ -1072,15 +1683,278 @@ namespace FutronicAttendanceSystem.Database
                     authMethod = "RFID";
                 }
                 
-                string location = CurrentLocation; // Use current location setting
+                // Determine effective location: prefer explicit parameter, fallback to current setting
+                string effectiveLocation = (location == "inside" || location == "outside") ? location : CurrentLocation;
+
+                // Check for prior early arrival before recording new attendance
+                string priorAttendanceId = null;
+                DateTime? earlyArrivalTime = null;
+                bool isEarlyArrival = action != null && action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0;
+                
+                if (!isEarlyArrival && !string.IsNullOrEmpty(scheduleId))
+                {
+                    // Check if there's a prior early arrival for this user/schedule today
+                    string priorEarlyArrivalQuery = @"
+                        SELECT ATTENDANCEID, TIMEIN, SCANDATETIME
+                        FROM ATTENDANCERECORDS
+                        WHERE USERID = @userGuid
+                          AND DATE = CURRENT_DATE
+                          AND ACTIONTYPE = 'Early Arrival'
+                          AND SCHEDULEID = @scheduleId
+                        ORDER BY SCANDATETIME DESC
+                        LIMIT 1";
+
+                    using (var cmdCheckEarly = new MySqlCommand(priorEarlyArrivalQuery, connection))
+                    {
+                        cmdCheckEarly.Parameters.AddWithValue("@userGuid", userGuid);
+                        cmdCheckEarly.Parameters.AddWithValue("@scheduleId", scheduleId);
+                        
+                        using (var reader = cmdCheckEarly.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                priorAttendanceId = reader.GetString("ATTENDANCEID");
+                                if (!reader.IsDBNull(reader.GetOrdinal("TIMEIN")))
+                                {
+                                    var timeInStr = reader.GetString("TIMEIN");
+                                    if (TimeSpan.TryParse(timeInStr, out var timeIn))
+                                    {
+                                        earlyArrivalTime = DateTime.Today.Add(timeIn);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                                // Determine action type and status based on timing
+                string actionType = "Sign In"; // Default
+
+                // Check if this schedule is an administrative schedule (for custodians/deans)
+                bool isAdministrativeSchedule = false;
+                if (!string.IsNullOrEmpty(scheduleId))
+                {
+                    using (var cmdCheckAdmin = new MySqlCommand(
+                        "SELECT COUNT(*) FROM CLASSSCHEDULES cs JOIN SUBJECTS s ON cs.SUBJECTID = s.SUBJECTID WHERE cs.SCHEDULEID = @scheduleId AND s.SUBJECTCODE = 'ADMIN-ACCESS'", connection))
+                    {
+                        cmdCheckAdmin.Parameters.AddWithValue("@scheduleId", scheduleId);
+                        var adminCount = Convert.ToInt32(cmdCheckAdmin.ExecuteScalar());
+                        isAdministrativeSchedule = adminCount > 0;
+                    }
+                }
+
+                // Get class start time for late marking calculation (skip for custodians/deans with admin schedule)
+                TimeSpan classStartTime = TimeSpan.Zero;
+                var currentTime = DateTime.Now.TimeOfDay;
+                var minutesAfterStart = 0.0;
+
+                if (!isAdministrativeSchedule && !string.IsNullOrEmpty(scheduleId))
+                {
+                    using (var cmdGetStart = new MySqlCommand(
+                        "SELECT STARTTIME FROM CLASSSCHEDULES WHERE SCHEDULEID = @scheduleId", connection))                                                     
+                    {
+                        cmdGetStart.Parameters.AddWithValue("@scheduleId", scheduleId);                                                                         
+                        var startObj = cmdGetStart.ExecuteScalar();
+                        if (startObj != null && TimeSpan.TryParse(startObj.ToString(), out var st))                                                             
+                        {
+                            classStartTime = st;
+                            minutesAfterStart = (currentTime - classStartTime).TotalMinutes;
+                        }
+                    }
+                }
+
+                // Determine status and action type
+                if (isCustodian || (isDean && isAdministrativeSchedule) || isDoorAccessAction)
+                {
+                    // Custodians and deans with admin schedules: Always "Present", never "Late", action is "Door Access"
+                    status = "Present";
+                    actionType = "Door Access";
+                }
+                else
+                {
+                    // Regular users: Calculate status based on timing
+                    // Check if this is an early arrival
+                    if (isEarlyArrival || minutesAfterStart < 0)
+                    {
+                        actionType = "Early Arrival";
+                        status = "Present";
+                    }
+                    // Check if scan is within grace period (15 minutes after start)                                                                        
+                    else if (minutesAfterStart > 15)
+                    {
+                        // Deans with scheduled classes: treat as Present even if beyond grace period
+                        status = userType != null && userType.Equals("dean", StringComparison.OrdinalIgnoreCase) ? "Present" : "Late";
+                        actionType = "Sign In";
+                    }
+                    else
+                    {
+                        status = "Present";
+                        actionType = "Sign In";
+                    }
+
+                    // Override action type based on user type and location 
+                    if (!isEarlyArrival && minutesAfterStart >= 0 && userType != null)
+                    {
+                        if (userType.Equals("instructor", StringComparison.OrdinalIgnoreCase))                                                              
+                        {
+                            if (effectiveLocation == "outside")
+                                actionType = scanType == "time_in" ? "Session Start" : "Session End";                                                       
+                            else
+                                actionType = scanType == "time_in" ? "Sign In" : "Sign Out";                                                                
+                        }
+                        else if (userType.Equals("student", StringComparison.OrdinalIgnoreCase))                                                            
+                        {
+                            if (effectiveLocation == "outside")
+                                actionType = "Door Access";
+                            else
+                                actionType = scanType == "time_in" ? "Sign In" : "Sign Out";                                                                
+                        }
+                        else if (userType.Equals("dean", StringComparison.OrdinalIgnoreCase) && !isAdministrativeSchedule)
+                        {
+                            // Dean with their own class schedule - normal attendance
+                            actionType = scanType == "time_in" ? "Sign In" : "Sign Out";
+                        }
+                    }
+                }
+
+                // Handle early arrival confirmation - update existing record instead of inserting new
+                // BUT: Skip this for sign-out actions - sign-out should always create a new record
+                if (priorAttendanceId != null && earlyArrivalTime.HasValue && !isSignOut)
+                {
+                    // Update the existing early arrival record to reflect confirmation
+                    var updateCmd = new MySqlCommand(@"
+                        UPDATE ATTENDANCERECORDS
+                        SET ACTIONTYPE = @ACTIONTYPE,
+                            AUTHMETHOD = @AUTHMETHOD,
+                            LOCATION = @LOCATION,
+                            STATUS = @STATUS,
+                            SESSIONID = @SESSIONID
+                        WHERE ATTENDANCEID = @ATTENDANCEID
+                    ", connection);
+                    
+                    updateCmd.Parameters.AddWithValue("@ATTENDANCEID", priorAttendanceId);
+                    updateCmd.Parameters.AddWithValue("@ACTIONTYPE", "Sign In"); // Change from "Early Arrival" to "Sign In"
+                    updateCmd.Parameters.AddWithValue("@AUTHMETHOD", "RFID + Fingerprint");
+                    updateCmd.Parameters.AddWithValue("@LOCATION", effectiveLocation);
+                    updateCmd.Parameters.AddWithValue("@STATUS", "Present");
+                    updateCmd.Parameters.AddWithValue("@SESSIONID", (object)sessionId ?? DBNull.Value);
+                    updateCmd.ExecuteNonQuery();
+                    
+                    LogMessage("INFO", $"Early arrival confirmed for user GUID: {userGuid}, preserved early time: {earlyArrivalTime.Value:HH:mm:ss}");
+                    Console.WriteLine($"✅ Early arrival confirmed - preserved early time: {earlyArrivalTime.Value:HH:mm:ss}");
+                    Console.WriteLine($"   UserGUID: {userGuid}");
+                    Console.WriteLine($"   ActionType: Sign In (was Early Arrival)");
+                    Console.WriteLine($"   AuthMethod: RFID + Fingerprint");
+                    Console.WriteLine($"   ScheduleID: {scheduleId}");
+                    Console.WriteLine($"   SessionID: {sessionId ?? "NULL"}");
+                    
+                    return new AttendanceAttemptResult { Success = true, ScheduleId = scheduleId, SubjectName = scheduleValidation.SubjectName };
+                }
+                
+                // For sign-out, update the existing sign-in record instead of creating a new one
+                if (isSignOut)
+                {
+                    actionType = "Sign Out";
+                    scanType = "time_out";
+                    status = "Present"; // Sign-out is always considered present
+                    LogMessage("INFO", $"Sign-out action: Updating existing sign-in record with TimeOut");
+                    Console.WriteLine($"🔍 SIGN-OUT: Updating existing sign-in record with TimeOut");
+                    
+                    // Find the existing sign-in record for today and update it with TimeOut
+                    DateTime signOutTime = DateTime.Now;
+                    
+                    // First, try to find the sign-in record by schedule and session
+                    string findSignInQuery = @"
+                        SELECT ATTENDANCEID, TIMEIN
+                        FROM ATTENDANCERECORDS
+                        WHERE USERID = @USERID
+                          AND DATE = CURRENT_DATE
+                          AND SCHEDULEID = @SCHEDULEID
+                          AND (ACTIONTYPE = 'Sign In' OR ACTIONTYPE = 'Early Arrival')
+                          AND (TIMEOUT IS NULL OR TIMEOUT = '00:00:00')
+                        ORDER BY SCANDATETIME DESC
+                        LIMIT 1";
+                    
+                    string existingAttendanceId = null;
+                    TimeSpan? existingTimeIn = null;
+                    
+                    using (var cmdFind = new MySqlCommand(findSignInQuery, connection))
+                    {
+                        cmdFind.Parameters.AddWithValue("@USERID", userGuid);
+                        cmdFind.Parameters.AddWithValue("@SCHEDULEID", (object)scheduleId ?? DBNull.Value);
+                        
+                        using (var reader = cmdFind.ExecuteReader())
+                        {
+                            if (reader.Read())
+                            {
+                                existingAttendanceId = reader.GetString("ATTENDANCEID");
+                                if (!reader.IsDBNull(reader.GetOrdinal("TIMEIN")))
+                                {
+                                    var timeInStr = reader.GetString("TIMEIN");
+                                    if (TimeSpan.TryParse(timeInStr, out var timeIn))
+                                    {
+                                        existingTimeIn = timeIn;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (!string.IsNullOrEmpty(existingAttendanceId))
+                    {
+                        // Update the existing record with TimeOut
+                        var updateSignOutCmd = new MySqlCommand(@"
+                            UPDATE ATTENDANCERECORDS
+                            SET TIMEOUT = @TIMEOUT,
+                                ACTIONTYPE = @ACTIONTYPE,
+                                SCANTYPE = @SCANTYPE,
+                                Updated_At = CURRENT_TIMESTAMP
+                            WHERE ATTENDANCEID = @ATTENDANCEID
+                        ", connection);
+                        
+                        updateSignOutCmd.Parameters.AddWithValue("@TIMEOUT", signOutTime.TimeOfDay);
+                        updateSignOutCmd.Parameters.AddWithValue("@ACTIONTYPE", "Sign Out");
+                        updateSignOutCmd.Parameters.AddWithValue("@SCANTYPE", "time_out");
+                        updateSignOutCmd.Parameters.AddWithValue("@ATTENDANCEID", existingAttendanceId);
+                        
+                        int rowsAffected = updateSignOutCmd.ExecuteNonQuery();
+                        
+                        if (rowsAffected > 0)
+                        {
+                            LogMessage("INFO", $"Sign-out recorded successfully for user GUID: {userGuid}");
+                            Console.WriteLine($"✅ Sign-out time updated in existing record:");
+                            Console.WriteLine($"   UserGUID: {userGuid}");
+                            Console.WriteLine($"   Original TimeIn: {existingTimeIn?.ToString(@"hh\:mm\:ss")}");
+                            Console.WriteLine($"   TimeOut: {signOutTime:HH:mm:ss}");
+                            Console.WriteLine($"   AttendanceID: {existingAttendanceId}");
+                            Console.WriteLine($"   ScheduleID: {scheduleId}");
+                            
+                            return new AttendanceAttemptResult { Success = true, ScheduleId = scheduleId, SubjectName = scheduleValidation.SubjectName };
+                        }
+                        else
+                        {
+                            LogMessage("WARNING", $"Failed to update sign-out time for user GUID: {userGuid}");
+                            Console.WriteLine($"⚠️ Failed to update existing record with sign-out time");
+                        }
+                    }
+                    else
+                    {
+                        LogMessage("WARNING", $"No existing sign-in record found for sign-out. User may not have signed in today.");
+                        Console.WriteLine($"⚠️ No existing sign-in record found for user {userGuid}. Cannot record sign-out without sign-in.");
+                        return new AttendanceAttemptResult { Success = false, Reason = "No sign-in record found for today. Please sign in first." };
+                    }
+                }
+
+                // For new records (sign-in, early arrival, etc.), capture the scan time explicitly
+                DateTime scanTime = DateTime.Now;
 
                 // Compose insert
                 var insertCmd = new MySqlCommand(@"
                     INSERT INTO ATTENDANCERECORDS
-                    (ATTENDANCEID, USERID, SCHEDULEID, SESSIONID, SCANTYPE, SCANDATETIME, DATE, TIMEIN, AUTHMETHOD, LOCATION, STATUS, ACADEMICYEAR, SEMESTER)
-                    VALUES (UUID(), @USERID, @SCHEDULEID, @SESSIONID, @SCANTYPE, NOW(), CURRENT_DATE,
-                            CASE WHEN @SCANTYPE = 'time_in' THEN CURRENT_TIME ELSE NULL END,
-                            @AUTHMETHOD, @LOCATION, @STATUS,
+                    (ATTENDANCEID, USERID, SCHEDULEID, SESSIONID, SCANTYPE, SCANDATETIME, DATE, TIMEIN, AUTHMETHOD, LOCATION, STATUS, ACTIONTYPE, ACADEMICYEAR, SEMESTER)
+                    VALUES (UUID(), @USERID, @SCHEDULEID, @SESSIONID, @SCANTYPE, @SCANDATETIME, CURRENT_DATE,
+                            @TIMEIN,
+                            @AUTHMETHOD, @LOCATION, @STATUS, @ACTIONTYPE,
                             (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY='current_academic_year' LIMIT 1),
                             (SELECT SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY='current_semester' LIMIT 1))
                 ", connection);
@@ -1089,16 +1963,20 @@ namespace FutronicAttendanceSystem.Database
                 insertCmd.Parameters.AddWithValue("@SCHEDULEID", (object)scheduleId ?? DBNull.Value);
                 insertCmd.Parameters.AddWithValue("@SESSIONID", (object)sessionId ?? DBNull.Value);
                 insertCmd.Parameters.AddWithValue("@SCANTYPE", scanType);
+                insertCmd.Parameters.AddWithValue("@SCANDATETIME", scanTime);
+                insertCmd.Parameters.AddWithValue("@TIMEIN", scanTime.TimeOfDay);
                 insertCmd.Parameters.AddWithValue("@AUTHMETHOD", authMethod);
-                insertCmd.Parameters.AddWithValue("@LOCATION", location);
+                insertCmd.Parameters.AddWithValue("@LOCATION", effectiveLocation);
                 insertCmd.Parameters.AddWithValue("@STATUS", status);
+                insertCmd.Parameters.AddWithValue("@ACTIONTYPE", actionType);
 
                 insertCmd.ExecuteNonQuery();
                 
-                LogMessage("INFO", $"Attendance recorded successfully for user GUID: {userGuid}, action: {action}, authMethod: {authMethod}");
+                LogMessage("INFO", $"Attendance recorded successfully for user GUID: {userGuid}, action: {action}, authMethod: {authMethod}, actionType: {actionType}");
                 Console.WriteLine($"✅ Attendance saved to ATTENDANCERECORDS:");
                 Console.WriteLine($"   UserGUID: {userGuid}");
                 Console.WriteLine($"   Action: {action}");
+                Console.WriteLine($"   ActionType: {actionType}");
                 Console.WriteLine($"   AuthMethod: {authMethod}");
                 Console.WriteLine($"   ScheduleID: {scheduleId}");
                 Console.WriteLine($"   SessionID: {sessionId ?? "NULL"}");
@@ -1113,7 +1991,8 @@ namespace FutronicAttendanceSystem.Database
 
         private void RecordAttendanceInternal(string userGuid, string action, string notes = null)
         {
-            var res = InternalTryRecordAttendance(userGuid, action, notes);
+            // Legacy path: ignore notes and use current location setting
+            var res = InternalTryRecordAttendance(userGuid, action, null);
             if (!res.Success)
             {
                 throw new Exception(res.Reason ?? "Unknown attendance failure");
@@ -1205,6 +2084,37 @@ namespace FutronicAttendanceSystem.Database
                 {
                     LogMessage("DEBUG", $"Dean access requested for user {userGuid}");
                     
+                    // Fetch current academic settings fresh from database (not cached)
+                    // This ensures schedule changes are immediately recognized without app restart
+                    string academicYear = CurrentAcademicYear; // Fallback to cached value
+                    string semester = CurrentSemester; // Fallback to cached value
+                    try
+                    {
+                        using (var cmdGetSettings = new MySqlCommand(@"
+                            SELECT 
+                                MAX(CASE WHEN SETTINGKEY = 'current_academic_year' THEN SETTINGVALUE END) as academic_year,
+                                MAX(CASE WHEN SETTINGKEY = 'current_semester' THEN SETTINGVALUE END) as semester
+                            FROM SETTINGS
+                            WHERE SETTINGKEY IN ('current_academic_year', 'current_semester')", connection))
+                        {
+                            using (var reader = cmdGetSettings.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    if (!reader.IsDBNull(0) && !string.IsNullOrWhiteSpace(reader.GetString(0)))
+                                        academicYear = reader.GetString(0);
+                                    if (!reader.IsDBNull(1) && !string.IsNullOrWhiteSpace(reader.GetString(1)))
+                                        semester = reader.GetString(1);
+                                }
+                            }
+                        }
+                        LogMessage("DEBUG", $"Fetched fresh academic settings for dean - Year: {academicYear}, Semester: {semester}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage("WARNING", $"Failed to fetch fresh academic settings, using cached values: {ex.Message}");
+                    }
+                    
                     // Try to find a scheduled class (same query as instructor)
                     using (var cmdCheckDeanSchedule = new MySqlCommand(@"
                         SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
@@ -1220,8 +2130,8 @@ namespace FutronicAttendanceSystem.Database
                         cmdCheckDeanSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckDeanSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckDeanSchedule.Parameters.AddWithValue("@currentDay", currentDay);
-                        cmdCheckDeanSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
-                        cmdCheckDeanSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@academicYear", academicYear);
+                        cmdCheckDeanSchedule.Parameters.AddWithValue("@semester", semester);
 
                         using (var reader = cmdCheckDeanSchedule.ExecuteReader())
                         {
@@ -1251,7 +2161,43 @@ namespace FutronicAttendanceSystem.Database
                     LogMessage("DEBUG", $"Searching for instructor schedule with: userGuid={userGuid}, roomId={CurrentRoomId}, day={currentDay}, time={currentTime}");
                     Console.WriteLine($"DEBUG: Searching for instructor schedule with: userGuid={userGuid}, roomId={CurrentRoomId}, day={currentDay}, time={currentTime}");
                     
-                    // Use the same logic as the web system: TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                    // Load instructor early window from configuration  
+                    int instructorEarlyMinutes = LoadInstructorEarlyWindow();
+                    string earlyWindowTime = $"-00:{instructorEarlyMinutes:D2}:00";
+                    Console.WriteLine($"DEBUG: Instructor early arrival window: {instructorEarlyMinutes} minutes");
+                    
+                    // Fetch current academic settings fresh from database (not cached)
+                    // This ensures schedule changes are immediately recognized without app restart
+                    string academicYear = CurrentAcademicYear; // Fallback to cached value
+                    string semester = CurrentSemester; // Fallback to cached value
+                    try
+                    {
+                        using (var cmdGetSettings = new MySqlCommand(@"
+                            SELECT 
+                                MAX(CASE WHEN SETTINGKEY = 'current_academic_year' THEN SETTINGVALUE END) as academic_year,
+                                MAX(CASE WHEN SETTINGKEY = 'current_semester' THEN SETTINGVALUE END) as semester
+                            FROM SETTINGS
+                            WHERE SETTINGKEY IN ('current_academic_year', 'current_semester')", connection))
+                        {
+                            using (var reader = cmdGetSettings.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    if (!reader.IsDBNull(0) && !string.IsNullOrWhiteSpace(reader.GetString(0)))
+                                        academicYear = reader.GetString(0);
+                                    if (!reader.IsDBNull(1) && !string.IsNullOrWhiteSpace(reader.GetString(1)))
+                                        semester = reader.GetString(1);
+                                }
+                            }
+                        }
+                        LogMessage("DEBUG", $"Fetched fresh academic settings - Year: {academicYear}, Semester: {semester}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage("WARNING", $"Failed to fetch fresh academic settings, using cached values: {ex.Message}");
+                    }
+                    
+                    // Use ADDTIME to allow early arrival within configured window
                     using (var cmdCheckInstructorSchedule = new MySqlCommand(@"
                         SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
                         FROM CLASSSCHEDULES cs
@@ -1259,15 +2205,16 @@ namespace FutronicAttendanceSystem.Database
                         WHERE s.INSTRUCTORID = @userGuid
                           AND cs.ROOMID = @roomId
                           AND cs.DAYOFWEEK = @currentDay
-                          AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                          AND TIME(NOW()) BETWEEN ADDTIME(cs.STARTTIME, @earlyWindow) AND cs.ENDTIME
                           AND cs.ACADEMICYEAR = @academicYear
                           AND cs.SEMESTER = @semester", connection))
                     {
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckInstructorSchedule.Parameters.AddWithValue("@currentDay", currentDay);
-                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
-                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
+                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@earlyWindow", earlyWindowTime);
+                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@academicYear", academicYear);
+                        cmdCheckInstructorSchedule.Parameters.AddWithValue("@semester", semester);
 
                         using (var reader = cmdCheckInstructorSchedule.ExecuteReader())
                         {
@@ -1367,7 +2314,44 @@ namespace FutronicAttendanceSystem.Database
                         }
                     }
                     
-                    // Use TIME(NOW()) BETWEEN for consistent time comparison (same as instructor check)
+                    // Load student early window from configuration
+                    int studentEarlyMinutes = LoadStudentEarlyArrivalWindow();
+                    string earlyWindowTime = $"-00:{studentEarlyMinutes:D2}:00";
+                    Console.WriteLine($"DEBUG: Student early arrival window: {studentEarlyMinutes} minutes");
+                    
+                    // Fetch current academic settings fresh from database (not cached)
+                    // This ensures schedule changes are immediately recognized without app restart
+                    string academicYear = CurrentAcademicYear; // Fallback to cached value
+                    string semester = CurrentSemester; // Fallback to cached value
+                    try
+                    {
+                        using (var cmdGetSettings = new MySqlCommand(@"
+                            SELECT 
+                                MAX(CASE WHEN SETTINGKEY = 'current_academic_year' THEN SETTINGVALUE END) as academic_year,
+                                MAX(CASE WHEN SETTINGKEY = 'current_semester' THEN SETTINGVALUE END) as semester
+                            FROM SETTINGS
+                            WHERE SETTINGKEY IN ('current_academic_year', 'current_semester')", connection))
+                        {
+                            using (var reader = cmdGetSettings.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    if (!reader.IsDBNull(0) && !string.IsNullOrWhiteSpace(reader.GetString(0)))
+                                        academicYear = reader.GetString(0);
+                                    if (!reader.IsDBNull(1) && !string.IsNullOrWhiteSpace(reader.GetString(1)))
+                                        semester = reader.GetString(1);
+                                }
+                            }
+                        }
+                        LogMessage("DEBUG", $"Fetched fresh academic settings for student - Year: {academicYear}, Semester: {semester}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage("WARNING", $"Failed to fetch fresh academic settings, using cached values: {ex.Message}");
+                    }
+                    
+                    // Use ADDTIME to allow early arrival within configured window
+                    bool scheduleFound = false;
                     using (var cmdCheckStudentSchedule = new MySqlCommand(@"
                         SELECT cs.SCHEDULEID, s.SUBJECTNAME, cs.STARTTIME, cs.ENDTIME
                         FROM CLASSSCHEDULES cs
@@ -1377,15 +2361,16 @@ namespace FutronicAttendanceSystem.Database
                           AND se.STATUS = 'enrolled'
                           AND cs.ROOMID = @roomId
                           AND cs.DAYOFWEEK = @currentDay
-                          AND TIME(NOW()) BETWEEN cs.STARTTIME AND cs.ENDTIME
+                          AND TIME(NOW()) BETWEEN ADDTIME(cs.STARTTIME, @earlyWindow) AND cs.STARTTIME
                           AND cs.ACADEMICYEAR = @academicYear
                           AND cs.SEMESTER = @semester", connection))
                     {
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@userGuid", userGuid);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@roomId", CurrentRoomId);
                         cmdCheckStudentSchedule.Parameters.AddWithValue("@currentDay", currentDay);
-                        cmdCheckStudentSchedule.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
-                        cmdCheckStudentSchedule.Parameters.AddWithValue("@semester", CurrentSemester);
+                        cmdCheckStudentSchedule.Parameters.AddWithValue("@earlyWindow", earlyWindowTime);
+                        cmdCheckStudentSchedule.Parameters.AddWithValue("@academicYear", academicYear);
+                        cmdCheckStudentSchedule.Parameters.AddWithValue("@semester", semester);
 
                         using (var reader = cmdCheckStudentSchedule.ExecuteReader())
                         {
@@ -1393,20 +2378,86 @@ namespace FutronicAttendanceSystem.Database
                             {
                                 scheduleId = reader.GetString("SCHEDULEID");
                                 subjectName = reader.GetString("SUBJECTNAME");
+                                scheduleFound = true;
                                 
                                 LogMessage("INFO", $"Found student schedule: {subjectName} (ID: {scheduleId})");
                                 LogMessage("DEBUG", $"Schedule details - Start: {reader.GetString("STARTTIME")}, End: {reader.GetString("ENDTIME")}");
                                 Console.WriteLine($"✅ Found student schedule: {subjectName} (ScheduleID: {scheduleId})");
                                 Console.WriteLine($"   Start: {reader.GetString("STARTTIME")}, End: {reader.GetString("ENDTIME")}");
                             }
-                            else
+                        } // Reader fully disposed
+                    } // Command fully disposed - connection is now completely free
+
+                    // Fallback check: if no schedule found, try active session validation
+                    // This is OUTSIDE the previous using block to ensure connection is free
+                    if (!scheduleFound)
+                    {
+                        LogMessage("WARNING", $"No schedule found for student {userGuid} at {currentDay} {currentTime} in room {CurrentRoomId}");
+                        Console.WriteLine($"❌ No schedule found for student {userGuid} at {currentDay} {currentTime} in room {CurrentRoomId}");
+
+                        // Fallback: if there's an active session in this room, validate by subject enrollment
+                        string activeScheduleId = null;
+                        string activeSubjectId = null;
+                        string activeSubjectName = null;
+                        
+                        using (var cmdFindActiveSession = new MySqlCommand(@"
+                            SELECT s.SESSIONID, s.STATUS, s.STARTTIME, cs.SCHEDULEID, subj.SUBJECTID, subj.SUBJECTNAME
+                            FROM SESSIONS s
+                            JOIN CLASSSCHEDULES cs ON s.SCHEDULEID = cs.SCHEDULEID
+                            JOIN SUBJECTS subj ON cs.SUBJECTID = subj.SUBJECTID
+                            WHERE s.ROOMID = @roomId
+                              AND s.SESSIONDATE = CURRENT_DATE
+                              AND s.STATUS = 'active'
+                            LIMIT 1", connection))
+                        {
+                            cmdFindActiveSession.Parameters.AddWithValue("@roomId", CurrentRoomId);
+
+                            using (var sessionReader = cmdFindActiveSession.ExecuteReader())
                             {
-                                LogMessage("WARNING", $"No schedule found for student {userGuid} at {currentDay} {currentTime} in room {CurrentRoomId}");
-                                Console.WriteLine($"❌ No schedule found for student {userGuid} at {currentDay} {currentTime} in room {CurrentRoomId}");
-                                result.Reason = "Student is not enrolled in any class scheduled at this time";
-                                return result;
+                                if (sessionReader.Read())
+                                {
+                                    // Extract all values while reader is open
+                                    activeScheduleId = sessionReader.GetString("SCHEDULEID");
+                                    activeSubjectId = sessionReader.GetString("SUBJECTID");
+                                    activeSubjectName = sessionReader.GetString("SUBJECTNAME");
+                                }
+                            } // Reader is now fully disposed
+                        } // Command is now fully disposed
+
+                        // Now check enrollment (connection is free, no DataReader conflicts)
+                        if (!string.IsNullOrEmpty(activeSubjectId))
+                        {
+                            using (var cmdCheckEnrollForActive = new MySqlCommand(@"
+                                SELECT COUNT(*)
+                                FROM SUBJECTENROLLMENT
+                                WHERE USERID = @userGuid
+                                  AND SUBJECTID = @subjectId
+                                  AND STATUS = 'enrolled'
+                                  AND ACADEMICYEAR = @academicYear
+                                  AND SEMESTER = @semester", connection))
+                            {
+                                cmdCheckEnrollForActive.Parameters.AddWithValue("@userGuid", userGuid);
+                                cmdCheckEnrollForActive.Parameters.AddWithValue("@subjectId", activeSubjectId);
+                                cmdCheckEnrollForActive.Parameters.AddWithValue("@academicYear", CurrentAcademicYear);
+                                cmdCheckEnrollForActive.Parameters.AddWithValue("@semester", CurrentSemester);
+
+                                var enrolledCount = Convert.ToInt32(cmdCheckEnrollForActive.ExecuteScalar());
+                                if (enrolledCount > 0)
+                                {
+                                    // Allow based on active session + valid enrollment
+                                    result.IsValid = true;
+                                    result.ScheduleId = activeScheduleId;
+                                    result.SubjectName = activeSubjectName;
+                                    result.Reason = "Student is enrolled in the active session subject";
+                                    Console.WriteLine($"✅ Student validated via active session subject: {activeSubjectName} (ScheduleID: {activeScheduleId})");
+                                    return result;
+                                }
                             }
                         }
+
+                        // Still no match after active-session fallback
+                        result.Reason = "Student is not enrolled in any class scheduled at this time";
+                        return result;
                     }
 
                     // If student is enrolled, check if there's an active session for this schedule
@@ -1459,11 +2510,13 @@ namespace FutronicAttendanceSystem.Database
                             cmdCheckSessionBySubject.Parameters.AddWithValue("@subjectName", subjectName);
                             cmdCheckSessionBySubject.Parameters.AddWithValue("@roomId", CurrentRoomId);
                             
+                            bool sessionFound = false;
                             using (var reader = cmdCheckSessionBySubject.ExecuteReader())
                             {
                                 if (reader.Read())
                                 {
                                     // Found session by subject name match
+                                    sessionFound = true;
                                     result.IsValid = true;
                                     result.ScheduleId = scheduleId;
                                     result.SubjectName = subjectName;
@@ -1475,14 +2528,49 @@ namespace FutronicAttendanceSystem.Database
                                     Console.WriteLine($"✅ Active session found by subject match: {sessionId}");
                                     Console.WriteLine($"   Session ScheduleID: {sessionScheduleId} vs Student ScheduleID: {scheduleId}");
                                 }
-                                else
+                            }
+                            
+                            // Check early arrival only if no session was found (reader is now closed)
+                            if (!sessionFound)
+                            {
+                                // Check if within early arrival window using configured value
+                                int earlyWindowMinutes = LoadStudentEarlyArrivalWindow();
+                                Console.WriteLine($"DEBUG: Checking early arrival for student - window: {earlyWindowMinutes} minutes");
+                                
+                                using (var cmdGetStartTime = new MySqlCommand(
+                                    "SELECT STARTTIME FROM CLASSSCHEDULES WHERE SCHEDULEID = @scheduleId", connection))
                                 {
-                                    // No active session - instructor must start session first
-                                    result.Reason = "No active class session. Instructor must start the session first.";
-                                    LogMessage("WARNING", $"No active session found for scheduleId: {scheduleId} or subject: {subjectName}");
-                                    Console.WriteLine($"❌ No active session found for scheduleId: {scheduleId}");
-                                    Console.WriteLine($"❌ Also no session found for subject: {subjectName} in room: {CurrentRoomId}");
+                                    cmdGetStartTime.Parameters.AddWithValue("@scheduleId", scheduleId);
+                                    var startTimeObj = cmdGetStartTime.ExecuteScalar();
+                                    
+                                    if (startTimeObj != null && TimeSpan.TryParse(startTimeObj.ToString(), out var startTime))
+                                    {
+                                        var nowTime = DateTime.Now.TimeOfDay;
+                                        var timeUntilClass = (startTime - nowTime).TotalMinutes;
+                                        Console.WriteLine($"DEBUG: Current time: {nowTime}, Class starts: {startTime}, Minutes until class: {timeUntilClass:F0}");
+                                        
+                                        if (timeUntilClass > 0 && timeUntilClass <= earlyWindowMinutes)
+                                        {
+                                            // Allow early arrival within configured window
+                                            result.IsValid = true;
+                                            result.ScheduleId = scheduleId;
+                                            result.SubjectName = subjectName;
+                                            result.Reason = $"Early arrival allowed. Class starts in {timeUntilClass:F0} minutes.";
+                                            Console.WriteLine($"✅ Early arrival allowed (window: {earlyWindowMinutes} min, actual: {timeUntilClass:F0} min)");
+                                            return result;
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine($"❌ Too early or too late. Window: {earlyWindowMinutes} min, Time until class: {timeUntilClass:F0} min");
+                                        }
+                                    }
                                 }
+                                
+                                // Not in early arrival window - instructor must start session first
+                                result.Reason = "No active class session. Instructor must start the session first.";
+                                LogMessage("WARNING", $"No active session found for scheduleId: {scheduleId} or subject: {subjectName}");
+                                Console.WriteLine($"❌ No active session found for scheduleId: {scheduleId}");
+                                Console.WriteLine($"❌ Also no session found for subject: {subjectName} in room: {CurrentRoomId}");
                             }
                         }
                     }
@@ -1839,22 +2927,6 @@ namespace FutronicAttendanceSystem.Database
                 }
                 LogMessage("DEBUG", $"Active instructors count: {instructorCount}");
                 
-                // Check specific instructor
-                using (var cmd = new MySqlCommand("SELECT USERID, EMAIL, USERTYPE, STATUS FROM USERS WHERE EMAIL = 'harleyinstructor@gmail.com'", connection))
-                {
-                    using (var reader = cmd.ExecuteReader())
-                    {
-                        if (reader.Read())
-                        {
-                            LogMessage("DEBUG", $"Found instructor: ID={reader.GetString("USERID")}, Email={reader.GetString("EMAIL")}, Type={reader.GetString("USERTYPE")}, Status={reader.GetString("STATUS")}");
-                        }
-                        else
-                        {
-                            LogMessage("WARNING", "harleyinstructor@gmail.com not found in database");
-                        }
-                    }
-                }
-                
                 // Check if we have any class schedules
                 var scheduleCount = 0;
                 using (var cmd = new MySqlCommand("SELECT COUNT(*) FROM CLASSSCHEDULES", connection))
@@ -2027,8 +3099,8 @@ namespace FutronicAttendanceSystem.Database
                 // Determine action based on location
                 string action = location.ToLower() == "inside" ? "Check In" : "Check Out";
                 
-                // Use existing attendance recording logic
-                var result = InternalTryRecordAttendance(userGuid, action, notes);
+                // Use existing attendance recording logic, passing explicit location
+                var result = InternalTryRecordAttendance(userGuid, action, location);
                 
                 if (result.Success)
                 {

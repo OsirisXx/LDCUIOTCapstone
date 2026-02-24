@@ -26,6 +26,10 @@ namespace FutronicAttendanceSystem.Utils
         public SensorConfig InsideSensor { get; set; }
         public SensorConfig OutsideSensor { get; set; }
         public bool TestMode { get; set; } = false;
+        public bool AllowUnauthorizedFingerprints { get; set; } = false;
+        public bool AllowFingerprintOnly { get; set; } = false;
+        public bool AllowRfidOnly { get; set; } = false;
+        public bool AllowInstructorDoorAccess { get; set; } = false;
         public DateTime LastUpdated { get; set; }
     }
 

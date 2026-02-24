@@ -4,7 +4,6 @@ import { useAuth } from '../contexts/AuthContext';
 import {
   HomeIcon,
   ClipboardDocumentListIcon,
-  CreditCardIcon,
   ClockIcon,
   UsersIcon,
   Squares2X2Icon,
@@ -16,6 +15,8 @@ import {
   ChartBarIcon,
   ArchiveBoxIcon,
   ArrowDownTrayIcon,
+  ShieldCheckIcon,
+  Cog6ToothIcon
 } from '@heroicons/react/24/outline';
 
 const navigation = [
@@ -25,6 +26,7 @@ const navigation = [
   { name: 'Reports', href: '/reports', icon: ChartBarIcon },
   { name: 'Sessions', href: '/sessions', icon: ClockIcon },
   { name: 'Users', href: '/users', icon: UsersIcon },
+  { name: 'Super Admin', href: '/superadmin', icon: ShieldCheckIcon, superAdminOnly: true },
   { name: 'Archive', href: '/archive', icon: ArchiveBoxIcon, adminOnly: true },
   { name: 'Backup & Export', href: '/backup', icon: ArrowDownTrayIcon, adminOnly: true },
 ];
@@ -36,6 +38,9 @@ function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const userMenuRef = useRef(null);
+
+  const isSuperAdmin = user?.role === 'superadmin';
+  const isAdmin = isSuperAdmin || user?.role === 'admin';
 
   const isActive = (href) => location.pathname === href;
 
@@ -89,8 +94,8 @@ function Layout() {
             </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
             {navigation.map((item) => {
-              // Only show Archive for admins
-              if (item.adminOnly && user?.role !== 'admin') return null;
+              if (item.superAdminOnly && !isSuperAdmin) return null;
+              if (item.adminOnly && !isAdmin) return null;
               
               return (
                 <Link
@@ -129,57 +134,54 @@ function Layout() {
           <div className="flex h-16 items-center px-4 border-b border-maroon-200/30">
             <button
               onClick={() => setDesktopSidebarCollapsed(!desktopSidebarCollapsed)}
-              className="mr-3 text-maroon-200 hover:text-white transition-colors duration-200 p-1 rounded-md hover:bg-white/10"
+              className="flex-shrink-0 text-maroon-200 hover:text-white transition-colors duration-200 p-1 rounded-md hover:bg-white/10"
               title="Toggle Sidebar"
             >
               <Bars3Icon className="h-5 w-5" />
             </button>
-            {!desktopSidebarCollapsed && (
-              <>
-                <img className="h-8 w-auto" src="/ldcu.png" alt="Liceo de Cagayan University" />
-                <div className="ml-3">
-                  <h1 className="text-sm font-semibold text-white">IoT Attendance</h1>
-                  <p className="text-xs text-maroon-100">Liceo de Cagayan</p>
-                </div>
-              </>
-            )}
+            <div className={`ml-3 overflow-hidden whitespace-nowrap transition-all duration-300 ease-in-out ${desktopSidebarCollapsed ? 'max-w-0 opacity-0' : 'max-w-xs opacity-100'}`}>
+              <h1 className="text-sm font-semibold text-white">IoT Attendance</h1>
+              <p className="text-xs text-maroon-100">Liceo de Cagayan</p>
+            </div>
           </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
             {navigation.map((item) => {
-              // Only show Archive for admins
-              if (item.adminOnly && user?.role !== 'admin') return null;
+              if (item.superAdminOnly && !isSuperAdmin) return null;
+              if (item.adminOnly && !isAdmin) return null;
               
               return (
                 <Link
                   key={item.name}
                   to={item.href}
-                  className={`group flex items-center ${desktopSidebarCollapsed ? 'px-2 py-3 justify-center' : 'px-3 py-2.5'} text-sm font-medium rounded-lg transition-all duration-200 ${
+                  className={`group flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
                     isActive(item.href)
                       ? 'bg-white/20 text-white shadow-lg backdrop-blur-sm border border-white/10'
                       : 'text-maroon-100 hover:bg-white/10 hover:text-white hover:backdrop-blur-sm'
                   }`}
                   title={desktopSidebarCollapsed ? item.name : ''}
                 >
-                  <item.icon className={`${desktopSidebarCollapsed ? 'h-6 w-6' : 'mr-3 h-5 w-5'} flex-shrink-0`} />
-                  {!desktopSidebarCollapsed && item.name}
+                  <div className="w-5 h-5 flex-shrink-0">
+                    <item.icon className="h-5 w-5" />
+                  </div>
+                  <span className={`ml-3 overflow-hidden whitespace-nowrap transition-all duration-300 ease-in-out ${desktopSidebarCollapsed ? 'max-w-0 opacity-0' : 'max-w-xs opacity-100'}`}>
+                    {item.name}
+                  </span>
                 </Link>
               );
             })}
           </nav>
           
-          {/* Logo at bottom when collapsed */}
-          {desktopSidebarCollapsed && (
-            <div className="p-3 border-t border-maroon-200/30">
-              <div className="flex justify-center">
-                <img 
-                  className="h-8 w-8 rounded-md opacity-80 hover:opacity-100 transition-opacity duration-200" 
-                  src="/ldcu.png" 
-                  alt="Liceo de Cagayan University" 
-                  title="Liceo de Cagayan University"
-                />
-              </div>
+          {/* Logo at bottom - always visible */}
+          <div className="p-3 border-t border-maroon-200/30">
+            <div className="flex justify-center">
+              <img 
+                className="h-8 w-8 rounded-md opacity-80 hover:opacity-100 transition-opacity duration-200" 
+                src="/ldcu.png" 
+                alt="Liceo de Cagayan University" 
+                title="Liceo de Cagayan University"
+              />
             </div>
-          )}
+          </div>
         </div>
       </div>
 
@@ -233,7 +235,7 @@ function Layout() {
                   <ChevronDownIcon className="h-4 w-4" />
                 </button>
 
-                <div className={`absolute right-0 mt-2 w-48 rounded-lg shadow-lg ring-1 ring-white/10 transition-all duration-300 ease-in-out transform ${
+                <div className={`absolute right-0 mt-2 w-64 rounded-lg shadow-lg ring-1 ring-white/10 transition-all duration-300 ease-in-out transform ${
                   userMenuOpen 
                     ? 'opacity-100 translate-y-0 scale-100' 
                     : 'opacity-0 -translate-y-2 scale-95 pointer-events-none'
@@ -255,6 +257,14 @@ function Layout() {
                       <p className="text-maroon-100">{user?.email}</p>
                       <p className="text-xs text-maroon-200 capitalize">{user?.role}</p>
                     </div>
+                    <Link
+                      to="/settings"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="flex items-center w-full px-4 py-2 text-sm text-maroon-100 hover:bg-white/10 hover:text-white transition-colors duration-200"
+                    >
+                      <Cog6ToothIcon className="mr-3 h-4 w-4" />
+                      Settings
+                    </Link>
                     <button
                       onClick={() => {
                         setUserMenuOpen(false);
