@@ -8470,6 +8470,45 @@ namespace FutronicAttendanceSystem
             }
         }
 
+        private async Task<bool> PostBackendLockControlAsync(object payload)
+        {
+            try
+            {
+                string backendUrl = "http://172.72.100.126:5000/api/lock-control/request";
+                Console.WriteLine($"Sending to Backend API: {backendUrl}");
+
+                var json = JsonSerializer.Serialize(payload);
+                Console.WriteLine($"Payload: {json}");
+
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(10);
+
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var response = await client.PostAsync(backendUrl, content);
+
+                    Console.WriteLine($"Backend Response Status: {response.StatusCode}");
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var responseContent = await response.Content.ReadAsStringAsync();
+                        Console.WriteLine($"Backend Response: {responseContent}");
+                        return true;
+                    }
+
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"❌ Backend request failed: {response.StatusCode}");
+                    Console.WriteLine($"Error: {errorContent}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error sending backend lock control: {ex.Message}");
+                return false;
+            }
+        }
+
         private async Task RequestAnonymousLockControl(string location, string reason)
         {
             try
@@ -8593,44 +8632,17 @@ namespace FutronicAttendanceSystem
                 string lockAction = "open"; // Always open door for valid authentication
                 Console.WriteLine($"Lock Action: {lockAction} (Always open for valid authentication)");
 
-                // Auto-discover ESP32 on the network
-                string esp32Ip = await DiscoverESP32();
-                
-                if (string.IsNullOrEmpty(esp32Ip))
-                {
-                    Console.WriteLine("❌ No ESP32 device found on network");
-                    this.Invoke(new Action(() => {
-                        SetStatusText("❌ No lock controller found");
-                    }));
-                    return;
-                }
-
-                // Create payload for ESP32
-                string displayMessage = null;
-                if (!string.IsNullOrEmpty(action) && action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    displayMessage = "Early Arrival recorded. Scan inside at start.";
-                }
-                
-                // For door overrides, we need to bypass ESP32's session check by setting sessionActive=true
-                bool effectiveSessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
-                                             currentSessionState == AttendanceSessionState.ActiveForSignOut;
-                if (isDoorOverride)
-                {
-                    effectiveSessionActive = true; // Override: allow access regardless of session state
-                }
+                // Send lock command through backend API instead of directly to ESP32
+                Console.WriteLine("📡 Sending lock command through backend API...");
                 
                 var payload = new
                 {
-                    action = lockAction,
-                    user = $"{user.FirstName} {user.LastName}",
-                    userType = user.UserType?.ToLower(),
-                    sessionActive = effectiveSessionActive,
-                    message = displayMessage,
-                    overrideRequest = isDoorOverride
+                    user_id = userGuid,
+                    room_id = dbManager?.CurrentRoomId,
+                    action = currentSessionState == AttendanceSessionState.ActiveForStudents ? "check_in" : "check_out"
                 };
 
-                bool success = await PostLockPayloadAsync(esp32Ip, payload);
+                bool success = await PostBackendLockControlAsync(payload);
 
                 if (success)
                 {
