@@ -33,7 +33,7 @@ String discoveredServerIP = "";
 bool ipDiscovered = false;
 
 // Manual IP override (uncomment and set if auto-discovery fails)
-const char* manualServerIP = "172.72.100.126"; // Server PC Ethernet IP for lab demonstration
+const char* manualServerIP = "192.168.137.1"; // Server PC Hotspot IP - ESP32 connects via WiFi hotspot
 
 // Alternative: Use localhost if on same machine
 // const char* manualServerIP = "localhost"; // Alternative for testing

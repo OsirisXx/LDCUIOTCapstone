@@ -432,7 +432,7 @@ namespace FutronicAttendanceSystem
         private static readonly HttpClient http = new HttpClient();
 
         // Backend API base URL
-        private readonly string backendBaseUrl = "http://localhost:5000";
+        private readonly string backendBaseUrl = "http://172.72.100.126:5000";
 
         // Enrollment progress smoothing
         private System.Windows.Forms.Timer enrollProgressTimer;
@@ -8516,35 +8516,18 @@ namespace FutronicAttendanceSystem
                 Console.WriteLine("=== ANONYMOUS LOCK CONTROL START ===");
                 Console.WriteLine($"Location: {location}");
                 Console.WriteLine($"Reason: {reason}");
+                Console.WriteLine("📡 Sending anonymous lock command through backend API...");
 
-                string esp32Ip = await DiscoverESP32();
-
-                if (string.IsNullOrEmpty(esp32Ip))
-                {
-                    Console.WriteLine("❌ No ESP32 device found on network");
-                    if (!this.IsDisposed)
-                    {
-                        this.Invoke(new Action(() =>
-                        {
-                            SetStatusText("❌ Door override failed: no controller");
-                        }));
-                    }
-                    return;
-                }
-
+                // For anonymous/unknown users, we can't send user_id, so just trigger the ESP32 directly via backend
+                // This is a simplified approach - the backend will need to handle this case
                 var payload = new
                 {
-                    action = "open",
-                    // Use a privileged role to satisfy ESP32 policy checks
-                    user = "System Override",
-                    userType = "instructor",
-                    sessionActive = true,
-                    message = reason,
-                    location = location,
-                    overrideRequest = true
+                    room_id = dbManager?.CurrentRoomId,
+                    action = "check_in",
+                    anonymous = true
                 };
 
-                bool success = await PostLockPayloadAsync(esp32Ip, payload);
+                bool success = await PostBackendLockControlAsync(payload);
 
                 if (!this.IsDisposed)
                 {
@@ -8639,7 +8622,8 @@ namespace FutronicAttendanceSystem
                 {
                     user_id = userGuid,
                     room_id = dbManager?.CurrentRoomId,
-                    action = currentSessionState == AttendanceSessionState.ActiveForStudents ? "check_in" : "check_out"
+                    action = currentSessionState == AttendanceSessionState.ActiveForStudents ? "check_in" : "check_out",
+                    auth_method = "fingerprint"
                 };
 
                 bool success = await PostBackendLockControlAsync(payload);
@@ -9506,89 +9490,33 @@ namespace FutronicAttendanceSystem
                 }
                 
                 Console.WriteLine($"✅ User {user.FirstName} {user.LastName} ({user.UserType}) - access granted");
+                Console.WriteLine($"Lock Action: open (Always open for valid authentication)");
 
-                // For RFID scans, always open door for valid authentication
-                // Students need door access for both entering (sign-in) and leaving (sign-out)
-                Console.WriteLine($"RFID Lock Action: open (Always open for valid RFID authentication)");
-
-                // Auto-discover ESP32 on the network
-                string esp32Ip = await DiscoverESP32();
-                
-                if (string.IsNullOrEmpty(esp32Ip))
-                {
-                    Console.WriteLine("❌ No ESP32 device found on network");
-                    this.Invoke(new Action(() => {
-                        SetRfidStatusText("❌ No lock controller found");
-                    }));
-                    return;
-                }
-
-                string esp32Url = $"http://{esp32Ip}/api/rfid-scan";
-                Console.WriteLine($"Sending RFID scan to ESP32: {esp32Url}");
-
-                // Create payload for ESP32 RFID endpoint
-                string displayMessage = null;
-                if (!string.IsNullOrEmpty(action) && action.IndexOf("Early Arrival", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    displayMessage = "Early Arrival recorded. Scan inside at start.";
-                }
-                
-                // For door overrides, we need to bypass ESP32's session check by setting sessionActive=true
-                bool effectiveSessionActive = currentSessionState == AttendanceSessionState.ActiveForStudents || 
-                                             currentSessionState == AttendanceSessionState.ActiveForSignOut;
-                if (isDoorOverride)
-                {
-                    effectiveSessionActive = true; // Override: allow access regardless of session state
-                }
-                
+                // Send lock command through backend API
+                Console.WriteLine("📡 Sending lock command through backend API...");
                 var payload = new
                 {
-                    rfid_data = rfidData,
-                    user = $"{user.FirstName} {user.LastName}",
-                    userType = user.UserType?.ToLower(),
-                    sessionActive = effectiveSessionActive,
-                    message = displayMessage,
-                    overrideRequest = isDoorOverride
+                    user_id = userGuid,
+                    room_id = dbManager?.CurrentRoomId,
+                    action = currentSessionState == AttendanceSessionState.ActiveForStudents ? "check_in" : "check_out",
+                    auth_method = "rfid"
                 };
-
-                var json = JsonSerializer.Serialize(payload);
-                Console.WriteLine($"RFID Payload: {json}");
-
-                using (var client = new HttpClient())
+                
+                bool success = await PostBackendLockControlAsync(payload);
+                
+                if (success)
                 {
-                    client.Timeout = TimeSpan.FromSeconds(5);
-                    
-                    // Add API key to request header for security
-                    string apiKey = "0f5e4c2a1b3d4f6e8a9c0b1d2e3f4567a8b9c0d1e2f3456789abcdef01234567"; // Must match ESP32 API key
-                    client.DefaultRequestHeaders.Add("X-API-Key", apiKey);
-                    Console.WriteLine($"Using API Key: {apiKey.Substring(0, 10)}...");
-                    
-                    var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    
-                    var response = await client.PostAsync(esp32Url, content);
-                    
-                    Console.WriteLine($"ESP32 RFID Response Status: {response.StatusCode}");
-
-                    if (response.IsSuccessStatusCode)
-                    {
-                        var responseContent = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"ESP32 RFID Response: {responseContent}");
-                        
-                        Console.WriteLine("🔓 Door unlocked for RFID scan");
-                        this.Invoke(new Action(() => {
-                            SetRfidStatusText("🔓 Door unlocked");
-                        }));
-                    }
-                    else
-                    {
-                        var errorContent = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"❌ ESP32 RFID request failed: {response.StatusCode}");
-                        Console.WriteLine($"Error: {errorContent}");
-                        
-                        this.Invoke(new Action(() => {
-                            SetRfidStatusText($"❌ RFID lock control failed: {response.StatusCode}");
-                        }));
-                    }
+                    Console.WriteLine("🔓 Door unlocked");
+                    this.Invoke(new Action(() => {
+                        SetRfidStatusText("🔓 Door unlocked");
+                    }));
+                }
+                else
+                {
+                    Console.WriteLine($"❌ RFID lock control failed");
+                    this.Invoke(new Action(() => {
+                        SetRfidStatusText($"❌ RFID lock control failed");
+                    }));
                 }
                 
                 Console.WriteLine("=== RFID LOCK CONTROL REQUEST END ===");
@@ -13504,7 +13432,7 @@ namespace FutronicAttendanceSystem
                     var json = JsonSerializer.Serialize(payload);
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-                    var response = await client.PostAsync("http://localhost:5000/api/logs/rfid-scan", content);
+                    var response = await client.PostAsync("http://172.72.100.126:5000/api/logs/rfid-scan", content);
                     
                     if (response.IsSuccessStatusCode)
                     {
@@ -15317,6 +15245,51 @@ namespace FutronicAttendanceSystem
             {
                 Console.WriteLine($"⚠️ Failed to log door override access attempt: {logEx.Message}");
             }
+
+            // Also log attendance record to ATTENDANCELOGS table via backend API
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(userGuid) && dbManager != null)
+                    {
+                        var attendanceAction = currentSessionState == AttendanceSessionState.ActiveForStudents ? "check_in" : "check_out";
+                        
+                        using (var client = new HttpClient())
+                        {
+                            client.Timeout = TimeSpan.FromSeconds(5);
+                            
+                            var payload = new
+                            {
+                                user_id = userGuid,
+                                room_id = dbManager.CurrentRoomId,
+                                auth_method = isRfid ? "RFID" : "Fingerprint",
+                                location = normalizedLocation,
+                                action = attendanceAction
+                            };
+                            
+                            var json = JsonSerializer.Serialize(payload);
+                            var content = new StringContent(json, Encoding.UTF8, "application/json");
+                            
+                            string backendUrl = "http://172.72.100.126:5000/api/logs/attendance/log";
+                            var response = await client.PostAsync(backendUrl, content);
+                            
+                            if (response.IsSuccessStatusCode)
+                            {
+                                Console.WriteLine($"📝 Logged attendance to ATTENDANCELOGS: {userName} - {attendanceAction}");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"⚠️ Failed to log attendance: {response.StatusCode}");
+                            }
+                        }
+                    }
+                }
+                catch (Exception attendanceLogEx)
+                {
+                    Console.WriteLine($"⚠️ Failed to log attendance: {attendanceLogEx.Message}");
+                }
+            });
 
             _ = Task.Run(async () =>
             {

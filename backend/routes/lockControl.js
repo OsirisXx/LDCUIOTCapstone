@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { executeQuery, getSingleResult } = require('../config/database');
 const axios = require('axios');
+const { v4: uuidv4 } = require('uuid');
 
 const router = express.Router();
 
@@ -19,24 +20,24 @@ const findDeviceForRoom = async (roomId) => {
             return null;
         }
 
-        console.log('Looking for device in room:', room.ROOMNUMBER);
+        console.log('Looking for device in room:', room.ROOMNUMBER, 'with ROOMID:', roomId);
 
         // Find active device registered for this room
         const device = await getSingleResult(
-            `SELECT DEVICEID, IPADDRESS, PORT, LOCATION, ROOMNUMBER 
+            `SELECT DEVICEID, IPADDRESS, LOCATION 
              FROM DEVICES 
-             WHERE ROOMNUMBER = ? 
-             AND DEVICETYPE = 'ESP32_Lock_Controller' 
-             AND STATUS = 'online'
+             WHERE ROOMID = ? 
+             AND DEVICETYPE = 'Door_Controller' 
+             AND STATUS = 'Active'
              ORDER BY LASTSEEN DESC 
              LIMIT 1`,
-            [room.ROOMNUMBER]
+            [roomId]
         );
 
         if (device) {
             console.log('Found device:', device.DEVICEID, 'at', device.IPADDRESS);
         } else {
-            console.log('No device found for room number:', room.ROOMNUMBER);
+            console.log('No device found for room:', room.ROOMNUMBER);
         }
 
         return device;
@@ -47,12 +48,14 @@ const findDeviceForRoom = async (roomId) => {
 };
 
 // Helper function to send lock command to ESP32
-const sendLockCommand = async (deviceIp, action, userName) => {
+const sendLockCommand = async (deviceIp, action, userName, userType) => {
     try {
         const url = `http://${deviceIp}/api/lock-control`;
         const payload = {
             action: action, // 'open' or 'close'
-            user: userName
+            user: userName,
+            userType: userType || 'student',
+            sessionActive: true // Always allow access for authenticated users
         };
 
         console.log(`Sending lock command to ${url}:`, payload);
@@ -116,19 +119,13 @@ router.post('/request', [
 
         console.log('User:', user.first_name, user.last_name, '- Role:', user.role);
 
-        // Allow instructors, custodians, and deans to control the lock
-        if (!['instructor', 'custodian', 'dean'].includes(user.role)) {
-            console.log('User is not authorized for lock control');
-            return res.json({
-                message: 'Lock control only available for instructors, custodians, and deans',
-                lock_action: 'none',
-                user_role: user.role
-            });
-        }
+        // Allow all authenticated users to control the lock (students, instructors, custodians, deans)
+        console.log('User authorized for lock control - Role:', user.role);
 
-        // Simple toggle: check_in = open, check_out = close
-        const lockAction = action === 'check_in' ? 'open' : 'close';
-        console.log('Lock action determined:', lockAction);
+        // Always open the door for authenticated users (both check_in and check_out)
+        // Students need door access for both entering and leaving
+        const lockAction = 'open';
+        console.log('Lock action determined:', lockAction, '(always open for authenticated users)');
 
         // Find ESP32 device for this room
         const device = await findDeviceForRoom(room_id);
@@ -147,23 +144,28 @@ router.post('/request', [
 
         // Send lock command to ESP32
         const userName = `${user.first_name} ${user.last_name}`;
-        const lockCommandResult = await sendLockCommand(device.IPADDRESS, lockAction, userName);
+        const lockCommandResult = await sendLockCommand(device.IPADDRESS, lockAction, userName, user.role);
 
         console.log('Lock command result:', lockCommandResult);
 
-        // Log the lock control action
-        await executeQuery(
-            `INSERT INTO ACCESSLOGS (USERID, ROOMID, AUTHMETHOD, LOCATION, ACCESSTYPE, RESULT, REASON)
-             VALUES (?, ?, ?, 'outside', ?, ?, ?)`,
-            [
-                user_id,
-                room_id,
-                auth_method,
-                lockAction === 'open' ? 'door_unlock' : 'door_lock',
-                lockCommandResult.success ? 'success' : 'failed',
-                lockCommandResult.message
-            ]
-        );
+        // Log the lock control action (skip if logging fails to avoid blocking the response)
+        try {
+            const logId = uuidv4();
+            await executeQuery(
+                `INSERT INTO ACCESSLOGS (LOGID, USERID, ROOMID, AUTHMETHOD, LOCATION, ACCESSTYPE, RESULT, REASON)
+                 VALUES (?, ?, ?, ?, 'outside', 'door_override', ?, ?)`,
+                [
+                    logId,
+                    user_id,
+                    room_id,
+                    auth_method,
+                    lockCommandResult.success ? 'success' : 'denied',
+                    lockCommandResult.message
+                ]
+            );
+        } catch (logError) {
+            console.error('Failed to log access (non-critical):', logError.message);
+        }
 
         res.json({
             message: `Lock ${lockAction} command sent`,

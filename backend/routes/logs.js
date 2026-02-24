@@ -2,6 +2,7 @@ const express = require('express');
 const { executeQuery, getSingleResult } = require('../config/database');
 const { authenticateToken } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
+const { v4: uuidv4 } = require('uuid');
 
 const router = express.Router();
 
@@ -2098,6 +2099,92 @@ router.post('/early-arrival-scan', [
         console.error('❌ Early arrival scan error:', error);
         res.status(500).json({ 
             message: 'Internal server error', 
+            error: error.message 
+        });
+    }
+});
+
+// Log attendance from Futronic app (RFID/Fingerprint door override)
+router.post('/attendance/log', [
+    body('user_id').isUUID(),
+    body('room_id').isUUID(),
+    body('auth_method').isIn(['RFID', 'Fingerprint', 'rfid', 'fingerprint']),
+    body('location').isIn(['inside', 'outside']),
+    body('action').isIn(['check_in', 'check_out'])
+], async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { user_id, room_id, auth_method, location, action } = req.body;
+
+        console.log('📝 Attendance log request:', { user_id, room_id, auth_method, location, action });
+
+        // Get user info
+        const user = await getSingleResult(
+            'SELECT USERID, FIRSTNAME, LASTNAME, STUDENTID, USERTYPE FROM USERS WHERE USERID = ?',
+            [user_id]
+        );
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Get room info
+        const room = await getSingleResult(
+            'SELECT ROOMID, ROOMNUMBER, ROOMNAME FROM ROOMS WHERE ROOMID = ?',
+            [room_id]
+        );
+
+        if (!room) {
+            return res.status(404).json({ message: 'Room not found' });
+        }
+
+        // Insert attendance log
+        const attendanceId = uuidv4();
+        const normalizedAuthMethod = auth_method.charAt(0).toUpperCase() + auth_method.slice(1).toLowerCase();
+        
+        // Get current academic year and semester
+        const academicSettings = await executeQuery(
+            `SELECT SETTINGKEY, SETTINGVALUE FROM SETTINGS WHERE SETTINGKEY IN ('current_academic_year', 'current_semester')`
+        );
+        const academicYear = academicSettings.find(s => s.SETTINGKEY === 'current_academic_year')?.SETTINGVALUE || '2025-2026';
+        const semester = academicSettings.find(s => s.SETTINGKEY === 'current_semester')?.SETTINGVALUE || 'First Semester';
+        
+        // Create a dummy schedule ID for door override scans (no actual schedule)
+        const dummyScheduleId = '00000000-0000-0000-0000-000000000000';
+        
+        const scanType = action === 'check_in' ? 'time_in' : 'time_out';
+        const now = new Date();
+        const dateStr = now.toISOString().split('T')[0];
+        const timeStr = now.toTimeString().split(' ')[0];
+        
+        await executeQuery(
+            `INSERT INTO attendancerecords 
+             (ATTENDANCEID, USERID, SCHEDULEID, SCANTYPE, DATE, ${action === 'check_in' ? 'TIMEIN' : 'TimeOut'}, 
+              AUTHMETHOD, LOCATION, STATUS, ACTIONTYPE, ACADEMICYEAR, SEMESTER)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Present', 'Door Override', ?, ?)`,
+            [attendanceId, user_id, dummyScheduleId, scanType, dateStr, timeStr, 
+             normalizedAuthMethod, location, academicYear, semester]
+        );
+
+        console.log(`✅ Attendance logged: ${user.FIRSTNAME} ${user.LASTNAME} - ${scanType} at ${room.ROOMNUMBER}`);
+
+        res.json({
+            success: true,
+            message: 'Attendance logged successfully',
+            attendance_id: attendanceId,
+            user: `${user.FIRSTNAME} ${user.LASTNAME}`,
+            room: room.ROOMNUMBER,
+            action: action
+        });
+
+    } catch (error) {
+        console.error('❌ Error logging attendance:', error);
+        res.status(500).json({ 
+            message: 'Failed to log attendance', 
             error: error.message 
         });
     }
